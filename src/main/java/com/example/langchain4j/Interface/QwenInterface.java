@@ -1,8 +1,10 @@
 package com.example.langchain4j.Interface;
 
 import dev.langchain4j.service.MemoryId;
+import dev.langchain4j.service.Result;
 import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.UserMessage;
+import reactor.core.publisher.Flux;
 
 /**
  * @Description :声明式调用大模型
@@ -33,6 +35,15 @@ public interface QwenInterface {
     public UserPlanInfo chatByFunctionCalling(String userMessage);
 
     record UserPlanInfo(String UserId, String planName,String planInfo){}
+
+    //RAG 查询
+    @SystemMessage(fromResource = "static/systemPrompt/system-prompt.txt")
+    public Result<String> chatWithRag(String userMessage);
+
+    // 流式对话
+    @SystemMessage(fromResource = "static/systemPrompt/system-prompt.txt")
+    Flux<String> chatWithStream( String userMessage);
+
 
 
 
