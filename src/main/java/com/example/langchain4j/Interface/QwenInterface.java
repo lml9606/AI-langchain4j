@@ -15,12 +15,26 @@ public interface QwenInterface {
 
 
     //提示词模式
-    @SystemMessage(fromResource = "static/system-prompt.txt")
-    public String chat( String userMessage);
+    @SystemMessage(fromResource = "static/systemPrompt/system-prompt.txt")
+    public String chat(String userMessage);
 
     //userId区分用户
-    @SystemMessage(fromResource = "static/system-prompt.txt")
+    @SystemMessage(fromResource = "static/systemPrompt/system-prompt.txt")
+
     public String chatByMemoryId(@MemoryId String memoryId, @UserMessage String userMessage);
+
+
+    //根据提示词生成 优点灵活 缺点 通过提示词的方式告诉大模型生成 大模型有可能不按照提示词的方式生成 依赖模型
+    @SystemMessage(fromResource = "static/systemPrompt/system-prompt.txt")
+    public String chatByReport(String userMessage);
+
+    //根据function calling 生成 优点可靠性高，缺点有实体限制 大模型返回的会与实体不匹配 需要预设定 灵活度低
+    @SystemMessage(fromResource = "static/systemPrompt/system-prompt.txt")
+    public UserPlanInfo chatByFunctionCalling(String userMessage);
+
+    record UserPlanInfo(String UserId, String planName,String planInfo){}
+
+
 
 
 }

@@ -27,7 +27,7 @@ public class chatUserMessage {
         UserMessage userMessage = UserMessage.from(message);
         ChatResponse response = qwenChatModel.chat(userMessage);
         AiMessage message1 = response.aiMessage();
-//        log.info("大模型返回内容：{}", message1.text());
+        log.info("大模型返回内容：{}", message1.text());
         return message1.text();
     }
 }
