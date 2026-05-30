@@ -1,9 +1,11 @@
 package com.example.langchain4j.Interface;
 
+import com.example.langchain4j.service.PromptGeneratorService;
 import dev.langchain4j.service.MemoryId;
 import dev.langchain4j.service.Result;
 import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.UserMessage;
+import lombok.Value;
 import reactor.core.publisher.Flux;
 
 /**
@@ -22,8 +24,11 @@ public interface QwenInterface {
 
     //userId区分用户
     @SystemMessage(fromResource = "static/systemPrompt/system-prompt.txt")
-
     public String chatByMemoryId(@MemoryId String memoryId, @UserMessage String userMessage);
+
+    //userId区分用户
+    @SystemMessage(value = PromptGeneratorService.PROMPT_SYSTEM_MESSAGE)
+    public String chatByMemoryIdAndSys(@MemoryId String memoryId, @UserMessage String userMessage);
 
 
     //根据提示词生成 优点灵活 缺点 通过提示词的方式告诉大模型生成 大模型有可能不按照提示词的方式生成 依赖模型

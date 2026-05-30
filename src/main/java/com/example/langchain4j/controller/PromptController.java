@@ -3,6 +3,7 @@ package com.example.langchain4j.controller;
 import com.example.langchain4j.service.PromptGeneratorService;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -21,9 +22,12 @@ public class PromptController {
     @Resource
     private PromptGeneratorService promptGeneratorService;
 
-    @RequestMapping("/generate")
-    public String generate(String message){
-
-        return promptGeneratorService.generatePrompt(message);
+    //生成提示词
+    @GetMapping("/generate")
+    public String generate(String userId, String message) {
+        //1、生成提示词
+        String draft = promptGeneratorService.generatePrompt(userId, message);
+        return draft;
     }
+
 }
