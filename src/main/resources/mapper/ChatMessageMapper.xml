@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.mapper.ChatMessageMapper">
+
+    <!-- 结果映射：chat_message 表列名 -> ChatMessage 实体属性 -->
+    <resultMap id="BaseResultMap" type="com.example.langchain4j.entity.ChatMessage">
+        <id column="id" property="id" jdbcType="BIGINT"/>
+        <result column="user_id" property="userId" jdbcType="VARCHAR"/>
+        <result column="role" property="role" jdbcType="VARCHAR"/>
+        <result column="context" property="context" jdbcType="LONGVARCHAR"/>
+        <result column="message_order" property="messageOrder" jdbcType="INTEGER"/>
+        <result column="summarized" property="summarized" jdbcType="BOOLEAN"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, user_id, role, context, message_order, summarized, create_time
+    </sql>
+
+    <!-- 插入一条消息 -->
+    <insert id="insert" parameterType="com.example.entity.ChatMessage" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO chat_message (user_id, role, context, message_order, summarized, create_time)
+        VALUES (#{userId}, #{role}, #{context}, #{messageOrder}, #{summarized}, #{createTime})
+    </insert>
+
+    <!-- 根据ID查询 -->
+    <select id="selectById" parameterType="java.lang.Long" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM chat_message
+        WHERE id = #{id}
+    </select>
+
+    <!-- 查询某个用户的所有消息，按消息顺序升序排列 -->
+    <select id="selectByUserId" parameterType="java.lang.String" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM chat_message
+        WHERE user_id = #{userId}
+        ORDER BY message_order ASC
+    </select>
+
+    <!-- 根据用户ID和消息顺序查询单条 -->
+    <select id="selectByUserIdAndOrder" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM chat_message
+        WHERE user_id = #{userId} AND message_order = #{messageOrder}
+    </select>
+
+    <!-- 更新摘要标记 -->
+    <update id="updateSummarizedStatus">
+        UPDATE chat_message
+        SET summarized = #{summarized}
+        WHERE id = #{id}
+    </update>
+
+    <!-- 删除一条消息 -->
+    <delete id="deleteById" parameterType="java.lang.Long">
+        DELETE FROM chat_message WHERE id = #{id}
+    </delete>
+
+    <!-- 统计指定会话中未进行摘要的消息数量 -->
+    <select id="countBySessionIdAndSummarizedFalse" resultType="java.lang.Integer">
+        SELECT COUNT(*)
+        FROM chat_message
+        WHERE session_id = #{sessionId}
+          AND summarized = 0
+    </select>
+
+    <!-- 获取指定会话中未摘要的消息，按消息顺序降序排列，并限制数量 -->
+    <select id="getMessageBySummarizeOrderMessageOrderDesc" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM chat_message
+        WHERE session_id = #{sessionId}
+        AND summarized = FALSE
+        ORDER BY message_order ASC
+        <if test="limit != null">
+            LIMIT #{limit}
+        </if>
+    </select>
+</mapper>

@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.mapper.ChatSessionMapper">
+
+    <!-- 结果映射：chat_session 表列名 -> ChatSession 实体属性 -->
+    <resultMap id="BaseResultMap" type="com.example.langchain4j.entity.ChatSession">
+        <id column="id" property="id" jdbcType="BIGINT"/>
+        <result column="user_id" property="userId" jdbcType="VARCHAR"/>
+        <result column="message_count" property="messageCount" jdbcType="INTEGER"/>
+        <result column="summary" property="summary" jdbcType="LONGVARCHAR"/>
+        <result column="status" property="status" jdbcType="INTEGER"/>
+        <result column="summary_order" property="summaryOrder" jdbcType="INTEGER"/>
+        <result column="activity_time" property="activityTime" jdbcType="TIMESTAMP"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, user_id, message_count, summary, status, summary_order, activity_time, create_time
+    </sql>
+
+    <!-- 插入一条会话记录 -->
+    <insert id="insert" parameterType="com.example.entity.ChatSession" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO chat_session (user_id, message_count, summary, status, summary_order, activity_time, create_time)
+        VALUES (#{userId}, #{messageCount}, #{summary}, #{status}, #{summaryOrder}, #{activityTime}, #{createTime})
+    </insert>
+
+    <!-- 根据ID查询 -->
+    <select id="selectById" parameterType="java.lang.Long" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM chat_session
+        WHERE id = #{id}
+    </select>
+
+    <!-- 根据用户ID查询所有会话 -->
+    <select id="selectByUserId" parameterType="java.lang.String" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM chat_session
+        WHERE user_id = #{userId}
+        ORDER BY activity_time DESC
+    </select>
+
+    <!-- 更新会话摘要和状态 -->
+    <update id="updateSummary">
+        UPDATE chat_session
+        SET summary = #{summary},
+            status = #{status},
+            summary_order = #{summaryOrder},
+            activity_time = #{activityTime}
+        WHERE id = #{id}
+    </update>
+
+    <!-- 更新活动时间 -->
+    <update id="updateActivityTime">
+        UPDATE chat_session
+        SET activity_time = #{activityTime}
+        WHERE id = #{id}
+    </update>
+
+    <!-- 删除会话 -->
+    <delete id="deleteById" parameterType="java.lang.Long">
+        DELETE FROM chat_session WHERE id = #{id}
+    </delete>
+
+    <!-- 查询某个用户在 chat_message 表中的最大消息序号 -->
+    <select id="getMaxMessageOrder" parameterType="java.lang.String" resultType="java.lang.Integer">
+        SELECT COALESCE(MAX(message_order), 0)
+        FROM chat_message
+        WHERE user_id = #{userId}
+    </select>
+
+    <!-- 根据用户ID和会话状态查询单条会话 -->
+    <select id="selectByUserIdAndStatus" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM chat_session
+        WHERE user_id = #{userId}
+        AND status = #{status}
+        ORDER BY activity_time DESC
+        LIMIT 1
+    </select>
+
+    <!-- 根据ID更新会话的所有字段 -->
+    <update id="updateById" parameterType="com.example.entity.ChatSession">
+        UPDATE chat_session
+        SET user_id         = #{userId},
+            message_count   = #{messageCount},
+            summary         = #{summary},
+            status          = #{status},
+            summary_order   = #{summaryOrder},
+            activity_time   = #{activityTime},
+            create_time     = #{createTime}
+        WHERE id = #{id}
+    </update>
+</mapper>
