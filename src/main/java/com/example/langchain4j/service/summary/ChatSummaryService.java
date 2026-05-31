@@ -1,9 +1,12 @@
 package com.example.langchain4j.service.summary;
 
+import com.example.langchain4j.entity.ChatMessage;
 import com.example.langchain4j.service.persistence.ChatPersistenceService;
 import dev.langchain4j.model.chat.ChatModel;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
 
 /**
  * @Description :
@@ -33,7 +36,14 @@ public class ChatSummaryService {
     private void doSummarize(Long sessionId) {
 
 
+        //获取需要摘要的信息
+        List<ChatMessage> chatMessageList = persistenceService.getMessageBySummarize(sessionId, 10);
 
+        //todo 构建摘要prompt
+
+        //todo 调用模型进行摘要
+
+        //todo 更新摘要信息
 
 
     }
