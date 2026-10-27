@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    日志格式配置：核心改动是在默认格式上追加 [%X{traceId}]
+    —— 由 TraceIdFilter 写入 MDC，实现"一条请求一条链路"的日志追踪。
+-->
+<configuration>
+    <!-- 引入 Spring Boot 默认定义（CONSOLE_LOG_PATTERN 等） -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <!-- 控制台输出：时间 + 线程 + 级别 + Logger + traceId + 消息 -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%X{traceId:-}] - %msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>

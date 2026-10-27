@@ -4,6 +4,7 @@ import com.example.langchain4j.cache.RateLimiter;
 import com.example.langchain4j.cache.SessionLock;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
+import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.ChatRequest;
@@ -59,6 +60,7 @@ public class AgentService {
     private final ModelRegistry modelRegistry;
     private final Executor agentExecutor;
     private final AgentProperties properties;
+    private final AgentMetrics metrics;
 
     public AgentService(CompiledGraph<WorkflowState> agentGraph,
                         RateLimiter rateLimiter,
@@ -67,7 +69,8 @@ public class AgentService {
                         GraphExecutionMapper graphExecutionMapper,
                         ModelRegistry modelRegistry,
                         Executor agentExecutor,
-                        AgentProperties properties) {
+                        AgentProperties properties,
+                        AgentMetrics metrics) {
         this.agentGraph = agentGraph;
         this.rateLimiter = rateLimiter;
         this.sessionLock = sessionLock;
@@ -76,6 +79,7 @@ public class AgentService {
         this.modelRegistry = modelRegistry;
         this.agentExecutor = agentExecutor;
         this.properties = properties;
+        this.metrics = metrics;
     }
 
     /**
@@ -87,6 +91,7 @@ public class AgentService {
      */
     public ChatResponse chat(ChatRequest request) {
         long start = System.currentTimeMillis();
+        metrics.recordAgentRequest();
         // 1. 限流（超限抛 429）
         rateLimiter.checkAcquire(request.getUserId());
         // 2. 解析本轮模型（前端指定优先，空则默认；未知模型抛 400 快速失败）
@@ -98,6 +103,9 @@ public class AgentService {
         // 4. 会话锁内执行图（同会话串行，防 checkpoint 竞态）
         WorkflowState state = sessionLock.executeWithLock(conversationId,
                 () -> invokeGraph(conversationId, request.getQuery(), model));
+        if (state.fallback()) {
+            metrics.recordFallback();
+        }
         // 5. 助手消息持久化（结果已生成，落库失败降级不阻断响应）
         try {
             conversationService.saveMessage(conversationId, Message.ROLE_ASSISTANT,
@@ -173,6 +181,7 @@ public class AgentService {
     // ---- 内部实现 ----
 
     private WorkflowState invokeGraph(String conversationId, String query, String model) {
+        long start = System.currentTimeMillis();
         RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
         Map<String, Object> inputs = Map.of(WorkflowState.QUERY, query, WorkflowState.MODEL, model);
         long timeoutSeconds = Math.max(10, properties.getExecutionTimeoutSeconds());
@@ -201,6 +210,7 @@ public class AgentService {
                         query, null, "图执行未返回状态", null);
                 throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行未返回结果");
             }
+            metrics.recordGraphDuration(System.currentTimeMillis() - start);
             audit(conversationId, "workflow", GraphExecution.STATUS_SUCCESS,
                     query, state.result(), null, null);
             return state;

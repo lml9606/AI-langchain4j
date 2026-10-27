@@ -2,6 +2,7 @@ package com.example.langchain4j.llm;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
+import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.config.AgentProperties;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
@@ -42,15 +43,18 @@ public class LlmGateway {
     private final StringRedisTemplate redisTemplate;
     private final AgentProperties properties;
     private final Executor llmExecutor;
+    private final AgentMetrics metrics;
 
     public LlmGateway(ModelRegistry modelRegistry,
                       StringRedisTemplate redisTemplate,
                       AgentProperties properties,
-                      Executor agentExecutor) {
+                      Executor agentExecutor,
+                      AgentMetrics metrics) {
         this.modelRegistry = modelRegistry;
         this.redisTemplate = redisTemplate;
         this.properties = properties;
         this.llmExecutor = agentExecutor;
+        this.metrics = metrics;
     }
 
     /** 便捷方法：system + user 两段式（按模型名路由到对应 ChatModel） */
@@ -76,17 +80,21 @@ public class LlmGateway {
         }
         int maxRetries = Math.max(1, properties.getLlm().getMaxRetries());
         Exception lastFailure = null;
+        long start = System.currentTimeMillis();
 
         for (int attempt = 0; attempt < maxRetries; attempt++) {
             if (isCircuitOpen()) {
                 log.warn("[llm] circuit breaker open, fast fail");
+                metrics.recordLlmCall(modelName, false, System.currentTimeMillis() - start);
                 throw new BizException(ErrorCode.AGENT_LLM_UNAVAILABLE, "大模型服务熔断中，请稍后重试");
             }
             try {
                 LlmResult result = doGenerate(modelName, messages);
                 onSuccess();
+                metrics.recordLlmCall(modelName, true, System.currentTimeMillis() - start);
                 return result;
             } catch (BizException e) {
+                metrics.recordLlmCall(modelName, false, System.currentTimeMillis() - start);
                 throw e;
             } catch (Exception e) {
                 lastFailure = e;
@@ -97,6 +105,7 @@ public class LlmGateway {
             }
         }
         onFailure();
+        metrics.recordLlmCall(modelName, false, System.currentTimeMillis() - start);
         log.error("[llm] all attempts failed, model={}", modelName, lastFailure);
         throw new BizException(ErrorCode.AGENT_LLM_UNAVAILABLE, "大模型服务暂时不可用", lastFailure);
     }
@@ -160,6 +169,7 @@ public class LlmGateway {
 
     /** 调用成功：清零连续失败计数（熔断器回到 closed 状态） */
     private void onSuccess() {
+        metrics.setCircuitOpen(false);
         try {
             redisTemplate.delete(CB_FAILURES_KEY);
         } catch (Exception ignored) {
@@ -179,6 +189,7 @@ public class LlmGateway {
                 redisTemplate.opsForValue().set(CB_OPEN_KEY, "1",
                         Duration.ofSeconds(properties.getLlm().getCircuitBreaker().getCooldownSeconds()));
                 redisTemplate.delete(CB_FAILURES_KEY);
+                metrics.setCircuitOpen(true);
                 log.warn("[llm] circuit breaker OPEN, cooldown {}s",
                         properties.getLlm().getCircuitBreaker().getCooldownSeconds());
             }

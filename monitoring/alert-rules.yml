@@ -1,0 +1,64 @@
+# 告警规则（挂载到容器 /etc/prometheus/alert-rules.yml）
+# 指标名与 AgentMetrics / AsyncConfig 中注册的名称一一对应
+groups:
+  - name: ai-agent
+    rules:
+      # 1. LLM 熔断器打开（最紧急：下游模型连续失败，所有调用被快速失败）
+      - alert: LlmCircuitOpen
+        expr: llm_circuit_open == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LLM 熔断器已打开"
+          description: "大模型连续失败达到阈值，熔断器打开，所有模型调用被快速失败，请检查模型服务与 API Key"
+
+      # 2. LLM 错误率过高（失败次数/总调用次数 > 5%）
+      - alert: LlmHighFailureRate
+        expr: rate(llm_calls_total{outcome="failure"}[5m]) / rate(llm_calls_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM 调用失败率超过 5%"
+          description: "近 5 分钟 LLM 调用失败率 {{ $value | humanizePercentage }}，可能即将触发熔断"
+
+      # 3. 图执行线程池队列饱和度 > 80%（快打满，任务将被拒绝）
+      - alert: ExecutorQueueSaturated
+        expr: agent_executor_queue_depth / agent_executor_queue_capacity > 0.8
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "图执行线程池队列饱和度超过 80%"
+          description: "队列中等待任务数 {{ $value }}，接近容量上限，请检查 LLM 响应耗时或扩容"
+
+      # 4. 限流拒绝速率异常（超过 0.1 次/秒，说明有流量被打限）
+      - alert: RateLimitedSpike
+        expr: rate(agent_rate_limited_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "限流拒绝速率异常"
+          description: "近 5 分钟限流拒绝 {{ $value }}/s，可能有突发流量或恶意请求"
+
+      # 5. 兜底触发异常（1 分钟内兜底次数 > 5，说明系统频繁走异常路径）
+      - alert: FallbackFrequent
+        expr: rate(agent_fallback_total[1m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "兜底触发过于频繁"
+          description: "近 1 分钟兜底 {{ $value }}/s，图频繁走异常路径，请排查 LLM/检索/校验环节"
+
+      # 6. 接口 P95 响应超过 30s（actuator 自带指标）
+      - alert: SlowResponses
+        expr: histogram_quantile(0.95, rate(http_server_requests_seconds_bucket[5m])) > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "接口 P95 响应超过 30 秒"
+          description: "HTTP 接口 P95 耗时 {{ $value }}s，请检查 LLM 调用与图执行耗时"

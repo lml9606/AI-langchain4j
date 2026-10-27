@@ -1,6 +1,7 @@
-# 本地开发环境：PostgreSQL 16（含 pgvector）+ Redis 7
+# 本地开发环境：PostgreSQL 16（含 pgvector）+ Redis 7 + 监控栈（Prometheus/Grafana/Alertmanager）
 # 启动：docker compose up -d
 # 停止：docker compose down（加 -v 同时删除数据卷）
+# 监控访问：Prometheus http://localhost:9090，Grafana http://localhost:3000（admin/admin），Alertmanager http://localhost:9093
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -36,6 +37,43 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # ---- 监控栈：采集应用 /actuator/prometheus 指标 + 告警 ----
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: ai-agent-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: ai-agent-alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: ai-agent-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      # 预置 Prometheus 数据源（首次启动自动配置，无需手工添加）
+      - ./monitoring/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+
 volumes:
   pg_data:
   redis_data:
+  prometheus_data:
+  grafana_data:

@@ -28,8 +28,9 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
 
 /**
  * 图装配器：节点注册 + 边连接 + 条件路由 + 编译。
- * 图结构：START → entry(守卫) → intent(意图) → retrieval(检索) → generate(生成)
+ * 图结构：START → entry(守卫) ⇢ intent(意图) → retrieval(检索) → generate(生成)
  *        → validate(校验) ⇄（有限重试环）→ fallback(兜底) → finalize(收尾) → END
+ *        （entry 校验失败 → 直接 fallback，跳过 intent，省一次 LLM 调用）
  * <p>
  * 说明：
  * <ul>
@@ -101,7 +102,10 @@ public class AgentGraphBuilder {
             graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
 
             graph.addEdge(START, NODE_ENTRY);
-            graph.addEdge(NODE_ENTRY, NODE_INTENT);
+            // 守卫路由：输入校验失败（空输入）直接兜底，跳过意图识别，省一次 LLM 调用
+            graph.addConditionalEdges(NODE_ENTRY, edge_async(router.afterEntry()),
+                    Map.of(Router.TO_INTENT, NODE_INTENT,
+                            Router.TO_FALLBACK, NODE_FALLBACK));
             // 意图路由：有效意图 → 检索；reject/异常 → 兜底
             graph.addConditionalEdges(NODE_INTENT, edge_async(router.afterIntent()),
                     Map.of(Router.TO_RETRIEVAL, NODE_RETRIEVAL,

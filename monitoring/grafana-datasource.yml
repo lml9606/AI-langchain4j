@@ -1,0 +1,12 @@
+# Grafana 数据源预置（挂载到 /etc/grafana/provisioning/datasources/）
+# 首次启动自动添加 Prometheus 数据源，无需在 UI 手工配置
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # 同 compose 网络内用服务名访问
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

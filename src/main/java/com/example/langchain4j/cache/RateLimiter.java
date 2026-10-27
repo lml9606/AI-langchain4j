@@ -2,6 +2,7 @@ package com.example.langchain4j.cache;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
+import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.config.AgentProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -34,11 +35,13 @@ public class RateLimiter {
 
     private final StringRedisTemplate redisTemplate;
     private final AgentProperties properties;
+    private final AgentMetrics metrics;
     private final DefaultRedisScript<Long> incrScript;
 
-    public RateLimiter(StringRedisTemplate redisTemplate, AgentProperties properties) {
+    public RateLimiter(StringRedisTemplate redisTemplate, AgentProperties properties, AgentMetrics metrics) {
         this.redisTemplate = redisTemplate;
         this.properties = properties;
+        this.metrics = metrics;
         this.incrScript = new DefaultRedisScript<>(INCR_SCRIPT, Long.class);
     }
 
@@ -58,6 +61,7 @@ public class RateLimiter {
                     String.valueOf(WINDOW.getSeconds()));
             boolean allowed = count == null || count <= properties.getRateLimit().getPermitsPerMinute();
             if (!allowed) {
+                metrics.recordRateLimited();
                 log.warn("[rate-limit] rejected, key={}, count={}", key, count);
             }
             return allowed;

@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class Router {
 
+    public static final String TO_INTENT = "to_intent";
     public static final String TO_RETRIEVAL = "to_retrieval";
     public static final String TO_GENERATE = "to_generate";
     public static final String TO_VALIDATE = "to_validate";
@@ -23,6 +24,16 @@ public class Router {
 
     public Router(AgentProperties properties) {
         this.properties = properties;
+    }
+
+    /** 守卫节点后：输入校验失败（空输入）直接兜底，跳过意图识别，省一次 LLM 调用 */
+    public EdgeAction<WorkflowState> afterEntry() {
+        return state -> {
+            if (state.error() != null && !state.error().isBlank()) {
+                return TO_FALLBACK;
+            }
+            return TO_INTENT;
+        };
     }
 
     /** 意图节点后：有效意图走检索，reject/异常走兜底 */

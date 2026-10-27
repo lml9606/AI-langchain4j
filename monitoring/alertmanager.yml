@@ -1,0 +1,30 @@
+# Alertmanager 配置（挂载到容器 /etc/alertmanager/alertmanager.yml）
+# 访问：http://localhost:9093
+route:
+  receiver: 'default'
+  group_by: ['alertname']
+  # 同组告警聚合：10s 内同组告警合并为一条通知
+  group_wait: 10s
+  group_interval: 10s
+  # 重复通知间隔：同一告警未恢复时 1 小时再提醒一次
+  repeat_interval: 1h
+
+receivers:
+  - name: 'default'
+    # TODO 生产环境替换为真实通知渠道，常用示例：
+    #
+    # 企业微信/钉钉 webhook：
+    #   webhook_configs:
+    #     - url: 'https://oapi.dingtalk.com/robot/send?access_token=xxx'
+    #       send_resolved: true
+    #
+    # 邮箱：
+    #   email_configs:
+    #     - to: 'oncall@example.com'
+    #       from: 'alertmanager@example.com'
+    #       smarthost: 'smtp.example.com:587'
+    #       auth_username: 'alertmanager@example.com'
+    #       auth_password: 'xxx'
+    webhook_configs:
+      - url: 'http://localhost:8080/dummy-alert-hook'
+        send_resolved: true

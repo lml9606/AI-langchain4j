@@ -206,6 +206,19 @@
             <version>${redisson.version}</version>
         </dependency>
 
+        <!-- 可观测性：Actuator 健康检查/指标端点（health/prometheus），
+             配合 micrometer-registry-prometheus 输出 Prometheus 格式指标；
+             版本由 Boot parent 统一管理 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <!-- Micrometer Prometheus 注册器：业务指标（LLM 调用/限流/线程池）经此暴露到 /actuator/prometheus -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
         <!-- Jsoup：HTML 解析（历史遗留依赖，当前框架代码暂未使用，保留备用） -->
         <dependency>
             <groupId>org.jsoup</groupId>

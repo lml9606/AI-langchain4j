@@ -1,0 +1,28 @@
+# Prometheus 采集与告警配置（挂载到容器 /etc/prometheus/prometheus.yml）
+# 访问：http://localhost:9090
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# 告警推送目标：同 compose 网络内的 alertmanager 服务
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+# 告警规则文件（与 prometheus.yml 一起挂载）
+rule_files:
+  - '/etc/prometheus/alert-rules.yml'
+
+scrape_configs:
+  # 应用指标：actuator 的 prometheus 端点
+  # host.docker.internal = 宿主机（Docker Desktop for Windows/Mac 内置支持）
+  - job_name: 'ai-agent'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['host.docker.internal:8081']
+
+  # Prometheus 自身监控
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
