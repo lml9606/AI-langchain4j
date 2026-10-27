@@ -34,6 +34,7 @@
         <mybatis-starter.version>3.0.5</mybatis-starter.version>
         <pgvector.version>0.1.6</pgvector.version>
         <postgresql.version>42.7.7</postgresql.version>
+        <redisson.version>3.49.0</redisson.version>
     </properties>
     <dependencyManagement>
         <dependencies>
@@ -130,6 +131,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <!-- Redisson 分布式锁（RLock + Watchdog 看门狗自动续期，替代手写 SETNX） -->
+        <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson-spring-boot-starter</artifactId>
+            <version>${redisson.version}</version>
         </dependency>
         <dependency>
             <groupId>org.jsoup</groupId>

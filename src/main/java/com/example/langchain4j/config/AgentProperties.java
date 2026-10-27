@@ -24,13 +24,10 @@ public class AgentProperties {
     /** 限流配置 */
     private RateLimit rateLimit = new RateLimit();
 
-    /** 会话锁配置 */
-    private SessionLock sessionLock = new SessionLock();
-
     /** 校验重试上限（图内重试环次数） */
     private int maxValidateRetries = 3;
 
-    /** 单次图执行整体超时（秒，需小于会话锁 TTL，保证锁不外泄） */
+    /** 单次图执行整体超时（秒）；超时后任务在后台继续跑完，会话锁由 Redisson Watchdog 自动续期兜底 */
     private int executionTimeoutSeconds = 240;
 
     @Data
@@ -65,10 +62,5 @@ public class AgentProperties {
         private boolean enabled = true;
         private int permitsPerMinute = 60;
         private boolean failOpen = true;
-    }
-
-    @Data
-    public static class SessionLock {
-        private long timeoutMs = 120_000L;
     }
 }

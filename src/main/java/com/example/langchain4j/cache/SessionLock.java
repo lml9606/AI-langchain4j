@@ -2,25 +2,23 @@ package com.example.langchain4j.cache;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
-import com.example.langchain4j.config.AgentProperties;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
-import java.util.List;
-import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
- * Redis 分布式会话锁（SETNX + TTL）。
+ * Redis 分布式会话锁（Redisson RLock 实现）。
  * <p>
  * 用途：同一会话（thread_id）同一时刻只允许一个图执行，防止 checkpoint 并发写竞态。
  * <ul>
- *   <li>锁带 TTL 自动过期，防止持有者崩溃后死锁；</li>
- *   <li>释放时校验锁值（Lua 原子），只删除自己持有的锁；</li>
- *   <li>Redis 故障时 fail-open（不锁直接执行），可用性优先。</li>
+ *   <li>Watchdog 看门狗：默认租约 30s 自动续期，任务跑多久锁持多久（线程崩溃时最多 30s 后自动释放），
+ *       根治手写 SETNX 固定 TTL 的“锁先于任务过期”竞态；</li>
+ *   <li>可重入：同一线程重复加锁不会死锁；</li>
+ *   <li>Redis 故障时 fail-open（不锁直接执行），可用性优先；</li>
+ *   <li>释放前校验 isHeldByCurrentThread，避免误释放他人锁。</li>
  * </ul>
  */
 @Slf4j
@@ -29,19 +27,10 @@ public class SessionLock {
 
     private static final String KEY_PREFIX = "agent:lock:";
 
-    /** Lua：值匹配才删除（原子，防误删他人锁） */
-    private static final String RELEASE_SCRIPT =
-            "if redis.call('GET', KEYS[1]) == ARGV[1] then " +
-            "return redis.call('DEL', KEYS[1]) else return 0 end";
+    private final RedissonClient redissonClient;
 
-    private final StringRedisTemplate redisTemplate;
-    private final AgentProperties properties;
-    private final DefaultRedisScript<Long> releaseScript;
-
-    public SessionLock(StringRedisTemplate redisTemplate, AgentProperties properties) {
-        this.redisTemplate = redisTemplate;
-        this.properties = properties;
-        this.releaseScript = new DefaultRedisScript<>(RELEASE_SCRIPT, Long.class);
+    public SessionLock(RedissonClient redissonClient) {
+        this.redissonClient = redissonClient;
     }
 
     /**
@@ -52,56 +41,51 @@ public class SessionLock {
      * @return 任务返回值
      */
     public <T> T executeWithLock(String lockKey, Supplier<T> action) {
-        String key = KEY_PREFIX + sanitize(lockKey);
-        String token = UUID.randomUUID().toString();
-        boolean locked = false;
+        RLock lock = redissonClient.getLock(KEY_PREFIX + sanitize(lockKey));
+        boolean locked = tryAcquire(lock);
+        if (!locked) {
+            log.warn("[session-lock] lock conflict, key={}", lock.getName());
+            throw new BizException(ErrorCode.AGENT_SESSION_LOCKED);
+        }
         try {
-            locked = acquire(key, token);
-            if (!locked) {
-                log.warn("[session-lock] lock conflict, key={}", key);
-                throw new BizException(ErrorCode.AGENT_SESSION_LOCKED);
-            }
             return action.get();
         } finally {
-            if (locked) {
-                releaseQuietly(key, token);
-            }
+            releaseQuietly(lock);
         }
     }
 
     /**
      * 手动加锁（供流式场景跨迭代持锁）：
-     * 调用方在 close() 时释放锁；若异常中断未 close，锁由 TTL 自动过期兜底。
+     * 调用方在 close() 时释放锁；若异常中断未 close，锁由 Watchdog 在持锁线程消亡后自动过期兜底。
      */
     public AutoCloseable lock(String lockKey) {
-        String key = KEY_PREFIX + sanitize(lockKey);
-        String token = UUID.randomUUID().toString();
-        boolean locked = acquire(key, token);
+        RLock lock = redissonClient.getLock(KEY_PREFIX + sanitize(lockKey));
+        boolean locked = tryAcquire(lock);
         if (!locked) {
-            log.warn("[session-lock] lock conflict, key={}", key);
+            log.warn("[session-lock] lock conflict, key={}", lock.getName());
             throw new BizException(ErrorCode.AGENT_SESSION_LOCKED);
         }
-        return () -> releaseQuietly(key, token);
+        return () -> releaseQuietly(lock);
     }
 
-    private boolean acquire(String key, String token) {
+    /** 立即尝试加锁（不等待）：成功返回 true；锁冲突返回 false；Redis 故障 fail-open 返回 true */
+    private boolean tryAcquire(RLock lock) {
         try {
-            long timeoutMs = Math.max(1000L, properties.getSessionLock().getTimeoutMs());
-            Boolean ok = redisTemplate.opsForValue()
-                    .setIfAbsent(key, token, Duration.ofMillis(timeoutMs));
-            return Boolean.TRUE.equals(ok);
+            return lock.tryLock();
         } catch (Exception e) {
             // fail-open：Redis 不可用时降级为无锁执行，不阻塞业务
-            log.warn("[session-lock] redis unavailable, fail-open: {}", e.getMessage());
+            log.warn("[session-lock] redisson unavailable, fail-open: {}", e.getMessage());
             return true;
         }
     }
 
-    private void releaseQuietly(String key, String token) {
+    private void releaseQuietly(RLock lock) {
         try {
-            redisTemplate.execute(releaseScript, List.of(key), token);
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         } catch (Exception e) {
-            log.warn("[session-lock] release failed (lock will expire by TTL): {}", e.getMessage());
+            log.warn("[session-lock] release failed (watchdog will expire it): {}", e.getMessage());
         }
     }
 
