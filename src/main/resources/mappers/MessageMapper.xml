@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.MessageMapper">
+
+    <resultMap id="MessageMap" type="com.example.langchain4j.repository.entity.Message">
+        <id property="id" column="id"/>
+        <result property="conversationId" column="conversation_id"/>
+        <result property="role" column="role"/>
+        <result property="content" column="content"/>
+        <result property="model" column="model"/>
+        <result property="tokenUsage" column="token_usage"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.Message"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_message (conversation_id, role, content, model, token_usage)
+        VALUES (#{conversationId}, #{role}, #{content}, #{model}, #{tokenUsage})
+    </insert>
+
+    <select id="selectByConversationId" resultMap="MessageMap">
+        SELECT id, conversation_id, role, content, model, token_usage, created_at
+        FROM ai_message
+        WHERE conversation_id = #{conversationId}
+        ORDER BY id ASC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectRecentByConversationId" resultMap="MessageMap">
+        SELECT id, conversation_id, role, content, model, token_usage, created_at
+        FROM (
+            SELECT * FROM ai_message
+            WHERE conversation_id = #{conversationId}
+            ORDER BY id DESC
+            LIMIT #{limit}
+        ) recent
+        ORDER BY id ASC
+    </select>
+</mapper>

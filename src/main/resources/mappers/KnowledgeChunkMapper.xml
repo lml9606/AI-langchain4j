@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.KnowledgeChunkMapper">
+
+    <resultMap id="KnowledgeChunkMap" type="com.example.langchain4j.repository.entity.KnowledgeChunk">
+        <id property="id" column="id"/>
+        <result property="content" column="content"/>
+        <result property="embedding" column="embedding"
+                typeHandler="com.example.langchain4j.common.util.VectorTypeHandler"/>
+        <result property="metadata" column="metadata"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.KnowledgeChunk"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_knowledge_chunk (content, embedding, metadata)
+        VALUES (
+            #{content},
+            #{embedding, typeHandler=com.example.langchain4j.common.util.VectorTypeHandler}::vector,
+            CAST(#{metadata} AS jsonb)
+        )
+    </insert>
+
+    <select id="searchSimilar" resultMap="KnowledgeChunkMap">
+        SELECT id, content, embedding, metadata::text AS metadata, created_at
+        FROM ai_knowledge_chunk
+        WHERE embedding IS NOT NULL
+          AND (1 - (embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.common.util.VectorTypeHandler})) &gt;= #{minScore}
+        ORDER BY embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.common.util.VectorTypeHandler}
+        LIMIT #{topK}
+    </select>
+
+    <select id="count" resultType="long">
+        SELECT count(*) FROM ai_knowledge_chunk
+    </select>
+</mapper>
