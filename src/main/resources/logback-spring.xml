@@ -8,7 +8,7 @@
     <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
 
     <!-- 控制台输出：时间 + 线程 + 级别 + Logger + traceId + 消息 -->
-    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <appender name="CONSOLE" class="ch.qos. .core.ConsoleAppender">
         <encoder>
             <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%X{traceId:-}] - %msg%n</pattern>
             <charset>UTF-8</charset>

@@ -62,11 +62,15 @@ public class WorkflowState extends AgentState {
     }
 
     public int retryCount() {
+        // 步骤1：取出原始值（缺省 0）
         Object v = value(RETRY_COUNT).orElse(0);
+        // 步骤2：防御类型漂移 —— 非数字（如被写成字符串）一律回退 0
         return v instanceof Number number ? number.intValue() : 0;
     }
 
     public boolean validated() {
+        // 步骤1：取出原始值（缺省 false）
+        // 步骤2：统一转为字符串后解析布尔，兼容 "true"/布尔/数字等写法
         return Boolean.parseBoolean(String.valueOf(value(VALIDATED).orElse(false)));
     }
 
@@ -75,15 +79,21 @@ public class WorkflowState extends AgentState {
     }
 
     public boolean fallback() {
+        // 步骤1：取出原始值（缺省 false）
+        // 步骤2：统一转为字符串后解析布尔，防御类型漂移
         return Boolean.parseBoolean(String.valueOf(value(FALLBACK).orElse(false)));
     }
 
     public Integer tokenUsage() {
+        // 步骤1：取出原始值（可为空）
         Object v = value(TOKEN_USAGE).orElse(null);
+        // 步骤2：防御类型漂移 —— 非数字一律返回 null
         return v instanceof Number number ? number.intValue() : null;
     }
 
     public boolean done() {
+        // 步骤1：取出原始值（缺省 false）
+        // 步骤2：统一转为字符串后解析布尔，防御类型漂移
         return Boolean.parseBoolean(String.valueOf(value(DONE).orElse(false)));
     }
 }

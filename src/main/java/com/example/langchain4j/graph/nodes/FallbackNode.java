@@ -17,8 +17,10 @@ public class FallbackNode implements NodeAction<WorkflowState> {
 
     @Override
     public Map<String, Object> apply(WorkflowState state) {
+        // 步骤1：记录进入兜底的原因（错误信息 + 当前意图），便于问题排查
         log.warn("[fallback] entering fallback, error={}, intent={}",
                 state.error(), state.intent());
+        // 步骤2：返回增量更新：固定降级答案 + 兜底标记 + 保留原始错误信息
         return Map.of(
                 WorkflowState.RESULT, PromptTemplates.FALLBACK_ANSWER,
                 WorkflowState.FALLBACK, true,

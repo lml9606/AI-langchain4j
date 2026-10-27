@@ -21,20 +21,24 @@ public class EntryNode implements NodeAction<WorkflowState> {
 
     @Override
     public Map<String, Object> apply(WorkflowState state) {
+        // 步骤1：读取用户输入
         String query = state.query();
+        // 步骤2：空输入校验 —— 直接标记错误（走兜底），不进入 LLM，并归零重试计数
         if (query == null || query.isBlank()) {
             log.warn("[entry] empty query, route to fallback");
             return Map.of(
                     WorkflowState.ERROR, "输入内容为空",
                     WorkflowState.RETRY_COUNT, 0);
         }
-        // 防御性清洗：截断超长输入，剔除控制字符（防注入/防滥用）
+        // 步骤3：防御性清洗 —— 剔除控制字符（防 prompt 注入/防滥用）并去首尾空白
         String cleaned = query
                 .replaceAll("[\\p{Cntrl}]", " ")
                 .trim();
+        // 步骤4：超长截断 —— 超出上限的部分直接丢弃，保护下游 token 开销
         if (cleaned.length() > MAX_QUERY_LENGTH) {
             cleaned = cleaned.substring(0, MAX_QUERY_LENGTH);
         }
+        // 步骤5：返回增量更新：清洗后的输入 + 重试计数归零 + 清空错误标记
         return Map.of(
                 WorkflowState.QUERY, cleaned,
                 WorkflowState.RETRY_COUNT, 0,

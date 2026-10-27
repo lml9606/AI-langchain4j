@@ -12,6 +12,8 @@ import org.springframework.stereotype.Component;
 public class WorkflowStateSerializer extends JacksonStateSerializer<WorkflowState> {
 
     public WorkflowStateSerializer() {
+        // 步骤1：指定状态工厂（反序列化时用 Map 重建 WorkflowState）
+        // 步骤2：使用 JsonUtil 的独立 ObjectMapper 副本，避免污染全局 JsonUtil 实例
         super(WorkflowState::new, JsonUtil.copyMapper());
     }
 }

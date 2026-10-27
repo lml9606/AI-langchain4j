@@ -91,8 +91,10 @@ public class AgentGraphBuilder {
      * @return 编译后的可执行图
      */
     public CompiledGraph<WorkflowState> build(BaseCheckpointSaver checkpointSaver) {
+        // 步骤1：以状态序列化器创建图（checkpoint 落库/恢复时依赖它做序列化）
         StateGraph<WorkflowState> graph = new StateGraph<>(stateSerializer);
         try {
+            // 步骤2：注册全部节点（异步包装，节点内部各自负责防御与日志）
             graph.addNode(NODE_ENTRY, node_async(entryNode));
             graph.addNode(NODE_INTENT, node_async(intentNode));
             graph.addNode(NODE_RETRIEVAL, node_async(retrievalNode));
@@ -101,6 +103,7 @@ public class AgentGraphBuilder {
             graph.addNode(NODE_FALLBACK, node_async(fallbackNode));
             graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
 
+            // 步骤3：连接主链路 START → entry → intent → retrieval → generate → validate → finalize → END
             graph.addEdge(START, NODE_ENTRY);
             // 守卫路由：输入校验失败（空输入）直接兜底，跳过意图识别，省一次 LLM 调用
             graph.addConditionalEdges(NODE_ENTRY, edge_async(router.afterEntry()),
@@ -120,15 +123,17 @@ public class AgentGraphBuilder {
                     Map.of(Router.TO_FINALIZE, NODE_FINALIZE,
                             Router.TO_GENERATE, NODE_GENERATE,
                             Router.TO_FALLBACK, NODE_FALLBACK));
+            // 兜底与收尾直连：任何异常路径最终都汇入 finalize 后结束
             graph.addEdge(NODE_FALLBACK, NODE_FINALIZE);
             graph.addEdge(NODE_FINALIZE, END);
 
+            // 步骤4：编译图 —— 挂 checkpoint 持久化器 + 递归上限（防路由死循环）
             return graph.compile(CompileConfig.builder()
                     .checkpointSaver(checkpointSaver)
                     .recursionLimit(recursionLimit())
                     .build());
         } catch (GraphStateException e) {
-            // 图装配失败是启动期配置错误，fail-fast 暴露问题
+            // 步骤5：图装配失败是启动期配置错误，fail-fast 暴露问题
             throw new IllegalStateException("Agent graph assembly failed", e);
         }
     }
@@ -142,7 +147,9 @@ public class AgentGraphBuilder {
      * 若路由配置错误导致死循环，达到上限后框架会抛异常中断，而非无限跑。
      */
     private int recursionLimit() {
+        // 步骤1：读取配置的校验重试上限，至少为 1（防御配置为 0/负数）
         int maxRetries = Math.max(1, properties.getMaxValidateRetries());
+        // 步骤2：环内 2 个节点（validate + generate）× 重试次数 + 10 个线性节点余量
         return maxRetries * 2 + 10;
     }
 }

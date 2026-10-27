@@ -24,12 +24,15 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
 
     @Override
     public Map<String, Object> apply(WorkflowState state) {
+        // 步骤1：记录开始时间，用于统计检索耗时
         long start = System.currentTimeMillis();
-        // VectorSearchService 内部已 fail-open：任何异常降级为空列表
+        // 步骤2：向量检索 + 拼装上下文（VectorSearchService 内部已 fail-open：任何异常降级为空列表）
         String context = vectorSearchService.buildContext(
                 vectorSearchService.search(state.query()));
+        // 步骤3：记录检索耗时与上下文长度，便于观测检索质量
         log.info("[retrieval] cost={}ms, contextLength={}",
                 System.currentTimeMillis() - start, context.length());
+        // 步骤4：返回增量更新：检索上下文写入状态，供生成节点使用
         return Map.of(WorkflowState.CONTEXT, context);
     }
 }
