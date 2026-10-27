@@ -38,33 +38,39 @@ public class LlmGateway {
     private static final String CB_OPEN_KEY = "agent:llm:cb:open";
     private static final long BASE_BACKOFF_MS = 1000L;
 
-    private final ChatModel chatModel;
+    private final ModelRegistry modelRegistry;
     private final StringRedisTemplate redisTemplate;
     private final AgentProperties properties;
     private final Executor llmExecutor;
 
-    public LlmGateway(ChatModel chatModel,
+    public LlmGateway(ModelRegistry modelRegistry,
                       StringRedisTemplate redisTemplate,
                       AgentProperties properties,
                       Executor agentExecutor) {
-        this.chatModel = chatModel;
+        this.modelRegistry = modelRegistry;
         this.redisTemplate = redisTemplate;
         this.properties = properties;
         this.llmExecutor = agentExecutor;
     }
 
-    /** 便捷方法：system + user 两段式 */
-    public LlmResult generate(String systemPrompt, String userPrompt) {
+    /** 便捷方法：system + user 两段式（按模型名路由到对应 ChatModel） */
+    public LlmResult generate(String modelName, String systemPrompt, String userPrompt) {
         List<ChatMessage> messages = new ArrayList<>(2);
         if (systemPrompt != null && !systemPrompt.isBlank()) {
             messages.add(SystemMessage.from(systemPrompt));
         }
         messages.add(UserMessage.from(userPrompt == null ? "" : userPrompt));
-        return generate(messages);
+        return generate(modelName, messages);
     }
 
-    /** 带重试熔断的完整调用 */
-    public LlmResult generate(List<ChatMessage> messages) {
+    /**
+     * 带重试熔断的完整调用。
+     * <p>
+     * 执行流程：每轮重试前先查熔断状态 → 单次调用（带超时）→
+     * 成功则清零失败计数；失败则退避等待后重试；重试耗尽则计一次失败，
+     * 达到阈值时打开熔断（冷却期内所有调用直接快速失败，不再触碰模型）。
+     */
+    public LlmResult generate(String modelName, List<ChatMessage> messages) {
         if (messages == null || messages.isEmpty()) {
             throw new BizException(ErrorCode.BAD_REQUEST, "LLM 调用消息不能为空");
         }
@@ -77,26 +83,27 @@ public class LlmGateway {
                 throw new BizException(ErrorCode.AGENT_LLM_UNAVAILABLE, "大模型服务熔断中，请稍后重试");
             }
             try {
-                LlmResult result = doGenerate(messages);
+                LlmResult result = doGenerate(modelName, messages);
                 onSuccess();
                 return result;
             } catch (BizException e) {
                 throw e;
             } catch (Exception e) {
                 lastFailure = e;
-                log.warn("[llm] attempt {}/{} failed: {}", attempt + 1, maxRetries, e.getMessage());
+                log.warn("[llm] attempt {}/{} failed, model={}: {}", attempt + 1, maxRetries, modelName, e.getMessage());
                 if (attempt < maxRetries - 1) {
                     sleepWithBackoff(attempt);
                 }
             }
         }
         onFailure();
-        log.error("[llm] all attempts failed", lastFailure);
+        log.error("[llm] all attempts failed, model={}", modelName, lastFailure);
         throw new BizException(ErrorCode.AGENT_LLM_UNAVAILABLE, "大模型服务暂时不可用", lastFailure);
     }
 
-    /** 单次调用 + 超时控制 */
-    private LlmResult doGenerate(List<ChatMessage> messages) throws Exception {
+    /** 单次调用 + 超时控制（按模型名从注册表取 ChatModel） */
+    private LlmResult doGenerate(String modelName, List<ChatMessage> messages) throws Exception {
+        ChatModel chatModel = modelRegistry.chatModel(modelName);
         long timeoutSeconds = Math.max(1, properties.getLlm().getTimeoutSeconds());
         CompletableFuture<ChatResponse> future = CompletableFuture.supplyAsync(
                 () -> chatModel.chat(messages), llmExecutor);
@@ -119,6 +126,11 @@ public class LlmGateway {
         }
     }
 
+    /**
+     * 指数退避：第 N 次重试等待 BASE_BACKOFF_MS * 2^N 毫秒，
+     * 即 1s/2s/4s...，再加 0~500ms 随机抖动 ——
+     * 避免多线程/多实例同时重试产生“惊群”冲击下游。
+     */
     private void sleepWithBackoff(int attempt) {
         long jitter = ThreadLocalRandom.current().nextLong(500);
         long sleepMs = BASE_BACKOFF_MS * (1L << attempt) + jitter;
@@ -130,6 +142,12 @@ public class LlmGateway {
     }
 
     // ---- 熔断器（Redis 计数实现，故障时 fail-open） ----
+    //
+    // 三态说明（本实现为简化版，无 half-open 状态）：
+    //  closed  ：失败计数低于阈值，正常调用；
+    //  open    ：失败计数达到阈值 → 写入带 TTL 的 CB_OPEN_KEY，冷却期内 isCircuitOpen()=true 直接快速失败；
+    //  冷却后  ：CB_OPEN_KEY 自动过期，熔断器自动回到 closed（下次调用成功即清空失败计数）。
+    // 选择 Redis 计数而非本地计数器：多实例部署时失败次数全局共享，熔断判定一致。
 
     private boolean isCircuitOpen() {
         try {
@@ -140,6 +158,7 @@ public class LlmGateway {
         }
     }
 
+    /** 调用成功：清零连续失败计数（熔断器回到 closed 状态） */
     private void onSuccess() {
         try {
             redisTemplate.delete(CB_FAILURES_KEY);
@@ -148,6 +167,11 @@ public class LlmGateway {
         }
     }
 
+    /**
+     * 调用失败（重试全部耗尽后触发一次）：失败计数 +1；
+     * 达到阈值时写入带冷却 TTL 的“熔断打开”标记并重置计数，
+     * 冷却期内所有调用在 isCircuitOpen() 处快速失败。
+     */
     private void onFailure() {
         try {
             Long failures = redisTemplate.opsForValue().increment(CB_FAILURES_KEY);

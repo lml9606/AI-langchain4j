@@ -21,6 +21,9 @@ public class AgentProperties {
     /** LLM 网关防护配置 */
     private Llm llm = new Llm();
 
+    /** DeepSeek 官方 API 配置（OpenAI 兼容协议） */
+    private Deepseek deepseek = new Deepseek();
+
     /** 限流配置 */
     private RateLimit rateLimit = new RateLimit();
 
@@ -48,7 +51,21 @@ public class AgentProperties {
     public static class Llm {
         private int timeoutSeconds = 60;
         private int maxRetries = 3;
+        /** 默认模型名：前端不传 model 参数时使用；必须是注册表已注册的模型 */
+        private String defaultModel = "deepseek-flash";
+        /** 千问模型名（与 langchain4j.community.dashscope.chat-model.model-name 保持一致） */
+        private String qwenModelName = "qwen-max";
         private CircuitBreaker circuitBreaker = new CircuitBreaker();
+    }
+
+    @Data
+    public static class Deepseek {
+        /** DeepSeek 官方 API Key（环境变量 DEEPSEEK_API_KEY 注入，避免入库） */
+        private String apiKey = "";
+        /** OpenAI 兼容协议接入地址 */
+        private String baseUrl = "https://api.deepseek.com";
+        /** 模型名：deepseek-flash（V4.1-Flash，性价比）；需要更强推理可换 deepseek-v4-pro */
+        private String modelName = "deepseek-flash";
     }
 
     @Data

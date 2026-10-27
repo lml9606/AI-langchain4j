@@ -39,7 +39,8 @@ public class IntentNode implements NodeAction<WorkflowState> {
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         try {
-            String raw = llmGateway.generate(PromptTemplates.INTENT_CLASSIFY_SYSTEM, state.query()).text();
+            String raw = llmGateway.generate(state.model(),
+                    PromptTemplates.INTENT_CLASSIFY_SYSTEM, state.query()).text();
             JsonNode node = JsonUtil.fromJson(extractJson(raw), JsonNode.class);
             String intent = node != null && node.hasNonNull("intent")
                     ? node.get("intent").asText().trim()

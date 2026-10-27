@@ -17,6 +17,10 @@ public class ChatRequest {
     /** 会话 ID；为空时由服务端新建会话 */
     private String conversationId;
 
+    /** 指定模型名（如 qwen-max / deepseek-flash）；为空时使用服务端默认模型 */
+    @Size(max = 64, message = "model 长度不能超过 64")
+    private String model;
+
     @NotBlank(message = "userId 不能为空")
     @Size(max = 64, message = "userId 长度不能超过 64")
     private String userId;

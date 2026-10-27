@@ -129,7 +129,14 @@ public class AgentGraphBuilder {
         }
     }
 
-    /** 递归上限：正常路径 + 校验重试环上限 + 安全余量，防御路由死循环 */
+    /**
+     * 递归上限：正常路径 + 校验重试环上限 + 安全余量，防御路由死循环。
+     * <p>
+     * 推导：最坏情况下 validate→generate 环最多跑 maxRetries 次，
+     * 每次环占 2 个节点（validate + generate），乘 2 后加固定余量 10
+     * 覆盖 entry/intent/retrieval/fallback/finalize 等线性节点开销。
+     * 若路由配置错误导致死循环，达到上限后框架会抛异常中断，而非无限跑。
+     */
     private int recursionLimit() {
         int maxRetries = Math.max(1, properties.getMaxValidateRetries());
         return maxRetries * 2 + 10;

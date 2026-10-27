@@ -1,7 +1,27 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+    ============================================================================
+    ai-code-helper — LangGraph4j 生产级 Agent 框架
+
+    技术栈总览：
+      - Spring Boot 3.5.3（Web + JDBC + Validation + Data Redis）
+      - LangGraph4j 1.8.27（LTS 长期支持系列最新补丁）—— 图编排引擎
+      - LangChain4j 1.19.0 系 —— LLM 统一接入（DashScope 百炼 qwen + DeepSeek 官方 API）
+      - PostgreSQL 16 + pgvector —— 业务数据 + 向量检索 + Checkpoint 持久化
+      - MyBatis 3.0.5 —— 持久层（手写 SQL，禁用 Hibernate/JPA）
+      - Redis 7（Lettuce + Redisson）—— 限流 / 熔断计数 / 缓存 / 分布式锁
+
+    版本选型说明：
+      - langgraph4j 官方声明 1.8.x 为 LTS 流（1.9.x 非 LTS，不选）；
+      - langgraph4j 1.8.27 的集成模块硬性要求 langchain4j 1.19.0（parent POM 属性）；
+      - langchain4j 的 spring-boot-starter / dashscope / mcp / reactor 模块走 beta 发布流
+        （1.19.0-beta29），其中 dashscope starter 内部依赖核心 1.19.0 稳定版，版本兼容。
+    ============================================================================
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
+    <!-- Spring Boot 父 POM：统一管理 Boot 系依赖版本（web/jdbc/redis/validation 等无需显式写版本号） -->
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
@@ -12,7 +32,7 @@
     <artifactId>ai-code-helper</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>ai-code-helper</name>
-    <description>ai-code-helper</description>
+    <description>LangGraph4j 生产级 Agent 框架（图编排 + PG/pgvector + Redis + MyBatis）</description>
     <url/>
     <licenses>
         <license/>
@@ -26,19 +46,33 @@
         <tag/>
         <url/>
     </scm>
+
+    <!-- ==================== 版本属性：所有第三方版本集中管理，升级只改此处 ==================== -->
     <properties>
+        <!-- 编译/运行 JDK 版本（本机需 JDK 21；compiler 插件 target 17 见 build 节说明） -->
         <java.version>21</java.version>
+        <!-- langchain4j 核心稳定版：与 langgraph4j 1.8.27 LTS 集成模块硬性匹配 -->
         <langchain4j.version>1.19.0</langchain4j.version>
+        <!-- langchain4j beta 模块流：spring-boot-starter / dashscope / mcp / reactor 仅发布 beta 版本；
+             beta29 内部依赖核心 1.19.0 稳定版，两者兼容 -->
         <langchain4j.beta.version>1.19.0-beta29</langchain4j.beta.version>
+        <!-- LangGraph4j LTS 系列最新补丁；1.9.x 非 LTS 不选 -->
         <langgraph4j.version>1.8.27</langgraph4j.version>
+        <!-- MyBatis Spring Boot Starter：3.0.x 适配 Spring Boot 3.5（4.x 需 Boot 4，不选） -->
         <mybatis-starter.version>3.0.5</mybatis-starter.version>
+        <!-- pgvector 官方 Java 库：提供 PGvector 类型，配合自定义 VectorTypeHandler 映射 float[] -->
         <pgvector.version>0.1.6</pgvector.version>
+        <!-- PostgreSQL JDBC 驱动：与 langgraph4j-postgres-saver 自带版本保持一致，避免驱动冲突 -->
         <postgresql.version>42.7.7</postgresql.version>
+        <!-- Redisson：分布式锁（RLock + Watchdog），其 3.49.0 POM 声明 spring-boot 3.5.0 与项目匹配 -->
         <redisson.version>3.49.0</redisson.version>
     </properties>
+
+    <!-- ==================== 依赖管理：BOM 导入，统一各模块版本 ==================== -->
     <dependencyManagement>
         <dependencies>
-            <!-- LangGraph4j LTS 系列 BOM，统一管理各模块版本 -->
+            <!-- LangGraph4j LTS 系列 BOM：统一管理 langgraph4j-core/-langchain4j/-postgres-saver 等模块版本，
+                 下方各 langgraph4j 依赖实际可省略 version（此处保留显式声明便于阅读） -->
             <dependency>
                 <groupId>org.bsc.langgraph4j</groupId>
                 <artifactId>langgraph4j-bom</artifactId>
@@ -48,115 +82,155 @@
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <!-- ==================== 依赖清单 ==================== -->
     <dependencies>
+        <!-- Web 层：REST 接口 + SseEmitter 流式输出（版本由 Boot parent 管理） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
+        <!-- JDBC 层：HikariCP 连接池 + DataSource（业务数据源与 PostgresSaver checkpoint 共用同一连接池） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
+        <!-- 参数校验：@Valid / @NotBlank 等注解触发 Bean Validation（Controller/DTO 入参防御） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
-        <!-- LangChain4j：核心 + Spring Boot 集成（与 langgraph4j 1.8.27 LTS 匹配的稳定版） -->
+
+        <!-- LangChain4j 核心：ChatModel/EmbeddingModel 等统一模型抽象；
+             1.19.0 为 langgraph4j 1.8.27 集成模块硬性要求的匹配版本 -->
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j</artifactId>
             <version>${langchain4j.version}</version>
         </dependency>
+        <!-- LangChain4j Spring Boot 集成：自动装配 ChatModel/EmbeddingModel Bean；
+             注意：spring-boot-starter 只走 beta 发布流（无 1.19.0 正式版），故用 beta29 -->
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-spring-boot-starter</artifactId>
             <version>${langchain4j.beta.version}</version>
         </dependency>
+        <!-- 阿里云百炼 DashScope 接入：qwen-max（对话/流式）+ text-embedding-v3（1024 维向量）；
+             bean 名：qwenChatModel / qwenStreamingChatModel / qwenEmbeddingModel，属性前缀 langchain4j.community.dashscope -->
         <!-- https://mvnrepository.com/artifact/dev.langchain4j/langchain4j-community-dashscope-spring-boot-starter -->
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-community-dashscope-spring-boot-starter</artifactId>
             <version>${langchain4j.beta.version}</version>
         </dependency>
+        <!-- DeepSeek 官方 API 接入（OpenAI 兼容协议，走 api.deepseek.com）：
+             仅引入 open-ai 核心模块，Bean 在 DeepSeekConfig 手动装配（不引入 open-ai starter，避免自动装配出多余 Bean）；
+             模型名 deepseek-flash（V4.1-Flash），与 qwenChatModel 一起注册进 ModelRegistry 支持多模型路由 -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-open-ai</artifactId>
+            <version>${langchain4j.version}</version>
+        </dependency>
+        <!-- MCP（Model Context Protocol）客户端：预留模型工具调用能力（当前 demo 未启用） -->
         <!-- https://mvnrepository.com/artifact/dev.langchain4j/langchain4j-mcp -->
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-mcp</artifactId>
             <version>${langchain4j.beta.version}</version>
         </dependency>
+        <!-- Reactor 响应式支持：langgraph4j 流式（AsyncGenerator）与 SSE 场景的底层依赖 -->
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-reactor</artifactId>
             <version>${langchain4j.beta.version}</version>
         </dependency>
-        <!-- LangGraph4j：核心引擎 + langchain4j 集成 + AgentExecutor + PG Checkpoint 持久化 -->
+
+        <!-- LangGraph4j 核心引擎：StateGraph 图构建 / CompiledGraph 执行 / Checkpoint 机制 -->
         <dependency>
             <groupId>org.bsc.langgraph4j</groupId>
             <artifactId>langgraph4j-core</artifactId>
             <version>${langgraph4j.version}</version>
         </dependency>
+        <!-- LangGraph4j 与 LangChain4j 集成适配：图内直接使用 langchain4j 模型抽象 -->
         <dependency>
             <groupId>org.bsc.langgraph4j</groupId>
             <artifactId>langgraph4j-langchain4j</artifactId>
             <version>${langgraph4j.version}</version>
         </dependency>
+        <!-- Agent 执行器：ReAct 风格 Agent 循环（预留，当前 demo 用自定义图流程） -->
         <dependency>
             <groupId>org.bsc.langgraph4j</groupId>
             <artifactId>langgraph4j-agent-executor</artifactId>
             <version>${langgraph4j.version}</version>
         </dependency>
+        <!-- Checkpoint 持久化：PostgresSaver 将图状态落 PG（三表自动创建），支持断点恢复；
+             注意：其传递依赖自带 postgresql 驱动，与下方显式声明版本保持一致 -->
         <dependency>
             <groupId>org.bsc.langgraph4j</groupId>
             <artifactId>langgraph4j-postgres-saver</artifactId>
             <version>${langgraph4j.version}</version>
         </dependency>
-        <!-- PostgreSQL + pgvector（业务数据源，MyBatis 持久化）；
-             驱动需 compile 可见：VectorTypeHandler 编译期引用 PGvector（其父类在驱动 jar 中） -->
+
+        <!-- PostgreSQL JDBC 驱动：业务数据源 + pgvector 扩展；
+             必须 compile 可见（不能设 runtime）：VectorTypeHandler 编译期引用 PGvector，其父类 PGobject 位于驱动 jar 中 -->
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <version>${postgresql.version}</version>
         </dependency>
+        <!-- pgvector 官方 Java 库：PGvector 类型，配合 MyBatis VectorTypeHandler 完成 float[] ↔ vector 映射 -->
         <dependency>
             <groupId>com.pgvector</groupId>
             <artifactId>pgvector</artifactId>
             <version>${pgvector.version}</version>
         </dependency>
-        <!-- MyBatis Spring Boot Starter（替换裸 mybatis，手写 SQL，禁用 Hibernate/JPA） -->
+
+        <!-- MyBatis：手写 SQL 持久层（替换裸 mybatis 3.5.7 + JPA；3.0.x 适配 Boot 3.5，4.x 需 Boot 4 不选） -->
         <dependency>
             <groupId>org.mybatis.spring.boot</groupId>
             <artifactId>mybatis-spring-boot-starter</artifactId>
             <version>${mybatis-starter.version}</version>
         </dependency>
+
+        <!-- Redis 客户端（Lettuce，Boot 自动装配 StringRedisTemplate）：
+             用途：限流计数 / LLM 熔断计数 / 轻量缓存（均为 fail-open 策略） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
-        <!-- Redisson 分布式锁（RLock + Watchdog 看门狗自动续期，替代手写 SETNX） -->
+        <!-- Redisson 分布式锁：RLock + Watchdog 看门狗自动续期（默认租约 30s），
+             根治手写 SETNX 固定 TTL 的“锁先于任务过期”竞态；用于会话级图执行串行化 -->
         <dependency>
             <groupId>org.redisson</groupId>
             <artifactId>redisson-spring-boot-starter</artifactId>
             <version>${redisson.version}</version>
         </dependency>
+
+        <!-- Jsoup：HTML 解析（历史遗留依赖，当前框架代码暂未使用，保留备用） -->
         <dependency>
             <groupId>org.jsoup</groupId>
             <artifactId>jsoup</artifactId>
             <version>1.20.1</version>
         </dependency>
+        <!-- Lombok：编译期注解处理器（@Data/@Slf4j），不进入运行时 classpath -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <optional>true</optional>
         </dependency>
+        <!-- 测试依赖暂未启用：当前为纯框架搭建，无测试代码；后续补充单测时放开 -->
         <!--        <dependency>-->
-<!--            <groupId>org.springframework.boot</groupId>-->
-<!--            <artifactId>spring-boot-starter-test</artifactId>-->
-<!--            <scope>test</scope>-->
-<!--        </dependency>-->
+        <!--            <groupId>org.springframework.boot</groupId>-->
+        <!--            <artifactId>spring-boot-starter-test</artifactId>-->
+        <!--            <scope>test</scope>-->
+        <!--        </dependency>-->
     </dependencies>
 
+    <!-- ==================== 构建配置 ==================== -->
     <build>
         <plugins>
+            <!-- 编译插件：显式注册 lombok 注解处理器（Boot parent 自带该插件，此处仅补 lombok 处理）；
+                 source/target 17 为 Boot 3.5 最低要求字节码（运行 JDK 21 向下兼容） -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
@@ -171,6 +245,7 @@
                     <target>17</target>
                 </configuration>
             </plugin>
+            <!-- Boot 打包插件：生成可执行 fat jar；排除 lombok（编译期已处理，无需打入运行时） -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

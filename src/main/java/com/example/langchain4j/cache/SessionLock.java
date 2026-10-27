@@ -68,7 +68,16 @@ public class SessionLock {
         return () -> releaseQuietly(lock);
     }
 
-    /** 立即尝试加锁（不等待）：成功返回 true；锁冲突返回 false；Redis 故障 fail-open 返回 true */
+    /**
+     * 立即尝试加锁（不等待）：成功返回 true；锁冲突返回 false；Redis 故障 fail-open 返回 true。
+     * <p>
+     * tryLock() 不带参数的两个隐式行为：
+     * <ul>
+     *   <li>waitTime=0：不排队等待，抢不到立即返回 false（避免请求堆积）；</li>
+     *   <li>leaseTime=-1（默认）：启用 Watchdog 看门狗，锁默认租约 30s，
+     *       持锁期间由后台线程自动续期，锁的寿命跟随任务时长而不是固定 TTL。</li>
+     * </ul>
+     */
     private boolean tryAcquire(RLock lock) {
         try {
             return lock.tryLock();

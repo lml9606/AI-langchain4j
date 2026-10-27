@@ -10,6 +10,7 @@ import com.example.langchain4j.dto.ChatRequest;
 import com.example.langchain4j.dto.ChatResponse;
 import com.example.langchain4j.event.GraphEvent;
 import com.example.langchain4j.graph.state.WorkflowState;
+import com.example.langchain4j.llm.ModelRegistry;
 import com.example.langchain4j.repository.entity.GraphExecution;
 import com.example.langchain4j.repository.entity.Message;
 import com.example.langchain4j.repository.mapper.GraphExecutionMapper;
@@ -29,6 +30,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -54,6 +56,7 @@ public class AgentService {
     private final SessionLock sessionLock;
     private final ConversationService conversationService;
     private final GraphExecutionMapper graphExecutionMapper;
+    private final ModelRegistry modelRegistry;
     private final Executor agentExecutor;
     private final AgentProperties properties;
 
@@ -62,6 +65,7 @@ public class AgentService {
                         SessionLock sessionLock,
                         ConversationService conversationService,
                         GraphExecutionMapper graphExecutionMapper,
+                        ModelRegistry modelRegistry,
                         Executor agentExecutor,
                         AgentProperties properties) {
         this.agentGraph = agentGraph;
@@ -69,26 +73,35 @@ public class AgentService {
         this.sessionLock = sessionLock;
         this.conversationService = conversationService;
         this.graphExecutionMapper = graphExecutionMapper;
+        this.modelRegistry = modelRegistry;
         this.agentExecutor = agentExecutor;
         this.properties = properties;
     }
 
-    /** 同步对话：invoke 全图，返回最终结果 */
+    /**
+     * 同步对话：invoke 全图，返回最终结果。
+     * <p>
+     * 关键设计：conversationId 同时作为 LangGraph 的 threadId ——
+     * checkpoint 按 threadId 隔离存储，因此“一个会话 = 一条 checkpoint 历史”，
+     * 会话续聊/断点恢复时直接用会话 ID 找回对应的图执行状态。
+     */
     public ChatResponse chat(ChatRequest request) {
         long start = System.currentTimeMillis();
         // 1. 限流（超限抛 429）
         rateLimiter.checkAcquire(request.getUserId());
-        // 2. 会话初始化 + 用户消息持久化（失败抛 DB_UNAVAILABLE，快速失败）
+        // 2. 解析本轮模型（前端指定优先，空则默认；未知模型抛 400 快速失败）
+        String model = modelRegistry.resolve(request.getModel());
+        // 3. 会话初始化 + 用户消息持久化（失败抛 DB_UNAVAILABLE，快速失败）
         String conversationId = conversationService.ensureConversation(
                 request.getUserId(), request.getConversationId(), request.getQuery());
-        conversationService.saveMessage(conversationId, Message.ROLE_USER, request.getQuery(), null, null);
-        // 3. 会话锁内执行图（同会话串行，防 checkpoint 竞态）
+        conversationService.saveMessage(conversationId, Message.ROLE_USER, request.getQuery(), model, null);
+        // 4. 会话锁内执行图（同会话串行，防 checkpoint 竞态）
         WorkflowState state = sessionLock.executeWithLock(conversationId,
-                () -> invokeGraph(conversationId, request.getQuery()));
-        // 4. 助手消息持久化（结果已生成，落库失败降级不阻断响应）
+                () -> invokeGraph(conversationId, request.getQuery(), model));
+        // 5. 助手消息持久化（结果已生成，落库失败降级不阻断响应）
         try {
             conversationService.saveMessage(conversationId, Message.ROLE_ASSISTANT,
-                    state.result(), null, state.tokenUsage());
+                    state.result(), model, state.tokenUsage());
         } catch (Exception e) {
             log.warn("[agent] save assistant message failed, degrade: {}", e.getMessage());
         }
@@ -98,22 +111,38 @@ public class AgentService {
 
     /**
      * 流式对话：返回图执行事件流（含节点级审计），由 controller 转 SSE。
-     * 锁在流消费期间持有，消费完成自动释放；若连接中断未消费完，锁由 TTL 兜底。
+     * <p>
+     * 与同步版的两点差异：
+     * <ul>
+     *   <li>agentGraph.stream 返回懒迭代器：真正开始拉取节点输出、执行图，
+     *       时机在 controller 异步线程消费迭代器时，而不是本方法内；</li>
+     *   <li>锁的生命周期跨整个流消费过程：迭代器耗尽（hasNext=false）才释放锁；
+     *       若客户端断连导致迭代器未被消费完，锁由 Redisson Watchdog 在持锁线程消亡后兜底释放。</li>
+     * </ul>
      */
     public Iterable<GraphEvent> stream(ChatRequest request) {
         rateLimiter.checkAcquire(request.getUserId());
+        String model = modelRegistry.resolve(request.getModel());
         String conversationId = conversationService.ensureConversation(
                 request.getUserId(), request.getConversationId(), request.getQuery());
-        conversationService.saveMessage(conversationId, Message.ROLE_USER, request.getQuery(), null, null);
+        conversationService.saveMessage(conversationId, Message.ROLE_USER, request.getQuery(), model, null);
 
+        // 手动加锁：锁不在这里释放，而是随返回的迭代器一起交给消费方，消费结束再释放
         AutoCloseable lock = sessionLock.lock(conversationId);
         RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
-        Map<String, Object> inputs = Map.of(WorkflowState.QUERY, request.getQuery());
+        Map<String, Object> inputs = Map.of(WorkflowState.QUERY, request.getQuery(), WorkflowState.MODEL, model);
         var nodeOutputs = agentGraph.stream(inputs, config);
         return () -> new AuditingEventIterator(conversationId, nodeOutputs.iterator(), lock);
     }
 
-    /** 断点恢复：从最近 checkpoint 继续执行（checkpoint 不存在时返回 empty） */
+    /**
+     * 断点恢复：从最近 checkpoint 继续执行（checkpoint 不存在时返回 empty）。
+     * <p>
+     * 机制说明：LangGraph 的 checkpoint 是按“超级步骤”在节点执行边界落盘的
+     * （每执行完一个节点保存一次完整状态）。invoke(GraphInput.resume()) 会加载
+     * 该 threadId 最近一次 checkpoint，从上次中断的节点之后继续跑，
+     * 而不是重头执行 —— 因此恢复耗时远小于重跑全图。
+     */
     public Optional<WorkflowState> resume(String conversationId) {
         RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
         try {
@@ -124,7 +153,13 @@ public class AgentService {
         }
     }
 
-    /** 查询 checkpoint 快照（不存在或 saver 故障返回 empty） */
+    /**
+     * 查询 checkpoint 快照（不存在或 saver 故障返回 empty）。
+     * <p>
+     * StateSnapshot 是 LangGraph 对“某线程当前执行位置”的只读视图：
+     * 包含最新状态数据（state()）、下一个待执行节点（next()）等元信息，
+     * 可用于排查“图跑到哪一步了”。
+     */
     public Optional<StateSnapshot<WorkflowState>> getState(String threadId) {
         try {
             return Optional.ofNullable(agentGraph.getState(
@@ -137,18 +172,28 @@ public class AgentService {
 
     // ---- 内部实现 ----
 
-    private WorkflowState invokeGraph(String conversationId, String query) {
+    private WorkflowState invokeGraph(String conversationId, String query, String model) {
         RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
-        Map<String, Object> inputs = Map.of(WorkflowState.QUERY, query);
+        Map<String, Object> inputs = Map.of(WorkflowState.QUERY, query, WorkflowState.MODEL, model);
         long timeoutSeconds = Math.max(10, properties.getExecutionTimeoutSeconds());
-        // 图执行放入专用线程池，HTTP 线程只等待结果（超时后不阻塞调用方）
-        CompletableFuture<WorkflowState> future = CompletableFuture.supplyAsync(() -> {
-            try {
-                return agentGraph.invoke(inputs, config).orElse(null);
-            } catch (Exception e) {
-                throw new CompletionException(e);
-            }
-        }, agentExecutor);
+        // 图执行放入专用线程池，HTTP 线程只等待结果。
+        // 注意：future.get 超时后 HTTP 线程立即返回 504，但后台任务并不会被取消 ——
+        // 它继续把图跑完、逐节点写 checkpoint；客户端随后可用 resume 拿回结果，
+        // 这是“超时不丢任务”的折中设计（代价是图内节点耗时总和可能超过整体超时）。
+        CompletableFuture<WorkflowState> future;
+        try {
+            future = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return agentGraph.invoke(inputs, config).orElse(null);
+                } catch (Exception e) {
+                    throw new CompletionException(e);
+                }
+            }, agentExecutor);
+        } catch (RejectedExecutionException e) {
+            // 线程池队列满拒绝：转为可预期的业务错误，而非 500 内部错误
+            log.warn("[agent] executor overloaded, reject request, thread={}", conversationId);
+            throw new BizException(ErrorCode.TOO_MANY_REQUESTS, "系统繁忙，请稍后重试");
+        }
         try {
             WorkflowState state = future.get(timeoutSeconds, TimeUnit.SECONDS);
             if (state == null) {
@@ -213,6 +258,13 @@ public class AgentService {
 
     /**
      * 流式事件迭代器：包装图 NodeOutput 流，逐节点审计并转换为 GraphEvent。
+     * <p>
+     * NodeOutput 三种形态：
+     * <ul>
+     *   <li>isSTART()：节点刚被调度（还未执行），推 NODE_START 事件；</li>
+     *   <li>isEND()：图整体执行完毕，推 RESULT 事件携带最终答案；</li>
+     *   <li>其他：单节点执行完毕，携带该节点更新后的状态，推 NODE_END 事件。
+     * </ul>
      */
     private class AuditingEventIterator implements Iterator<GraphEvent> {
 

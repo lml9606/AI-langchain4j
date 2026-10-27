@@ -15,6 +15,7 @@ import java.util.List;
 public class VectorSearchService {
 
     private static final int DEFAULT_TOP_K = 3;
+    /** 最小相似度阈值：pgvector 余弦距离越接近 1 越相似，低于 0.3 视为不相关直接丢弃 */
     private static final double DEFAULT_MIN_SCORE = 0.3;
 
     private final KnowledgeChunkMapper knowledgeChunkMapper;
@@ -27,6 +28,9 @@ public class VectorSearchService {
 
     /**
      * 语义检索相关知识块。
+     * <p>
+     * 流程：查询文本先经嵌入模型转向量，再用 pgvector 余弦距离在知识表中取
+     * topK 条相似块（相似度低于阈值的自动过滤）。
      *
      * @param query 查询文本
      * @return 相关块列表；任何环节失败均返回空列表（fail-open，由调用方降级）

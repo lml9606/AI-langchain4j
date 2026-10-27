@@ -35,7 +35,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         Map<String, Object> updates = new HashMap<>();
         try {
             long start = System.currentTimeMillis();
-            LlmResult result = llmGateway.generate(systemPrompt, userPrompt);
+            LlmResult result = llmGateway.generate(state.model(), systemPrompt, userPrompt);
             log.info("[generate] cost={}ms, outputLength={}",
                     System.currentTimeMillis() - start, result.text().length());
             updates.put(WorkflowState.RESULT, result.text());

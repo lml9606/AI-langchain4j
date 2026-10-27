@@ -64,6 +64,15 @@ public class AgentController {
     /**
      * SSE 流式对话：节点级进度事件 + 15s 心跳保活。
      * 限流/会话锁冲突在流建立前抛出（走全局异常 JSON 响应）。
+     * <p>
+     * 时序说明：
+     * <ol>
+     *   <li>agentService.stream 只加锁 + 返回懒迭代器，图尚未执行；</li>
+     *   <li>本方法立即返回 SseEmitter（HTTP 连接转为异步），推送交给 agentExecutor 线程；</li>
+     *   <li>消费线程每拉到一个 GraphEvent 就发一条 SSE，拉不到时阻塞等待下一节点；</li>
+     *   <li>消费完成或异常后 complete/completeWithError 结束流，锁随之释放。</li>
+     * </ol>
+     * 心跳注释帧（comment 类型）不干扰前端 event.data 解析，仅用于穿透代理/网关的读超时。
      */
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@Valid @RequestBody ChatRequest request) {
@@ -86,6 +95,8 @@ public class AgentController {
         });
 
         try {
+            // 推送必须异步：SSE 的本质是长连接，若在 HTTP 线程同步消费图事件流，
+            // 该线程会被长时间占用直到图跑完，耗尽 Tomcat 工作线程池
             agentExecutor.execute(() -> {
                 try {
                     for (GraphEvent event : events) {
