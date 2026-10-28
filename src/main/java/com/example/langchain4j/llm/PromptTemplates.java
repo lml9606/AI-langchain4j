@@ -44,6 +44,12 @@ public final class PromptTemplates {
             建议您稍后重试，或换个方式描述问题。给您带来不便，敬请谅解。
             """;
 
+    /** 超时中止时的降级应答：一问一答照常闭环，用户可直接重发同一问题 */
+    public static final String FALLBACK_TIMEOUT_ANSWER = """
+            抱歉，处理您的问题时超时了，本次回答未完成。
+            请重新发送您的问题，我会重新为您处理。
+            """;
+
     /** 转人工提示：知识库检索无结果时的直接回复（不进入 LLM 生成） */
     public static final String HANDOFF_ANSWER = """
             抱歉，知识库中未找到与您问题相关的内容。

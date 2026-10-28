@@ -36,7 +36,7 @@ public class AgentProperties {
     /** 多轮上下文窗口：改写与生成注入历史的最近消息条数 */
     private int historyWindowSize = 10;
 
-    /** 单次图执行整体超时（秒）；超时后任务在后台继续跑完，会话锁由 Redisson Watchdog 自动续期兜底 */
+    /** 单次图执行整体超时（秒）；超时即中止本轮：取消后台任务并返回降级应答，一问一答照常闭环，用户可直接重发 */
     private int executionTimeoutSeconds = 240;
 
     @Data

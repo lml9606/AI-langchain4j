@@ -129,7 +129,8 @@ public class AgentController {
     public ApiResponse<Map<String, Object>> resume(@Valid @RequestBody ResumeRequest request) {
         return agentService.resume(request.conversationId())
                 .map(state -> ApiResponse.success(state.data()))
-                .orElse(ApiResponse.error(ErrorCode.NOT_FOUND, "未找到可恢复的 checkpoint"));
+                .orElse(ApiResponse.error(ErrorCode.NOT_FOUND,
+                        "无待恢复的任务：该会话最后一轮已闭环或没有可用的 checkpoint"));
     }
 
     /** 查询 checkpoint 执行状态 */

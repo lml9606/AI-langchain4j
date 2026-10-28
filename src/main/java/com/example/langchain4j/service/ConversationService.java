@@ -72,6 +72,15 @@ public class ConversationService {
         messageMapper.insert(message);
     }
 
+    /** 最后一轮是否已闭环：最新一条消息是 assistant（含超时降级轮）；无消息视为已闭环 */
+    public boolean isLastTurnClosed(String conversationId) {
+        List<Message> latest = messageMapper.selectRecentByConversationId(conversationId, 1);
+        if (latest == null || latest.isEmpty()) {
+            return true;
+        }
+        return Message.ROLE_ASSISTANT.equals(latest.get(0).getRole());
+    }
+
     /** 查询会话历史消息（倒序取 limit 条） */
     public List<Message> listMessages(String conversationId, int limit) {
         int bounded = Math.min(Math.max(limit, 1), MAX_MESSAGE_LIMIT);

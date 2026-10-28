@@ -12,6 +12,7 @@ import com.example.langchain4j.dto.ChatResponse;
 import com.example.langchain4j.event.GraphEvent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.ModelRegistry;
+import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.GraphExecution;
 import com.example.langchain4j.repository.entity.Message;
 import com.example.langchain4j.repository.mapper.GraphExecutionMapper;
@@ -21,6 +22,7 @@ import org.bsc.langgraph4j.GraphInput;
 import org.bsc.langgraph4j.NodeOutput;
 import org.bsc.langgraph4j.RunnableConfig;
 import org.bsc.langgraph4j.state.StateSnapshot;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
 import java.util.Iterator;
@@ -28,10 +30,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executor;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -42,7 +42,7 @@ import java.util.concurrent.TimeoutException;
  * 防御设计：
  * <ul>
  *   <li>限流（429）与会话锁（409）前置拒绝，保护下游；</li>
- *   <li>图执行整体超时（504），超时后任务在后台继续跑完落 checkpoint；</li>
+ *   <li>图执行整体超时，超时即中止：取消后台任务并返回降级应答，一问一答照常闭环；</li>
  *   <li>图内异常全部在节点层消化（fallback 节点保证有输出），此处只兜 graph 框架级异常；</li>
  *   <li>审计落库失败不阻断主流程（可观测性降级而非可用性降级）。</li>
  * </ul>
@@ -60,7 +60,7 @@ public class AgentService {
     private final QueryRewriter queryRewriter;
     private final GraphExecutionMapper graphExecutionMapper;
     private final ModelRegistry modelRegistry;
-    private final Executor agentExecutor;
+    private final ThreadPoolTaskExecutor agentExecutor;
     private final AgentProperties properties;
     private final AgentMetrics metrics;
 
@@ -71,7 +71,7 @@ public class AgentService {
                         QueryRewriter queryRewriter,
                         GraphExecutionMapper graphExecutionMapper,
                         ModelRegistry modelRegistry,
-                        Executor agentExecutor,
+                        ThreadPoolTaskExecutor agentExecutor,
                         AgentProperties properties,
                         AgentMetrics metrics) {
         this.agentGraph = agentGraph;
@@ -103,20 +103,24 @@ public class AgentService {
         // 3. 会话初始化（失败抛 DB_UNAVAILABLE，快速失败）
         String conversationId = conversationService.ensureConversation(
                 request.getUserId(), request.getConversationId(), request.getQuery());
-        // 4. 会话锁内：保存用户消息 → 加载历史 → 改写 → 图执行
-        //    saveMessage 移进锁内：保证消息落库顺序与图执行顺序一致，防并发串话；
-        //    改写与图执行同锁，避免并发两轮读到同一份历史。
-        WorkflowState state = sessionLock.executeWithLock(conversationId,
-                () -> prepareAndInvoke(conversationId, request.getQuery(), model));
+        // 4. 会话锁内：保存用户消息 → 加载历史 → 改写 → 图执行 → 保存助手消息
+        //    用户与助手消息都在锁内落库，一轮对话闭环后才释放锁；
+        //    否则上一轮释放锁后、下一轮先读到历史时，上一轮回答尚未落库，
+        //    会造成乱序（userA → userB → assistantA）与上下文丢失。
+        WorkflowState state = sessionLock.executeWithLock(conversationId, () -> {
+            WorkflowState result = prepareAndInvoke(conversationId, request.getQuery(), model);
+            // 助手消息持久化（结果已生成，落库失败降级不阻断响应）；
+            // 超时路径在 invokeGraph 内返回降级应答，这里同样落库，保证一问一答闭环
+            try {
+                conversationService.saveMessage(conversationId, Message.ROLE_ASSISTANT,
+                        result.result(), model, result.tokenUsage());
+            } catch (Exception e) {
+                log.warn("[agent] save assistant message failed, degrade: {}", e.getMessage());
+            }
+            return result;
+        });
         if (state.fallback()) {
             metrics.recordFallback();
-        }
-        // 5. 助手消息持久化（结果已生成，落库失败降级不阻断响应）
-        try {
-            conversationService.saveMessage(conversationId, Message.ROLE_ASSISTANT,
-                    state.result(), model, state.tokenUsage());
-        } catch (Exception e) {
-            log.warn("[agent] save assistant message failed, degrade: {}", e.getMessage());
         }
         return ChatResponse.of(conversationId, state.result(), state.fallback(),
                 state.tokenUsage(), System.currentTimeMillis() - start, state.done());
@@ -171,21 +175,45 @@ public class AgentService {
     }
 
     /**
-     * 断点恢复：从最近 checkpoint 继续执行（checkpoint 不存在时返回 empty）。
+     * 断点恢复：从最近 checkpoint 继续执行（无可恢复任务时返回 empty）。
      * <p>
      * 机制说明：LangGraph 的 checkpoint 是按“超级步骤”在节点执行边界落盘的
      * （每执行完一个节点保存一次完整状态）。invoke(GraphInput.resume()) 会加载
-     * 该 threadId 最近一次 checkpoint，从上次中断的节点之后继续跑，
-     * 而不是重头执行 —— 因此恢复耗时远小于重跑全图。
+     * 该 threadId 最近一次 checkpoint，从上次中断的节点之后继续跑，而不是重头执行。
+     * <p>
+     * 与 chat 一致的闭环约束：
+     * <ul>
+     *   <li>会话锁内执行：防止恢复与新请求并发写 checkpoint/消息；</li>
+     *   <li>仅当最后一轮未闭环（最新消息是 user，如进程中断）时才恢复；
+     *       超时降级轮已落库 assistant，属于已闭环，不会二次恢复产生双份回答；</li>
+     *   <li>恢复出的结果同样在锁内写回 assistant，保证短期记忆闭环。</li>
+     * </ul>
      */
     public Optional<WorkflowState> resume(String conversationId) {
         RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
-        try {
-            return agentGraph.invoke(GraphInput.resume(), config);
-        } catch (Exception e) {
-            log.error("[agent] resume failed, thread={}", conversationId, e);
-            throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "断点恢复失败: " + rootMessage(e));
-        }
+        return sessionLock.executeWithLock(conversationId, () -> {
+            // 最后一轮已闭环（含超时降级轮）：无需恢复，避免重复产生 assistant
+            if (conversationService.isLastTurnClosed(conversationId)) {
+                log.info("[agent] resume skipped, last turn already closed, thread={}", conversationId);
+                return Optional.empty();
+            }
+            try {
+                Optional<WorkflowState> state = agentGraph.invoke(GraphInput.resume(), config);
+                // 恢复出的结果同样落库 assistant，保证续聊上下文不丢这一轮
+                state.ifPresent(s -> {
+                    try {
+                        conversationService.saveMessage(conversationId, Message.ROLE_ASSISTANT,
+                                s.result(), s.model(), s.tokenUsage());
+                    } catch (Exception e) {
+                        log.warn("[agent] resume save assistant message failed, degrade: {}", e.getMessage());
+                    }
+                });
+                return state;
+            } catch (Exception e) {
+                log.error("[agent] resume failed, thread={}", conversationId, e);
+                throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "断点恢复失败: " + rootMessage(e));
+            }
+        });
     }
 
     /**
@@ -239,18 +267,17 @@ public class AgentService {
         Map<String, Object> inputs = buildInputs(query, rewritten, history, model);
         long timeoutSeconds = Math.max(10, properties.getExecutionTimeoutSeconds());
         // 图执行放入专用线程池，HTTP 线程只等待结果。
-        // 注意：future.get 超时后 HTTP 线程立即返回 504，但后台任务并不会被取消 ——
-        // 它继续把图跑完、逐节点写 checkpoint；客户端随后可用 resume 拿回结果，
-        // 这是“超时不丢任务”的折中设计（代价是图内节点耗时总和可能超过整体超时）。
-        CompletableFuture<WorkflowState> future;
+        // 超时即中止：future.cancel(true) 会中断工作线程（尽力而为，Java 无法强制杀死线程），
+        // 本轮改为返回降级应答（user + assistant 照常落库），一问一答闭环，用户可直接重发。
+        Future<WorkflowState> future;
         try {
-            future = CompletableFuture.supplyAsync(() -> {
+            future = agentExecutor.getThreadPoolExecutor().submit(() -> {
                 try {
                     return agentGraph.invoke(inputs, config).orElse(null);
                 } catch (Exception e) {
-                    throw new CompletionException(e);
+                    throw e;
                 }
-            }, agentExecutor);
+            });
         } catch (RejectedExecutionException e) {
             // 线程池队列满拒绝：转为可预期的业务错误，而非 500 内部错误
             log.warn("[agent] executor overloaded, reject request, thread={}", conversationId);
@@ -268,9 +295,42 @@ public class AgentService {
                     query, state.result(), null, null);
             return state;
         } catch (TimeoutException e) {
-            log.warn("[agent] execution timeout after {}s, thread={}, task continues in background",
-                    timeoutSeconds, conversationId);
-            throw new BizException(ErrorCode.AGENT_TIMEOUT);
+            // 超时即中止：取消后台任务（中断工作线程，尽力而为）。
+            // cancel 返回 false 说明任务在超时点恰好刚完成，直接取回结果，不浪费本轮执行。
+            if (future.cancel(true)) {
+                // 超时即中止：取消后台任务，返回降级应答而非报错 ——
+                // 本轮 user + 降级 assistant 照常落库，历史一问一答完整，用户可直接重发。
+                audit(conversationId, "workflow", GraphExecution.STATUS_FAILED,
+                        query, null, "执行超时已中止", null);
+                log.warn("[agent] execution timeout after {}s, thread={}, task cancelled, return fallback answer",
+                        timeoutSeconds, conversationId);
+                return new WorkflowState(Map.of(
+                        WorkflowState.RESULT, PromptTemplates.FALLBACK_TIMEOUT_ANSWER,
+                        WorkflowState.FALLBACK, true,
+                        WorkflowState.DONE, true));
+            }
+            try {
+                WorkflowState completed = future.get();
+                if (completed == null) {
+                    throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行未返回结果");
+                }
+                log.info("[agent] execution completed just after timeout, thread={}", conversationId);
+                metrics.recordGraphDuration(System.currentTimeMillis() - start);
+                audit(conversationId, "workflow", GraphExecution.STATUS_SUCCESS,
+                        query, completed.result(), null, null);
+                return completed;
+            } catch (ExecutionException ex) {
+                Throwable cause = ex.getCause() == null ? ex : ex.getCause();
+                if (cause instanceof BizException biz) {
+                    throw biz;
+                }
+                log.error("[agent] graph execution failed, thread={}", conversationId, cause);
+                audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query, null, rootMessage(cause), null);
+                throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行失败: " + rootMessage(cause));
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new BizException(ErrorCode.AGENT_TIMEOUT);
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行被中断");
