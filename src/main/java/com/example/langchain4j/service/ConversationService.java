@@ -10,7 +10,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -23,6 +25,8 @@ public class ConversationService {
     private static final int TITLE_MAX_LENGTH = 30;
     private static final int DEFAULT_MESSAGE_LIMIT = 50;
     private static final int MAX_MESSAGE_LIMIT = 200;
+    /** 历史单条消息长度上限：超长截断，防止多轮注入挤爆上下文窗口 */
+    private static final int MAX_HISTORY_ITEM_LENGTH = 4000;
 
     private final ConversationMapper conversationMapper;
     private final MessageMapper messageMapper;
@@ -82,6 +86,31 @@ public class ConversationService {
         return listMessages(conversationId, DEFAULT_MESSAGE_LIMIT);
     }
 
+    /**
+     * 取最近 limit 条历史消息（正序，role/content 键值对），排除当前刚保存的用户消息。
+     * 用途：图外改写与生成节点的历史原文注入共用这一份数据（一次查询两用）。
+     * 单条消息超长时截断（历史注入有窗口预算，不做全量搬运）。
+     */
+    public List<Map<String, String>> recentHistoryExcludingCurrent(String conversationId, int limit) {
+        int bounded = Math.min(Math.max(limit, 1), MAX_MESSAGE_LIMIT);
+        // 多取一条：最近 N+1 条的最后一条即当前刚保存的用户消息，取完排除，避免与 query 重复注入
+        List<Message> messages = messageMapper.selectRecentByConversationId(conversationId, bounded + 1);
+        if (messages == null || messages.isEmpty()) {
+            return List.of();
+        }
+        List<Map<String, String>> history = new ArrayList<>(Math.max(messages.size() - 1, 0));
+        for (int i = 0; i < messages.size() - 1; i++) {
+            Message m = messages.get(i);
+            if (m == null || m.getContent() == null) {
+                continue;
+            }
+            history.add(Map.of(
+                    "role", m.getRole() == null ? "" : m.getRole(),
+                    "content", truncateHistory(m.getContent())));
+        }
+        return history;
+    }
+
     public Conversation getConversation(String conversationId) {
         Conversation conversation = conversationMapper.selectByConversationId(conversationId);
         if (conversation == null) {
@@ -100,5 +129,13 @@ public class ConversationService {
             return cleaned;
         }
         return cleaned.substring(0, TITLE_MAX_LENGTH) + "...";
+    }
+
+    /** 历史单条消息超长截断（保留头部，防御超长历史撑爆上下文窗口） */
+    private String truncateHistory(String content) {
+        if (content.length() <= MAX_HISTORY_ITEM_LENGTH) {
+            return content;
+        }
+        return content.substring(0, MAX_HISTORY_ITEM_LENGTH) + "...[截断]";
     }
 }

@@ -2,6 +2,9 @@ package com.example.langchain4j.graph.state;
 
 import org.bsc.langgraph4j.state.AgentState;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -17,6 +20,8 @@ public class WorkflowState extends AgentState {
 
     // ---- 状态字段名常量：节点写入 Map 与访问器取值共用同一 key，避免字符串漂移 ----
     public static final String QUERY = "query";
+    public static final String REWRITTEN_QUERY = "rewrittenQuery";
+    public static final String HISTORY = "history";
     public static final String MODEL = "model";
     public static final String INTENT = "intent";
     public static final String INTENT_REASON = "intentReason";
@@ -42,6 +47,41 @@ public class WorkflowState extends AgentState {
 
     public String query() {
         return value(QUERY, "");
+    }
+
+    /** 改写后的自包含 query（图外 QueryRewriter 写入，未改写时为空） */
+    public String rewrittenQuery() {
+        return value(REWRITTEN_QUERY, "");
+    }
+
+    /**
+     * 有效查询：改写句优先，为空退回原始 query。
+     * 意图识别、检索、生成统一取这个字段，节点不再自行写兜底逻辑。
+     */
+    public String effectiveQuery() {
+        String rewritten = rewrittenQuery();
+        return rewritten.isBlank() ? query() : rewritten;
+    }
+
+    /**
+     * 最近 N 轮历史原文（role/content 键值对，正序），供生成节点以消息角色注入。
+     * 防御 checkpoint 反序列化后的类型漂移：只接受 List 且逐项转成字符串键值对。
+     */
+    @SuppressWarnings("unchecked")
+    public List<Map<String, String>> history() {
+        Object v = value(HISTORY).orElse(null);
+        if (!(v instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Map<String, String>> result = new ArrayList<>(list.size());
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> m) {
+                Map<String, String> entry = new LinkedHashMap<>(m.size());
+                m.forEach((k, val) -> entry.put(String.valueOf(k), String.valueOf(val)));
+                result.add(entry);
+            }
+        }
+        return result;
     }
 
     /** 本轮实际使用的模型名（入图时由服务层解析，节点调用 LLM 时按此路由） */

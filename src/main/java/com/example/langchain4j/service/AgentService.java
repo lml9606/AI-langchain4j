@@ -24,6 +24,7 @@ import org.bsc.langgraph4j.state.StateSnapshot;
 import org.springframework.stereotype.Service;
 
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -56,6 +57,7 @@ public class AgentService {
     private final RateLimiter rateLimiter;
     private final SessionLock sessionLock;
     private final ConversationService conversationService;
+    private final QueryRewriter queryRewriter;
     private final GraphExecutionMapper graphExecutionMapper;
     private final ModelRegistry modelRegistry;
     private final Executor agentExecutor;
@@ -66,6 +68,7 @@ public class AgentService {
                         RateLimiter rateLimiter,
                         SessionLock sessionLock,
                         ConversationService conversationService,
+                        QueryRewriter queryRewriter,
                         GraphExecutionMapper graphExecutionMapper,
                         ModelRegistry modelRegistry,
                         Executor agentExecutor,
@@ -75,6 +78,7 @@ public class AgentService {
         this.rateLimiter = rateLimiter;
         this.sessionLock = sessionLock;
         this.conversationService = conversationService;
+        this.queryRewriter = queryRewriter;
         this.graphExecutionMapper = graphExecutionMapper;
         this.modelRegistry = modelRegistry;
         this.agentExecutor = agentExecutor;
@@ -96,13 +100,14 @@ public class AgentService {
         rateLimiter.checkAcquire(request.getUserId());
         // 2. 解析本轮模型（前端指定优先，空则默认；未知模型抛 400 快速失败）
         String model = modelRegistry.resolve(request.getModel());
-        // 3. 会话初始化 + 用户消息持久化（失败抛 DB_UNAVAILABLE，快速失败）
+        // 3. 会话初始化（失败抛 DB_UNAVAILABLE，快速失败）
         String conversationId = conversationService.ensureConversation(
                 request.getUserId(), request.getConversationId(), request.getQuery());
-        conversationService.saveMessage(conversationId, Message.ROLE_USER, request.getQuery(), model, null);
-        // 4. 会话锁内执行图（同会话串行，防 checkpoint 竞态）
+        // 4. 会话锁内：保存用户消息 → 加载历史 → 改写 → 图执行
+        //    saveMessage 移进锁内：保证消息落库顺序与图执行顺序一致，防并发串话；
+        //    改写与图执行同锁，避免并发两轮读到同一份历史。
         WorkflowState state = sessionLock.executeWithLock(conversationId,
-                () -> invokeGraph(conversationId, request.getQuery(), model));
+                () -> prepareAndInvoke(conversationId, request.getQuery(), model));
         if (state.fallback()) {
             metrics.recordFallback();
         }
@@ -133,14 +138,36 @@ public class AgentService {
         String model = modelRegistry.resolve(request.getModel());
         String conversationId = conversationService.ensureConversation(
                 request.getUserId(), request.getConversationId(), request.getQuery());
-        conversationService.saveMessage(conversationId, Message.ROLE_USER, request.getQuery(), model, null);
 
-        // 手动加锁：锁不在这里释放，而是随返回的迭代器一起交给消费方，消费结束再释放
+        // 手动加锁：锁跨"消息落库 + 改写 + 流消费"全过程，消费结束才释放
         AutoCloseable lock = sessionLock.lock(conversationId);
-        RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
-        Map<String, Object> inputs = Map.of(WorkflowState.QUERY, request.getQuery(), WorkflowState.MODEL, model);
-        var nodeOutputs = agentGraph.stream(inputs, config);
-        return () -> new AuditingEventIterator(conversationId, nodeOutputs.iterator(), lock);
+        try {
+            // 锁内准备：用户消息持久化 + 历史加载 + 改写（与同步版同一流程）
+            conversationService.saveMessage(conversationId, Message.ROLE_USER, request.getQuery(), model, null);
+            List<Map<String, String>> history = conversationService.recentHistoryExcludingCurrent(
+                    conversationId, properties.getHistoryWindowSize());
+            long rewriteStart = System.currentTimeMillis();
+            String rewritten = queryRewriter.rewrite(request.getQuery(), history, model);
+            audit(conversationId, "rewrite", GraphExecution.STATUS_SUCCESS,
+                    request.getQuery(), rewritten, null, System.currentTimeMillis() - rewriteStart);
+
+            RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
+            Map<String, Object> inputs = buildInputs(request.getQuery(), rewritten, history, model);
+            var nodeOutputs = agentGraph.stream(inputs, config);
+            return () -> new AuditingEventIterator(conversationId, nodeOutputs.iterator(), lock);
+        } catch (Exception e) {
+            // 准备阶段任何异常：立即释放锁，避免锁泄漏（此前只能靠 Watchdog 兜底）
+            try {
+                lock.close();
+            } catch (Exception closeEx) {
+                log.warn("[agent] stream lock release failed: {}", closeEx.getMessage());
+            }
+            // 保留原异常类型（BizException 需原样抛给全局异常处理）
+            if (e instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            throw new IllegalStateException("stream prepare failed", e);
+        }
     }
 
     /**
@@ -180,10 +207,36 @@ public class AgentService {
 
     // ---- 内部实现 ----
 
-    private WorkflowState invokeGraph(String conversationId, String query, String model) {
+    /** 锁内准备并执行图：保存用户消息 → 加载历史 → 改写 → 图执行（同步/流式共用流程） */
+    private WorkflowState prepareAndInvoke(String conversationId, String query, String model) {
+        // 步骤1：用户消息持久化（锁内执行，失败抛 DB_UNAVAILABLE 快速失败）
+        conversationService.saveMessage(conversationId, Message.ROLE_USER, query, model, null);
+        // 步骤2：加载最近 N 轮历史（已排除当前消息），改写与生成注入共用一份数据
+        List<Map<String, String>> history = conversationService.recentHistoryExcludingCurrent(
+                conversationId, properties.getHistoryWindowSize());
+        // 步骤3：改写（内部无历史短路/LLM 失败降级），单条审计落库便于排查改写质量
+        long rewriteStart = System.currentTimeMillis();
+        String rewritten = queryRewriter.rewrite(query, history, model);
+        audit(conversationId, "rewrite", GraphExecution.STATUS_SUCCESS,
+                query, rewritten, null, System.currentTimeMillis() - rewriteStart);
+        // 步骤4：执行图
+        return invokeGraph(conversationId, query, rewritten, history, model);
+    }
+
+    private Map<String, Object> buildInputs(String query, String rewritten,
+                                            List<Map<String, String>> history, String model) {
+        return Map.of(
+                WorkflowState.QUERY, query,
+                WorkflowState.MODEL, model,
+                WorkflowState.REWRITTEN_QUERY, rewritten == null ? "" : rewritten,
+                WorkflowState.HISTORY, history == null ? List.of() : history);
+    }
+
+    private WorkflowState invokeGraph(String conversationId, String query, String rewritten,
+                                      List<Map<String, String>> history, String model) {
         long start = System.currentTimeMillis();
         RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
-        Map<String, Object> inputs = Map.of(WorkflowState.QUERY, query, WorkflowState.MODEL, model);
+        Map<String, Object> inputs = buildInputs(query, rewritten, history, model);
         long timeoutSeconds = Math.max(10, properties.getExecutionTimeoutSeconds());
         // 图执行放入专用线程池，HTTP 线程只等待结果。
         // 注意：future.get 超时后 HTTP 线程立即返回 504，但后台任务并不会被取消 ——

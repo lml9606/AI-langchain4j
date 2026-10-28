@@ -24,11 +24,17 @@ public class AgentProperties {
     /** DeepSeek 官方 API 配置（OpenAI 兼容协议） */
     private Deepseek deepseek = new Deepseek();
 
+    /** 本地向量模型配置（Ollama 部署 BGE-M3） */
+    private Embedding embedding = new Embedding();
+
     /** 限流配置 */
     private RateLimit rateLimit = new RateLimit();
 
     /** 校验重试上限（图内重试环次数） */
     private int maxValidateRetries = 3;
+
+    /** 多轮上下文窗口：改写与生成注入历史的最近消息条数 */
+    private int historyWindowSize = 10;
 
     /** 单次图执行整体超时（秒）；超时后任务在后台继续跑完，会话锁由 Redisson Watchdog 自动续期兜底 */
     private int executionTimeoutSeconds = 240;
@@ -66,6 +72,14 @@ public class AgentProperties {
         private String baseUrl = "https://api.deepseek.com";
         /** 模型名：deepseek-flash（V4.1-Flash，性价比）；需要更强推理可换 deepseek-v4-pro */
         private String modelName = "deepseek-flash";
+    }
+
+    @Data
+    public static class Embedding {
+        /** Ollama 服务地址 */
+        private String baseUrl = "http://localhost:11434";
+        /** 向量模型名（BGE-M3 输出 1024 维，与 pgvector 列维度一致） */
+        private String modelName = "bge-m3";
     }
 
     @Data

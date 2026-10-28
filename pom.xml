@@ -131,6 +131,14 @@
             <artifactId>langchain4j-open-ai</artifactId>
             <version>${langchain4j.version}</version>
         </dependency>
+        <!-- BGE-M3 本地向量模型（Ollama 部署）：
+             Bean 在 EmbeddingConfig 手动装配并标注 @Primary（dashscope starter 已自动装配 qwenEmbeddingModel，
+             需 @Primary 消除歧义注入）；BGE-M3 输出 1024 维，与 ai_knowledge_chunk.embedding vector(1024) 一致 -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-ollama</artifactId>
+            <version>${langchain4j.version}</version>
+        </dependency>
         <!-- MCP（Model Context Protocol）客户端：预留模型工具调用能力（当前 demo 未启用） -->
         <!-- https://mvnrepository.com/artifact/dev.langchain4j/langchain4j-mcp -->
         <dependency>

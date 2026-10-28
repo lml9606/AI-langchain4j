@@ -39,9 +39,10 @@ public class IntentNode implements NodeAction<WorkflowState> {
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         try {
-            // 步骤1：调用 LLM 分类意图（结构化输出，模型可能包裹说明文字，先提纯 JSON）
+            // 步骤1：调用 LLM 分类意图（结构化输出，模型可能包裹说明文字，先提纯 JSON）；
+            //        用有效查询（改写后的自包含句，未改写时即原始 query）
             String raw = llmGateway.generate(state.model(),
-                    PromptTemplates.INTENT_CLASSIFY_SYSTEM, state.query()).text();
+                    PromptTemplates.INTENT_CLASSIFY_SYSTEM, state.effectiveQuery()).text();
             JsonNode node = JsonUtil.fromJson(extractJson(raw), JsonNode.class);
             // 步骤2：读取 intent 字段（缺失时用默认意图兜底）
             String intent = node != null && node.hasNonNull("intent")
