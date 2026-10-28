@@ -31,6 +31,21 @@ CREATE TABLE IF NOT EXISTS ai_message (
 );
 CREATE INDEX IF NOT EXISTS idx_message_conversation ON ai_message (conversation_id, id);
 
+-- 会话段摘要表（短期记忆第二层：滑出窗口的历史压缩为段摘要，按话题分段）
+CREATE TABLE IF NOT EXISTS ai_conversation_summary (
+    id                 BIGSERIAL PRIMARY KEY,
+    conversation_id    VARCHAR(64) NOT NULL,
+    segment_id         INTEGER NOT NULL,              -- 会话内话题段序号（从1递增）
+    topic              VARCHAR(128),                  -- 话题标签（改写器输出）
+    content            TEXT NOT NULL,                 -- 段摘要内容（增量追加）
+    start_message_id   BIGINT,                        -- 段起点消息id（含）
+    covered_message_id BIGINT,                        -- 摘要已覆盖到的消息id（增量锚点，可空）
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (conversation_id, segment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_summary_conversation ON ai_conversation_summary (conversation_id, segment_id);
+
 -- 图执行审计表（节点级可观测：每次节点执行一行）
 CREATE TABLE IF NOT EXISTS ai_graph_execution (
     id              BIGSERIAL PRIMARY KEY,

@@ -2,6 +2,7 @@ package com.example.langchain4j.config;
 
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -21,6 +22,7 @@ import java.util.concurrent.ThreadPoolExecutor;
  *   <li>容量指标：注册队列深度/活跃线程 Gauge，供告警规则监测线程池饱和。</li>
  * </ul>
  */
+@Slf4j
 @Configuration
 public class AsyncConfig {
 
@@ -59,6 +61,27 @@ public class AsyncConfig {
         executor.setAwaitTerminationSeconds(30);
         executor.initialize();
         registerExecutorMetrics(executor, registry);
+        return executor;
+    }
+
+    /**
+     * 摘要线程池：段摘要异步生成专用，与图执行线程池隔离。
+     * <p>
+     * 摘要任务不阻塞主链路、可丢弃（失败/满队列时下轮装配会重新触发，靠 covered_message_id 幂等续跑），
+     * 因此单线程 + 有界队列即可，拒绝策略为静默丢弃。
+     */
+    @Bean("summaryExecutor")
+    public ThreadPoolTaskExecutor summaryExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(1);
+        executor.setMaxPoolSize(1);
+        executor.setQueueCapacity(200);
+        executor.setThreadNamePrefix("summary-exec-");
+        executor.setRejectedExecutionHandler((r, e) ->
+                log.warn("[summary] executor overloaded, drop summary task, retry next round"));
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(30);
+        executor.initialize();
         return executor;
     }
 

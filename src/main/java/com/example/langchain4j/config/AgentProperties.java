@@ -33,8 +33,8 @@ public class AgentProperties {
     /** 校验重试上限（图内重试环次数） */
     private int maxValidateRetries = 3;
 
-    /** 多轮上下文窗口：改写与生成注入历史的最近消息条数 */
-    private int historyWindowSize = 10;
+    /** 多轮上下文（短期记忆）配置 */
+    private History history = new History();
 
     /** 单次图执行整体超时（秒）；超时即中止本轮：取消后台任务并返回降级应答，一问一答照常闭环，用户可直接重发 */
     private int executionTimeoutSeconds = 240;
@@ -43,6 +43,28 @@ public class AgentProperties {
     public static class Checkpoint {
         /** PostgresSaver 不可用时是否降级内存 saver */
         private boolean memoryFallback = true;
+    }
+
+    /**
+     * 多轮上下文（短期记忆）分层配置：
+     * 改写视图（图外指代消解）与生成视图（图内原文回放）分开预算，段摘要异步压缩超窗历史。
+     */
+    @Data
+    public static class History {
+        /** 改写视图：最近消息条数（近 2 轮足够做指代消解，窗口小改写调用快） */
+        private int rewriteWindowSize = 4;
+        /** 改写视图：单条消息最大字符数（要点即可，超长截断） */
+        private int rewriteItemMaxLength = 800;
+        /** 生成视图：历史注入的 token 估算预算（系统提示词/当前query/检索上下文另有预算） */
+        private int generationMaxTokens = 8000;
+        /** 生成视图：单条消息最大字符数（原文细节） */
+        private int generationItemMaxLength = 4000;
+        /** 触发增量摘要的阈值：段内未被摘要覆盖的消息条数达到该值即异步摘要 */
+        private int summaryTriggerMessages = 10;
+        /** 单次摘要任务最多压缩的消息条数（防 LLM 输入过大） */
+        private int summaryMaxMessagesPerRun = 40;
+        /** 段摘要最大字符数（超长截断，防止摘要本身膨胀） */
+        private int summaryMaxLength = 4000;
     }
 
     @Data

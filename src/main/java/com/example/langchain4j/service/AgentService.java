@@ -9,13 +9,16 @@ import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.ChatRequest;
 import com.example.langchain4j.dto.ChatResponse;
+import com.example.langchain4j.dto.RewriteResult;
 import com.example.langchain4j.event.GraphEvent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.ModelRegistry;
 import com.example.langchain4j.llm.PromptTemplates;
+import com.example.langchain4j.repository.entity.ConversationSummary;
 import com.example.langchain4j.repository.entity.GraphExecution;
 import com.example.langchain4j.repository.entity.Message;
 import com.example.langchain4j.repository.mapper.GraphExecutionMapper;
+import com.example.langchain4j.repository.mapper.SummaryMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.GraphInput;
@@ -52,12 +55,16 @@ import java.util.concurrent.TimeoutException;
 public class AgentService {
 
     private static final int MAX_AUDIT_JSON_LENGTH = 4000;
+    /** 生成视图候选集上限：段内最近消息取这么多条参与 token 预算装配 */
+    private static final int GENERATION_CANDIDATE_LIMIT = 40;
 
     private final CompiledGraph<WorkflowState> agentGraph;
     private final RateLimiter rateLimiter;
     private final SessionLock sessionLock;
     private final ConversationService conversationService;
     private final QueryRewriter queryRewriter;
+    private final SummaryMapper summaryMapper;
+    private final SummaryService summaryService;
     private final GraphExecutionMapper graphExecutionMapper;
     private final ModelRegistry modelRegistry;
     private final ThreadPoolTaskExecutor agentExecutor;
@@ -69,6 +76,8 @@ public class AgentService {
                         SessionLock sessionLock,
                         ConversationService conversationService,
                         QueryRewriter queryRewriter,
+                        SummaryMapper summaryMapper,
+                        SummaryService summaryService,
                         GraphExecutionMapper graphExecutionMapper,
                         ModelRegistry modelRegistry,
                         ThreadPoolTaskExecutor agentExecutor,
@@ -79,6 +88,8 @@ public class AgentService {
         this.sessionLock = sessionLock;
         this.conversationService = conversationService;
         this.queryRewriter = queryRewriter;
+        this.summaryMapper = summaryMapper;
+        this.summaryService = summaryService;
         this.graphExecutionMapper = graphExecutionMapper;
         this.modelRegistry = modelRegistry;
         this.agentExecutor = agentExecutor;
@@ -146,17 +157,11 @@ public class AgentService {
         // 手动加锁：锁跨"消息落库 + 改写 + 流消费"全过程，消费结束才释放
         AutoCloseable lock = sessionLock.lock(conversationId);
         try {
-            // 锁内准备：用户消息持久化 + 历史加载 + 改写（与同步版同一流程）
-            conversationService.saveMessage(conversationId, Message.ROLE_USER, request.getQuery(), model, null);
-            List<Map<String, String>> history = conversationService.recentHistoryExcludingCurrent(
-                    conversationId, properties.getHistoryWindowSize());
-            long rewriteStart = System.currentTimeMillis();
-            String rewritten = queryRewriter.rewrite(request.getQuery(), history, model);
-            audit(conversationId, "rewrite", GraphExecution.STATUS_SUCCESS,
-                    request.getQuery(), rewritten, null, System.currentTimeMillis() - rewriteStart);
-
+            // 锁内准备：用户消息持久化 + 改写 + 话题段归属 + 生成视图 + 摘要触发（与同步版同一流程）
+            PreparedTurn turn = prepareTurn(conversationId, request.getQuery(), model);
             RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
-            Map<String, Object> inputs = buildInputs(request.getQuery(), rewritten, history, model);
+            Map<String, Object> inputs = buildInputs(request.getQuery(), turn.rewrite().rewritten(),
+                    turn.history(), turn.summary(), model);
             var nodeOutputs = agentGraph.stream(inputs, config);
             return () -> new AuditingEventIterator(conversationId, nodeOutputs.iterator(), lock);
         } catch (Exception e) {
@@ -235,36 +240,127 @@ public class AgentService {
 
     // ---- 内部实现 ----
 
-    /** 锁内准备并执行图：保存用户消息 → 加载历史 → 改写 → 图执行（同步/流式共用流程） */
+    /** 锁内准备并执行图：保存用户消息 → 双视图装配 → 改写 → 图执行（同步路径） */
     private WorkflowState prepareAndInvoke(String conversationId, String query, String model) {
-        // 步骤1：用户消息持久化（锁内执行，失败抛 DB_UNAVAILABLE 快速失败）
-        conversationService.saveMessage(conversationId, Message.ROLE_USER, query, model, null);
-        // 步骤2：加载最近 N 轮历史（已排除当前消息），改写与生成注入共用一份数据
-        List<Map<String, String>> history = conversationService.recentHistoryExcludingCurrent(
-                conversationId, properties.getHistoryWindowSize());
-        // 步骤3：改写（内部无历史短路/LLM 失败降级），单条审计落库便于排查改写质量
+        PreparedTurn turn = prepareTurn(conversationId, query, model);
+        return invokeGraph(conversationId, query, turn.rewrite().rewritten(),
+                turn.history(), turn.summary(), model);
+    }
+
+    /**
+     * 每轮锁内准备（同步/流式共用）：用户消息持久化 → 改写视图 → 话题段归属 → 生成视图 → 触发摘要。
+     * 双视图分离：改写用小窗口短截断（跨段，指代消解），生成用段内原文按 token 预算（原文回放）。
+     */
+    private PreparedTurn prepareTurn(String conversationId, String query, String model) {
+        // 步骤1：用户消息持久化（锁内执行，失败抛 DB_UNAVAILABLE 快速失败），拿自增 id 供段起点锚定
+        Message userMessage = conversationService.saveMessage(
+                conversationId, Message.ROLE_USER, query, model, null);
+        // 步骤2：改写视图（跨话题段取最近 N 轮，短截断），改写与话题归属合并一次 LLM 调用
+        List<Map<String, String>> rewriteView = conversationService.rewriteHistoryView(
+                conversationId, properties.getHistory().getRewriteWindowSize(),
+                properties.getHistory().getRewriteItemMaxLength());
+        // 步骤3：已有话题段 → 话题标签列表（供改写器做归属判断）
+        List<ConversationSummary> segments = summaryMapper.selectByConversationId(conversationId);
+        List<String> topics = segments == null ? List.of() : segments.stream()
+                .map(ConversationSummary::getTopic)
+                .filter(t -> t != null && !t.isBlank())
+                .toList();
+        // 步骤4：改写 + 话题归属（内部无历史短路/LLM 失败降级），单条审计落库便于排查改写质量
         long rewriteStart = System.currentTimeMillis();
-        String rewritten = queryRewriter.rewrite(query, history, model);
+        RewriteResult rewrite = queryRewriter.rewrite(query, rewriteView, topics, model);
         audit(conversationId, "rewrite", GraphExecution.STATUS_SUCCESS,
-                query, rewritten, null, System.currentTimeMillis() - rewriteStart);
-        // 步骤4：执行图
-        return invokeGraph(conversationId, query, rewritten, history, model);
+                query, rewrite.rewritten(), null, System.currentTimeMillis() - rewriteStart);
+        // 步骤5：话题段归属：命中旧段复用（切回任务A只读A的窗口+摘要），新话题新建段
+        ConversationSummary segment = resolveSegment(conversationId, segments, rewrite, userMessage.getId());
+        // 步骤6：生成视图（当前段原文，token 预算装配，排除当前消息）
+        List<Map<String, String>> generationView = conversationService.generationHistoryView(
+                conversationId, segment.getStartMessageId(),
+                properties.getHistory().getGenerationMaxTokens(),
+                properties.getHistory().getGenerationItemMaxLength(),
+                GENERATION_CANDIDATE_LIMIT);
+        // 步骤7：异步触发段摘要（锁内仅提交任务，不等待 LLM 执行）
+        summaryService.triggerIfNeeded(conversationId, segment);
+        return new PreparedTurn(rewrite, generationView,
+                segment.getContent() == null ? "" : segment.getContent());
+    }
+
+    /**
+     * 话题段归属：改写器 topic 精确命中已有段 → 复用该段；最新段未命名且改写器给出
+     * 话题名 → 复用并补名；newTopic → 新建段；未判断/解析降级 → 兜底最新段。
+     * 复用旧段时生成视图与摘要自动只取该段内容。
+     */
+    private ConversationSummary resolveSegment(String conversationId, List<ConversationSummary> segments,
+                                               RewriteResult rewrite, Long userMessageId) {
+        String topic = rewrite.topic();
+        // 1. 无段：创建第一段（首轮话题，topic 可能为空）
+        if (segments == null || segments.isEmpty()) {
+            return createSegment(conversationId, 1, topic, userMessageId);
+        }
+        // 2. topic 精确命中已有段 → 复用（用户切回旧话题）
+        if (topic != null && !topic.isBlank()) {
+            for (ConversationSummary s : segments) {
+                if (topic.equals(s.getTopic())) {
+                    log.info("[agent] switch back to topic segment, thread={}, segment={}, topic={}",
+                            conversationId, s.getSegmentId(), topic);
+                    return s;
+                }
+            }
+        }
+        // 3. 最新段尚未命名且改写器给出话题名 → 复用最新段并补名
+        //    （首轮创建的段 topic 为空，补名后首轮内容纳入该段，不游离在段外）
+        ConversationSummary latest = segments.get(segments.size() - 1);
+        if (topic != null && !topic.isBlank()
+                && (latest.getTopic() == null || latest.getTopic().isBlank())) {
+            latest.setTopic(topic);
+            summaryMapper.upsertIncrement(latest);
+            log.info("[agent] name latest segment, thread={}, segment={}, topic={}",
+                    conversationId, latest.getSegmentId(), topic);
+            return latest;
+        }
+        // 4. 改写器判定为新话题 → 新建段（话题漂移）
+        if (rewrite.newTopic()) {
+            int next = segments.stream()
+                    .mapToInt(s -> s.getSegmentId() == null ? 0 : s.getSegmentId())
+                    .max().orElse(0) + 1;
+            return createSegment(conversationId, next, topic, userMessageId);
+        }
+        // 5. 兜底：归属最新段（segmentId 最大）
+        return latest;
+    }
+
+    /** 新建话题段：start_message_id 锚定当前用户消息，content 为空等摘要任务异步填充 */
+    private ConversationSummary createSegment(String conversationId, int segmentId, String topic, Long startMessageId) {
+        ConversationSummary summary = new ConversationSummary();
+        summary.setConversationId(conversationId);
+        summary.setSegmentId(segmentId);
+        summary.setTopic(topic == null ? "" : topic);
+        summary.setContent("");
+        summary.setStartMessageId(startMessageId);
+        summaryMapper.insert(summary);
+        log.info("[agent] new topic segment created, thread={}, segment={}, topic={}",
+                conversationId, segmentId, topic);
+        return summary;
+    }
+
+    /** 每轮准备产物：改写结果 + 生成视图 + 当前段摘要，供同步/流式共用 */
+    private record PreparedTurn(RewriteResult rewrite, List<Map<String, String>> history, String summary) {
     }
 
     private Map<String, Object> buildInputs(String query, String rewritten,
-                                            List<Map<String, String>> history, String model) {
+                                            List<Map<String, String>> history, String summary, String model) {
         return Map.of(
                 WorkflowState.QUERY, query,
                 WorkflowState.MODEL, model,
                 WorkflowState.REWRITTEN_QUERY, rewritten == null ? "" : rewritten,
-                WorkflowState.HISTORY, history == null ? List.of() : history);
+                WorkflowState.HISTORY, history == null ? List.of() : history,
+                WorkflowState.SUMMARY, summary == null ? "" : summary);
     }
 
     private WorkflowState invokeGraph(String conversationId, String query, String rewritten,
-                                      List<Map<String, String>> history, String model) {
+                                      List<Map<String, String>> history, String summary, String model) {
         long start = System.currentTimeMillis();
         RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
-        Map<String, Object> inputs = buildInputs(query, rewritten, history, model);
+        Map<String, Object> inputs = buildInputs(query, rewritten, history, summary, model);
         long timeoutSeconds = Math.max(10, properties.getExecutionTimeoutSeconds());
         // 图执行放入专用线程池，HTTP 线程只等待结果。
         // 超时即中止：future.cancel(true) 会中断工作线程（尽力而为，Java 无法强制杀死线程），

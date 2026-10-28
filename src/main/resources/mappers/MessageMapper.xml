@@ -37,4 +37,37 @@
         ) recent
         ORDER BY id ASC
     </select>
+
+    <select id="selectRecentFromId" resultMap="MessageMap">
+        SELECT id, conversation_id, role, content, model, token_usage, created_at
+        FROM (
+            SELECT * FROM ai_message
+            WHERE conversation_id = #{conversationId} AND id &gt;= #{fromId}
+            ORDER BY id DESC
+            LIMIT #{limit}
+        ) recent
+        ORDER BY id ASC
+    </select>
+
+    <select id="selectUncovered" resultMap="MessageMap">
+        SELECT id, conversation_id, role, content, model, token_usage, created_at
+        FROM ai_message
+        WHERE conversation_id = #{conversationId}
+          AND id &gt;= #{fromId}
+        <if test="coveredId != null">
+          AND id &gt; #{coveredId}
+        </if>
+        ORDER BY id ASC
+        LIMIT #{limit}
+    </select>
+
+    <select id="countUncovered" resultType="int">
+        SELECT COUNT(*)
+        FROM ai_message
+        WHERE conversation_id = #{conversationId}
+          AND id &gt;= #{fromId}
+        <if test="coveredId != null">
+          AND id &gt; #{coveredId}
+        </if>
+    </select>
 </mapper>

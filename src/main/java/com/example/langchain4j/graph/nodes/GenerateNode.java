@@ -21,10 +21,11 @@ import java.util.Map;
 
 /**
  * 主生成节点：按意图选择 prompt，结合检索上下文与多轮历史生成回答。
- * 多轮上下文两条路径：
+ * 多轮上下文三条路径：
  * <ul>
  *   <li>指代消解：由服务层 QueryRewriter 在入图前完成，节点使用有效查询（改写句）；</li>
- *   <li>原文细节：最近 N 轮历史以消息角色注入 messages，模型可直接引用前文内容。</li>
+ *   <li>原文细节：当前话题段最近 N 轮原文以消息角色注入 messages，模型可直接引用前文内容；</li>
+ *   <li>窗口外要点：当前话题段摘要拼入 system prompt，回忆早期历史。</li>
  * </ul>
  * 防御策略：LLM 异常（超时/重试耗尽/熔断）→ 标记 error，由路由转兜底节点，
  * 保证图永远有输出，绝不向上裸抛异常。
@@ -41,33 +42,38 @@ public class GenerateNode implements NodeAction<WorkflowState> {
 
     @Override
     public Map<String, Object> apply(WorkflowState state) {
-        // 步骤1：按意图选 system prompt（代码生成 / 知识问答两套模板）
+        // 步骤1：按意图选 system prompt（代码生成 / 知识问答两套模板），并拼入当前话题段摘要
         String systemPrompt = selectSystemPrompt(state.intent());
-        // 步骤2：拼装 user prompt（重试修正指令 + 有效查询 + 检索上下文）
+        // 步骤2：窗口外的历史要点（段摘要）拼入 system prompt，帮助模型回忆早期内容
+        String summary = state.summary();
+        if (summary != null && !summary.isBlank()) {
+            systemPrompt = systemPrompt + String.format(PromptTemplates.SUMMARY_BLOCK, summary);
+        }
+        // 步骤3：拼装 user prompt（重试修正指令 + 有效查询 + 检索上下文）
         String userPrompt = buildUserPrompt(state);
-        // 步骤3：组装完整 messages：system + 最近 N 轮历史原文（角色消息）+ 本轮提问
+        // 步骤4：组装完整 messages：system + 最近 N 轮历史原文（角色消息）+ 本轮提问
         List<ChatMessage> messages = buildMessages(state, systemPrompt, userPrompt);
 
         Map<String, Object> updates = new HashMap<>();
         try {
-            // 步骤4：调用 LLM 生成，并记录耗时与输出长度
+            // 步骤5：调用 LLM 生成，并记录耗时与输出长度
             long start = System.currentTimeMillis();
             LlmResult result = llmGateway.generate(state.model(), messages);
             log.info("[generate] cost={}ms, outputLength={}",
                     System.currentTimeMillis() - start, result.text().length());
-            // 步骤5：写入结果与 token 用量（用量可能为空，防御性判空）
+            // 步骤6：写入结果与 token 用量（用量可能为空，防御性判空）
             updates.put(WorkflowState.RESULT, result.text());
             if (result.tokenUsage() != null) {
                 updates.put(WorkflowState.TOKEN_USAGE, result.tokenUsage());
             }
-            // 步骤6：清空错误标记（成功路径），交由路由进入校验节点
+            // 步骤7：清空错误标记（成功路径），交由路由进入校验节点
             updates.put(WorkflowState.ERROR, "");
         } catch (BizException e) {
-            // 步骤7：已知 LLM 异常（超时/重试耗尽/熔断）→ 标记 error，路由转兜底
+            // 步骤8：已知 LLM 异常（超时/重试耗尽/熔断）→ 标记 error，路由转兜底
             log.error("[generate] llm failed, route to fallback: {}", e.getMessage());
             updates.put(WorkflowState.ERROR, e.getMessage());
         } catch (Exception e) {
-            // 步骤8：未知异常同样标记 error 转兜底，绝不向上裸抛
+            // 步骤9：未知异常同样标记 error 转兜底，绝不向上裸抛
             log.error("[generate] unexpected error, route to fallback", e);
             updates.put(WorkflowState.ERROR, "生成失败: " + e.getMessage());
         }

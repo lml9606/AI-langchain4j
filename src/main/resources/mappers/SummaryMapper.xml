@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.SummaryMapper">
+
+    <resultMap id="SummaryMap" type="com.example.langchain4j.repository.entity.ConversationSummary">
+        <id property="id" column="id"/>
+        <result property="conversationId" column="conversation_id"/>
+        <result property="segmentId" column="segment_id"/>
+        <result property="topic" column="topic"/>
+        <result property="content" column="content"/>
+        <result property="startMessageId" column="start_message_id"/>
+        <result property="coveredMessageId" column="covered_message_id"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.ConversationSummary"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_conversation_summary
+            (conversation_id, segment_id, topic, content, start_message_id, covered_message_id)
+        VALUES
+            (#{conversationId}, #{segmentId}, #{topic}, #{content}, #{startMessageId}, #{coveredMessageId})
+    </insert>
+
+    <insert id="upsertIncrement" parameterType="com.example.langchain4j.repository.entity.ConversationSummary">
+        INSERT INTO ai_conversation_summary
+            (conversation_id, segment_id, topic, content, start_message_id, covered_message_id)
+        VALUES
+            (#{conversationId}, #{segmentId}, #{topic}, #{content}, #{startMessageId}, #{coveredMessageId})
+        ON CONFLICT (conversation_id, segment_id) DO UPDATE SET
+            topic = #{topic},
+            content = #{content},
+            covered_message_id = #{coveredMessageId},
+            updated_at = now()
+    </insert>
+
+    <select id="selectByConversationId" resultMap="SummaryMap">
+        SELECT id, conversation_id, segment_id, topic, content, start_message_id, covered_message_id,
+               created_at, updated_at
+        FROM ai_conversation_summary
+        WHERE conversation_id = #{conversationId}
+        ORDER BY segment_id ASC
+    </select>
+
+    <select id="maxSegmentId" resultType="int">
+        SELECT COALESCE(MAX(segment_id), 0)
+        FROM ai_conversation_summary
+        WHERE conversation_id = #{conversationId}
+    </select>
+</mapper>

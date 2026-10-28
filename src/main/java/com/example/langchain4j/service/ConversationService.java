@@ -2,6 +2,7 @@ package com.example.langchain4j.service;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
+import com.example.langchain4j.common.util.TokenEstimator;
 import com.example.langchain4j.repository.entity.Conversation;
 import com.example.langchain4j.repository.entity.Message;
 import com.example.langchain4j.repository.mapper.ConversationMapper;
@@ -10,7 +11,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -25,8 +28,6 @@ public class ConversationService {
     private static final int TITLE_MAX_LENGTH = 30;
     private static final int DEFAULT_MESSAGE_LIMIT = 50;
     private static final int MAX_MESSAGE_LIMIT = 200;
-    /** 历史单条消息长度上限：超长截断，防止多轮注入挤爆上下文窗口 */
-    private static final int MAX_HISTORY_ITEM_LENGTH = 4000;
 
     private final ConversationMapper conversationMapper;
     private final MessageMapper messageMapper;
@@ -59,10 +60,13 @@ public class ConversationService {
         return conversation.getConversationId();
     }
 
-    /** 持久化一条消息（用户/助手），失败向上抛由全局异常处理转 DB_UNAVAILABLE */
+    /**
+     * 持久化一条消息（用户/助手），失败向上抛由全局异常处理转 DB_UNAVAILABLE。
+     * 返回落库后的消息（含数据库回填的自增 id，供话题段起点锚定）。
+     */
     @Transactional(rollbackFor = Exception.class)
-    public void saveMessage(String conversationId, String role, String content,
-                            String model, Integer tokenUsage) {
+    public Message saveMessage(String conversationId, String role, String content,
+                               String model, Integer tokenUsage) {
         Message message = new Message();
         message.setConversationId(conversationId);
         message.setRole(role);
@@ -70,6 +74,7 @@ public class ConversationService {
         message.setModel(model);
         message.setTokenUsage(tokenUsage);
         messageMapper.insert(message);
+        return message;
     }
 
     /** 最后一轮是否已闭环：最新一条消息是 assistant（含超时降级轮）；无消息视为已闭环 */
@@ -96,11 +101,13 @@ public class ConversationService {
     }
 
     /**
-     * 取最近 limit 条历史消息（正序，role/content 键值对），排除当前刚保存的用户消息。
-     * 用途：图外改写与生成节点的历史原文注入共用这一份数据（一次查询两用）。
-     * 单条消息超长时截断（历史注入有窗口预算，不做全量搬运）。
+     * 改写视图：取最近 limit 条历史消息（正序，role/content 键值对，跨话题段），
+     * 排除当前刚保存的用户消息。
+     * <p>
+     * 用途：图外指代消解（QueryRewriter）。指代几乎都发生在最近 1~2 轮，
+     * 窗口小、单条截断短，改写调用更快更省 token，与生成视图预算分离。
      */
-    public List<Map<String, String>> recentHistoryExcludingCurrent(String conversationId, int limit) {
+    public List<Map<String, String>> rewriteHistoryView(String conversationId, int limit, int itemMaxLength) {
         int bounded = Math.min(Math.max(limit, 1), MAX_MESSAGE_LIMIT);
         // 多取一条：最近 N+1 条的最后一条即当前刚保存的用户消息，取完排除，避免与 query 重复注入
         List<Message> messages = messageMapper.selectRecentByConversationId(conversationId, bounded + 1);
@@ -115,9 +122,45 @@ public class ConversationService {
             }
             history.add(Map.of(
                     "role", m.getRole() == null ? "" : m.getRole(),
-                    "content", truncateHistory(m.getContent())));
+                    "content", truncate(m.getContent(), itemMaxLength)));
         }
         return history;
+    }
+
+    /**
+     * 生成视图：取当前话题段内最近的消息（正序，role/content 键值对），
+     * 按 token 预算从最新往回装配，排除当前刚保存的用户消息。
+     * <p>
+     * 用途：图内生成节点的原文回放。只注入当前话题段的原文（切回旧话题时
+     * 也只带该段的窗口），窗口外的历史由段摘要承接，实现“只读本任务记录”。
+     */
+    public List<Map<String, String>> generationHistoryView(String conversationId, long segmentStartId,
+                                                           int maxTokens, int itemMaxLength,
+                                                           int candidateLimit) {
+        int bounded = Math.min(Math.max(candidateLimit, 1), MAX_MESSAGE_LIMIT);
+        List<Message> messages = messageMapper.selectRecentFromId(conversationId, segmentStartId, bounded);
+        if (messages == null || messages.isEmpty()) {
+            return List.of();
+        }
+        // 倒序累计 token：最后一条是当前用户消息（与 query 重复），跳过；预算耗尽即停
+        Deque<Map<String, String>> selected = new ArrayDeque<>();
+        int tokens = 0;
+        for (int i = messages.size() - 2; i >= 0; i--) {
+            Message m = messages.get(i);
+            if (m == null || m.getContent() == null) {
+                continue;
+            }
+            String content = truncate(m.getContent(), itemMaxLength);
+            int cost = TokenEstimator.estimate(content);
+            if (!selected.isEmpty() && tokens + cost > maxTokens) {
+                break;
+            }
+            selected.addFirst(Map.of(
+                    "role", m.getRole() == null ? "" : m.getRole(),
+                    "content", content));
+            tokens += cost;
+        }
+        return new ArrayList<>(selected);
     }
 
     public Conversation getConversation(String conversationId) {
@@ -141,10 +184,10 @@ public class ConversationService {
     }
 
     /** 历史单条消息超长截断（保留头部，防御超长历史撑爆上下文窗口） */
-    private String truncateHistory(String content) {
-        if (content.length() <= MAX_HISTORY_ITEM_LENGTH) {
+    private String truncate(String content, int maxLength) {
+        if (content.length() <= maxLength) {
             return content;
         }
-        return content.substring(0, MAX_HISTORY_ITEM_LENGTH) + "...[截断]";
+        return content.substring(0, maxLength) + "...[截断]";
     }
 }

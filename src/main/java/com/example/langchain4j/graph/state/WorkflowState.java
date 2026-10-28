@@ -22,6 +22,7 @@ public class WorkflowState extends AgentState {
     public static final String QUERY = "query";
     public static final String REWRITTEN_QUERY = "rewrittenQuery";
     public static final String HISTORY = "history";
+    public static final String SUMMARY = "summary";
     public static final String MODEL = "model";
     public static final String INTENT = "intent";
     public static final String INTENT_REASON = "intentReason";
@@ -82,6 +83,14 @@ public class WorkflowState extends AgentState {
             }
         }
         return result;
+    }
+
+    /**
+     * 当前话题段摘要（服务层注入，供生成节点拼入 system prompt 回忆窗口外的历史要点）。
+     * 命中历史话题段时为该段摘要；新话题/无摘要时为空串。
+     */
+    public String summary() {
+        return value(SUMMARY, "");
     }
 
     /** 本轮实际使用的模型名（入图时由服务层解析，节点调用 LLM 时按此路由） */
