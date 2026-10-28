@@ -15,13 +15,22 @@ public class GraphExecution {
     public static final String STATUS_FAILED = "FAILED";
 
     private Long id;
+    /** 单次图执行 ID（UUID 去横线） */
     private String executionId;
+    /** 会话 ID（threadId） */
     private String conversationId;
+    /** 图节点名；"rewrite" 为图外改写的审计记录 */
     private String nodeName;
+    /** 执行状态：RUNNING / SUCCESS / FAILED（STATUS_* 常量） */
     private String status;
+    /** 输入 JSON（超长截断存储） */
     private String inputJson;
+    /** 输出 JSON（超长截断存储） */
     private String outputJson;
+    /** 错误信息（成功时为空） */
     private String errorMsg;
+    /** 节点耗时（毫秒） */
     private Long costMs;
+    /** 创建时间 */
     private OffsetDateTime createdAt;
 }

@@ -44,6 +44,12 @@ public final class PromptTemplates {
             建议您稍后重试，或换个方式描述问题。给您带来不便，敬请谅解。
             """;
 
+    /** 转人工提示：知识库检索无结果时的直接回复（不进入 LLM 生成） */
+    public static final String HANDOFF_ANSWER = """
+            抱歉，知识库中未找到与您问题相关的内容。
+            建议您联系人工客服处理，或换个问题试试。
+            """;
+
     /** 校验失败后的重试提示（要求模型重新生成） */
     public static final String VALIDATE_RETRY_PROMPT = """
             你上一次的输出不符合要求（可能为空、过于简短或格式错误）。

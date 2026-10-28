@@ -13,12 +13,21 @@ import org.springframework.stereotype.Component;
 @Component
 public class Router {
 
+    // ---- 路由 key：条件边返回的通道名，与 AgentGraphBuilder 中的 mapping 一一对应 ----
+    /** entry 校验通过 → 意图识别 */
     public static final String TO_INTENT = "to_intent";
+    /** intent 有效意图 → 知识检索 */
     public static final String TO_RETRIEVAL = "to_retrieval";
+    /** validate 失败且未达重试上限 → 回生成节点（有限重试环） */
     public static final String TO_GENERATE = "to_generate";
+    /** generate 成功 → 质量校验 */
     public static final String TO_VALIDATE = "to_validate";
+    /** 校验失败/LLM 异常/reject → 兜底节点 */
     public static final String TO_FALLBACK = "to_fallback";
+    /** validate 通过 → 收尾节点 */
     public static final String TO_FINALIZE = "to_finalize";
+    /** 知识库检索无结果 → 转人工节点 */
+    public static final String TO_HANDOFF = "to_handoff";
 
     private final AgentProperties properties;
 
@@ -53,6 +62,18 @@ public class Router {
             }
             // 步骤3：reject（非法内容）或未知意图 → 兜底拒绝回答
             return TO_FALLBACK;
+        };
+    }
+
+    /** 检索节点后：上下文为空（无命中/检索降级）→ 转人工；有结果 → 生成 */
+    public EdgeAction<WorkflowState> afterRetrieval() {
+        return state -> {
+            // 步骤1：上下文为空说明知识库无匹配（或检索降级）→ 转人工，不进入 LLM
+            if (state.context() == null || state.context().isBlank()) {
+                return TO_HANDOFF;
+            }
+            // 步骤2：有检索上下文 → 进入生成节点
+            return TO_GENERATE;
         };
     }
 

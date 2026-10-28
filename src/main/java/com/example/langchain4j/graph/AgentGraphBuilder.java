@@ -6,6 +6,7 @@ import com.example.langchain4j.graph.nodes.EntryNode;
 import com.example.langchain4j.graph.nodes.FallbackNode;
 import com.example.langchain4j.graph.nodes.FinalizeNode;
 import com.example.langchain4j.graph.nodes.GenerateNode;
+import com.example.langchain4j.graph.nodes.HandoffNode;
 import com.example.langchain4j.graph.nodes.IntentNode;
 import com.example.langchain4j.graph.nodes.RetrievalNode;
 import com.example.langchain4j.graph.nodes.ValidateNode;
@@ -28,9 +29,10 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
 
 /**
  * 图装配器：节点注册 + 边连接 + 条件路由 + 编译。
- * 图结构：START → entry(守卫) ⇢ intent(意图) → retrieval(检索) → generate(生成)
+ * 图结构：START → entry(守卫) ⇢ intent(意图) → retrieval(检索) ⇢ generate(生成)
  *        → validate(校验) ⇄（有限重试环）→ fallback(兜底) → finalize(收尾) → END
  *        （entry 校验失败 → 直接 fallback，跳过 intent，省一次 LLM 调用）
+ *        （检索无结果 → 直接 handoff 转人工，不进入 LLM 生成）
  * <p>
  * 说明：
  * <ul>
@@ -49,6 +51,7 @@ public class AgentGraphBuilder {
     public static final String NODE_GENERATE = "generate";
     public static final String NODE_VALIDATE = "validate";
     public static final String NODE_FALLBACK = "fallback";
+    public static final String NODE_HANDOFF = "handoff";
     public static final String NODE_FINALIZE = "finalize";
 
     private final StateSerializer<WorkflowState> stateSerializer;
@@ -59,6 +62,7 @@ public class AgentGraphBuilder {
     private final GenerateNode generateNode;
     private final ValidateNode validateNode;
     private final FallbackNode fallbackNode;
+    private final HandoffNode handoffNode;
     private final FinalizeNode finalizeNode;
     private final AgentProperties properties;
 
@@ -70,6 +74,7 @@ public class AgentGraphBuilder {
                              GenerateNode generateNode,
                              ValidateNode validateNode,
                              FallbackNode fallbackNode,
+                             HandoffNode handoffNode,
                              FinalizeNode finalizeNode,
                              AgentProperties properties) {
         this.stateSerializer = stateSerializer;
@@ -80,6 +85,7 @@ public class AgentGraphBuilder {
         this.generateNode = generateNode;
         this.validateNode = validateNode;
         this.fallbackNode = fallbackNode;
+        this.handoffNode = handoffNode;
         this.finalizeNode = finalizeNode;
         this.properties = properties;
     }
@@ -101,9 +107,12 @@ public class AgentGraphBuilder {
             graph.addNode(NODE_GENERATE, node_async(generateNode));
             graph.addNode(NODE_VALIDATE, node_async(validateNode));
             graph.addNode(NODE_FALLBACK, node_async(fallbackNode));
+            graph.addNode(NODE_HANDOFF, node_async(handoffNode));
             graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
 
-            // 步骤3：连接主链路 START → entry → intent → retrieval → generate → validate → finalize → END
+            // 步骤3：连接主链路 START → entry → intent → retrieval ⇢ generate → validate → finalize → END
+            //        （retrieval 后条件路由：无结果转 handoff；generate 后条件路由：异常转 fallback）
+            // 入口直连：START 无条件进入守卫节点（空输入校验 + 清洗 + 重试计数归零）
             graph.addEdge(START, NODE_ENTRY);
             // 守卫路由：输入校验失败（空输入）直接兜底，跳过意图识别，省一次 LLM 调用
             graph.addConditionalEdges(NODE_ENTRY, edge_async(router.afterEntry()),
@@ -113,7 +122,10 @@ public class AgentGraphBuilder {
             graph.addConditionalEdges(NODE_INTENT, edge_async(router.afterIntent()),
                     Map.of(Router.TO_RETRIEVAL, NODE_RETRIEVAL,
                             Router.TO_FALLBACK, NODE_FALLBACK));
-            graph.addEdge(NODE_RETRIEVAL, NODE_GENERATE);
+            // 检索路由：无结果（上下文为空）→ 转人工；有结果 → 生成
+            graph.addConditionalEdges(NODE_RETRIEVAL, edge_async(router.afterRetrieval()),
+                    Map.of(Router.TO_GENERATE, NODE_GENERATE,
+                            Router.TO_HANDOFF, NODE_HANDOFF));
             // 生成后路由：LLM 异常 → 兜底；正常 → 校验
             graph.addConditionalEdges(NODE_GENERATE, edge_async(router.afterGenerate()),
                     Map.of(Router.TO_VALIDATE, NODE_VALIDATE,
@@ -123,8 +135,10 @@ public class AgentGraphBuilder {
                     Map.of(Router.TO_FINALIZE, NODE_FINALIZE,
                             Router.TO_GENERATE, NODE_GENERATE,
                             Router.TO_FALLBACK, NODE_FALLBACK));
-            // 兜底与收尾直连：任何异常路径最终都汇入 finalize 后结束
+            // 兜底与转人工都直连收尾：任何路径最终都汇入 finalize 后结束
             graph.addEdge(NODE_FALLBACK, NODE_FINALIZE);
+            graph.addEdge(NODE_HANDOFF, NODE_FINALIZE);
+            // 收尾直连：finalize 保证结果非空后无条件进入 END
             graph.addEdge(NODE_FINALIZE, END);
 
             // 步骤4：编译图 —— 挂 checkpoint 持久化器 + 递归上限（防路由死循环）
