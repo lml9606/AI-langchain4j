@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS ai_conversation (
 );
 CREATE INDEX IF NOT EXISTS idx_conversation_user ON ai_conversation (user_id, created_at DESC);
 
--- 消息表
+-- 消息表（全量对话事实源：user/assistant 只追加；segment_id 标记话题段归属）
 CREATE TABLE IF NOT EXISTS ai_message (
     id              BIGSERIAL PRIMARY KEY,
     conversation_id VARCHAR(64) NOT NULL,
@@ -27,11 +27,17 @@ CREATE TABLE IF NOT EXISTS ai_message (
     content         TEXT        NOT NULL,
     model           VARCHAR(64),
     token_usage     INTEGER,                               -- 该条消息消耗 token 数
+    segment_id      INTEGER,                               -- 话题段归属（user 落库后回填；assistant 继承同轮 user）
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_message_conversation ON ai_message (conversation_id, id);
+-- 段内查询索引：生成视图/摘要按段号过滤（切回旧话题时不混入他段消息）
+CREATE INDEX IF NOT EXISTS idx_message_segment ON ai_message (conversation_id, segment_id, id);
+-- 已存在表补列（幂等）
+ALTER TABLE ai_message ADD COLUMN IF NOT EXISTS segment_id INTEGER;
 
--- 会话段摘要表（短期记忆第二层：滑出窗口的历史压缩为段摘要，按话题分段）
+-- 会话段摘要表（话题段索引：不存对话内容，只记段的 topic/摘要/起点/摘要进度，
+-- 消息内容全在 ai_message，靠消息的 segment_id 与段号关联）
 CREATE TABLE IF NOT EXISTS ai_conversation_summary (
     id                 BIGSERIAL PRIMARY KEY,
     conversation_id    VARCHAR(64) NOT NULL,
@@ -45,6 +51,20 @@ CREATE TABLE IF NOT EXISTS ai_conversation_summary (
     UNIQUE (conversation_id, segment_id)
 );
 CREATE INDEX IF NOT EXISTS idx_summary_conversation ON ai_conversation_summary (conversation_id, segment_id);
+
+-- 历史数据回填（幂等）：把旧消息按段区间打上段号（只补空值，新数据不触碰）
+UPDATE ai_message m
+SET segment_id = sub.segment_id
+FROM (
+    SELECT s.conversation_id, s.segment_id, s.start_message_id,
+           COALESCE(LEAD(s.start_message_id) OVER (PARTITION BY s.conversation_id ORDER BY s.segment_id),
+                    9223372036854775807) AS next_start
+    FROM ai_conversation_summary s
+) sub
+WHERE m.conversation_id = sub.conversation_id
+  AND m.id >= sub.start_message_id
+  AND m.id < sub.next_start
+  AND m.segment_id IS NULL;
 
 -- 图执行审计表（节点级可观测：每次节点执行一行）
 CREATE TABLE IF NOT EXISTS ai_graph_execution (

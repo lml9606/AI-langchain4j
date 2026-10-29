@@ -25,6 +25,8 @@ public class Message {
     private String model;
     /** 该条消息消耗的 token 数（可空） */
     private Integer tokenUsage;
+    /** 话题段归属（段号；user 落库后回填，assistant 继承同轮 user；可空=历史数据未回填） */
+    private Integer segmentId;
     /** 创建时间 */
     private OffsetDateTime createdAt;
 }

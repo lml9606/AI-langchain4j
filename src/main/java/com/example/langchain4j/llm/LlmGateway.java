@@ -8,6 +8,9 @@ import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.request.ChatRequestParameters;
+import dev.langchain4j.model.chat.request.ResponseFormat;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -59,12 +62,28 @@ public class LlmGateway {
 
     /** 便捷方法：system + user 两段式（按模型名路由到对应 ChatModel） */
     public LlmResult generate(String modelName, String systemPrompt, String userPrompt) {
+        return generate(modelName, buildMessages(systemPrompt, userPrompt), null);
+    }
+
+    /**
+     * JSON 模式便捷方法：以 response_format=json_object 请求模型（API 层约束输出为合法 JSON），
+     * 供改写器/意图识别等结构化输出场景使用；配合调用方解析层容错，双保险。
+     */
+    public LlmResult generateJson(String modelName, String systemPrompt, String userPrompt) {
+        return generate(modelName, buildMessages(systemPrompt, userPrompt), ResponseFormat.JSON);
+    }
+
+    private List<ChatMessage> buildMessages(String systemPrompt, String userPrompt) {
         List<ChatMessage> messages = new ArrayList<>(2);
         if (systemPrompt != null && !systemPrompt.isBlank()) {
             messages.add(SystemMessage.from(systemPrompt));
         }
         messages.add(UserMessage.from(userPrompt == null ? "" : userPrompt));
-        return generate(modelName, messages);
+        return messages;
+    }
+
+    public LlmResult generate(String modelName, List<ChatMessage> messages) {
+        return generate(modelName, messages, null);
     }
 
     /**
@@ -73,8 +92,10 @@ public class LlmGateway {
      * 执行流程：每轮重试前先查熔断状态 → 单次调用（带超时）→
      * 成功则清零失败计数；失败则退避等待后重试；重试耗尽则计一次失败，
      * 达到阈值时打开熔断（冷却期内所有调用直接快速失败，不再触碰模型）。
+     *
+     * @param responseFormat 非空时以 json_object 模式请求（不支持的供应商会报错，由调用方降级兜底）
      */
-    public LlmResult generate(String modelName, List<ChatMessage> messages) {
+    private LlmResult generate(String modelName, List<ChatMessage> messages, ResponseFormat responseFormat) {
         if (messages == null || messages.isEmpty()) {
             throw new BizException(ErrorCode.BAD_REQUEST, "LLM 调用消息不能为空");
         }
@@ -89,7 +110,7 @@ public class LlmGateway {
                 throw new BizException(ErrorCode.AGENT_LLM_UNAVAILABLE, "大模型服务熔断中，请稍后重试");
             }
             try {
-                LlmResult result = doGenerate(modelName, messages);
+                LlmResult result = doGenerate(modelName, messages, responseFormat);
                 onSuccess();
                 metrics.recordLlmCall(modelName, true, System.currentTimeMillis() - start);
                 return result;
@@ -110,12 +131,21 @@ public class LlmGateway {
         throw new BizException(ErrorCode.AGENT_LLM_UNAVAILABLE, "大模型服务暂时不可用", lastFailure);
     }
 
-    /** 单次调用 + 超时控制（按模型名从注册表取 ChatModel） */
-    private LlmResult doGenerate(String modelName, List<ChatMessage> messages) throws Exception {
+    /** 单次调用 + 超时控制（按模型名从注册表取 ChatModel；responseFormat 非空时走 ChatRequest 传参） */
+    private LlmResult doGenerate(String modelName, List<ChatMessage> messages, ResponseFormat responseFormat) throws Exception {
         ChatModel chatModel = modelRegistry.chatModel(modelName);
         long timeoutSeconds = Math.max(1, properties.getLlm().getTimeoutSeconds());
-        CompletableFuture<ChatResponse> future = CompletableFuture.supplyAsync(
-                () -> chatModel.chat(messages), llmExecutor);
+        CompletableFuture<ChatResponse> future = CompletableFuture.supplyAsync(() -> {
+            if (responseFormat == null) {
+                return chatModel.chat(messages);
+            }
+            return chatModel.chat(ChatRequest.builder()
+                    .messages(messages)
+                    .parameters(ChatRequestParameters.builder()
+                            .responseFormat(responseFormat)
+                            .build())
+                    .build());
+        }, llmExecutor);
         try {
             ChatResponse response = future.get(timeoutSeconds, TimeUnit.SECONDS);
             if (response == null || response.aiMessage() == null || response.aiMessage().text() == null) {

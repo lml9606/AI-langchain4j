@@ -109,17 +109,19 @@ public class AgentService {
         metrics.recordAgentRequest();
         // 1. 限流（超限抛 429）
         rateLimiter.checkAcquire(request.getUserId());
-        // 2. 解析本轮模型（前端指定优先，空则默认；未知模型抛 400 快速失败）
+        // 2. 输入规整：控制字符清洗 + trim（Controller @Valid 拦空/超长，这里堵“全是控制字符”的漏网输入）
+        String query = normalizeQuery(request.getQuery());
+        // 3. 解析本轮模型（前端指定优先，空则默认；未知模型抛 400 快速失败）
         String model = modelRegistry.resolve(request.getModel());
-        // 3. 会话初始化（失败抛 DB_UNAVAILABLE，快速失败）
+        // 4. 会话初始化（失败抛 DB_UNAVAILABLE，快速失败）
         String conversationId = conversationService.ensureConversation(
-                request.getUserId(), request.getConversationId(), request.getQuery());
-        // 4. 会话锁内：保存用户消息 → 加载历史 → 改写 → 图执行 → 保存助手消息
+                request.getUserId(), request.getConversationId(), query);
+        // 5. 会话锁内：保存用户消息 → 装配记忆 → 图执行 → 保存助手消息
         //    用户与助手消息都在锁内落库，一轮对话闭环后才释放锁；
         //    否则上一轮释放锁后、下一轮先读到历史时，上一轮回答尚未落库，
         //    会造成乱序（userA → userB → assistantA）与上下文丢失。
         WorkflowState state = sessionLock.executeWithLock(conversationId, () -> {
-            WorkflowState result = prepareAndInvoke(conversationId, request.getQuery(), model);
+            WorkflowState result = prepareAndInvoke(conversationId, query, model);
             // 助手消息持久化（结果已生成，落库失败降级不阻断响应）；
             // 超时路径在 invokeGraph 内返回降级应答，这里同样落库，保证一问一答闭环
             try {
@@ -150,17 +152,19 @@ public class AgentService {
      */
     public Iterable<GraphEvent> stream(ChatRequest request) {
         rateLimiter.checkAcquire(request.getUserId());
+        // 输入规整（与同步版同一语义：堵“全是控制字符”的漏网输入，全链路用清洗后的 query）
+        String query = normalizeQuery(request.getQuery());
         String model = modelRegistry.resolve(request.getModel());
         String conversationId = conversationService.ensureConversation(
-                request.getUserId(), request.getConversationId(), request.getQuery());
+                request.getUserId(), request.getConversationId(), query);
 
         // 手动加锁：锁跨"消息落库 + 改写 + 流消费"全过程，消费结束才释放
         AutoCloseable lock = sessionLock.lock(conversationId);
         try {
             // 锁内准备：用户消息持久化 + 改写 + 话题段归属 + 生成视图 + 摘要触发（与同步版同一流程）
-            PreparedTurn turn = prepareTurn(conversationId, request.getQuery(), model);
+            PreparedTurn turn = prepareTurn(conversationId, query, model);
             RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
-            Map<String, Object> inputs = buildInputs(request.getQuery(), turn.rewrite().rewritten(),
+            Map<String, Object> inputs = buildInputs(query, turn.rewrite().rewritten(),
                     turn.history(), turn.summary(), model);
             var nodeOutputs = agentGraph.stream(inputs, config);
             return () -> new AuditingEventIterator(conversationId, nodeOutputs.iterator(), lock);
@@ -240,6 +244,21 @@ public class AgentService {
 
     // ---- 内部实现 ----
 
+    /**
+     * 入口输入规整：剔除控制字符 + 去首尾空白，清洗后为空抛 400。
+     * <p>
+     * 与 Controller @Valid 的分工：@Valid 拦空串与超长（4000），这里堵
+     * “全是控制字符”的漏网输入，并保证存库/改写/入图全链路使用同一份清洗后的 query。
+     * QueryRewriter 与 EntryNode 内的清洗保留为兜底（幂等，再洗一遍无害）。
+     */
+    private String normalizeQuery(String query) {
+        String cleaned = query == null ? "" : query.replaceAll("[\\p{Cntrl}]", " ").trim();
+        if (cleaned.isEmpty()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "输入内容清洗后为空，请检查后重试");
+        }
+        return cleaned;
+    }
+
     /** 锁内准备并执行图：保存用户消息 → 双视图装配 → 改写 → 图执行（同步路径） */
     private WorkflowState prepareAndInvoke(String conversationId, String query, String model) {
         PreparedTurn turn = prepareTurn(conversationId, query, model);
@@ -248,14 +267,17 @@ public class AgentService {
     }
 
     /**
-     * 每轮锁内准备（同步/流式共用）：用户消息持久化 → 改写视图 → 话题段归属 → 生成视图 → 触发摘要。
-     * 双视图分离：改写用小窗口短截断（跨段，指代消解），生成用段内原文按 token 预算（原文回放）。
+     * 每轮锁内准备（同步/流式共用），装配两条独立的历史视图：
+     * <ul>
+     *   <li>改写视图（跨话题最近 N 条）→ 【只给改写器】：指代消解 + 话题判断；</li>
+     *   <li>生成视图（当前话题段内原文）→ 【只给生成 LLM】：原文回放，其他话题不带。</li>
+     * </ul>
      */
     private PreparedTurn prepareTurn(String conversationId, String query, String model) {
-        // 步骤1：用户消息持久化（锁内执行，失败抛 DB_UNAVAILABLE 快速失败），拿自增 id 供段起点锚定
+        // 步骤1：存用户消息（段号待步骤5.5回填），拿自增 id 供话题段起点锚定
         Message userMessage = conversationService.saveMessage(
                 conversationId, Message.ROLE_USER, query, model, null);
-        // 步骤2：改写视图（跨话题段取最近 N 轮，短截断），改写与话题归属合并一次 LLM 调用
+        // 步骤2：改写视图（跨话题最近 N 条，只给改写器，不进生成）
         List<Map<String, String>> rewriteView = conversationService.rewriteHistoryView(
                 conversationId, properties.getHistory().getRewriteWindowSize(),
                 properties.getHistory().getRewriteItemMaxLength());
@@ -265,16 +287,18 @@ public class AgentService {
                 .map(ConversationSummary::getTopic)
                 .filter(t -> t != null && !t.isBlank())
                 .toList();
-        // 步骤4：改写 + 话题归属（内部无历史短路/LLM 失败降级），单条审计落库便于排查改写质量
+        // 步骤4：改写 + 话题归属（一次 LLM 调用；内部无历史短路/LLM 失败降级），审计落库便于排查
         long rewriteStart = System.currentTimeMillis();
         RewriteResult rewrite = queryRewriter.rewrite(query, rewriteView, topics, model);
         audit(conversationId, "rewrite", GraphExecution.STATUS_SUCCESS,
                 query, rewrite.rewritten(), null, System.currentTimeMillis() - rewriteStart);
         // 步骤5：话题段归属：命中旧段复用（切回任务A只读A的窗口+摘要），新话题新建段
         ConversationSummary segment = resolveSegment(conversationId, segments, rewrite, userMessage.getId());
-        // 步骤6：生成视图（当前段原文，token 预算装配，排除当前消息）
+        // 步骤5.5：回填本轮 user 消息的段归属（assistant 落库时继承），生成视图按段号精确过滤防混段
+        conversationService.updateMessageSegment(userMessage.getId(), segment.getSegmentId());
+        // 步骤6：生成视图（当前话题段内原文，只给生成 LLM；token 预算装配，排除当前消息）
         List<Map<String, String>> generationView = conversationService.generationHistoryView(
-                conversationId, segment.getStartMessageId(),
+                conversationId, segment.getSegmentId(),
                 properties.getHistory().getGenerationMaxTokens(),
                 properties.getHistory().getGenerationItemMaxLength(),
                 GENERATION_CANDIDATE_LIMIT);
@@ -312,7 +336,8 @@ public class AgentService {
         if (topic != null && !topic.isBlank()
                 && (latest.getTopic() == null || latest.getTopic().isBlank())) {
             latest.setTopic(topic);
-            summaryMapper.upsertIncrement(latest);
+            // 补名走专用 updateTopic：只改 topic，与异步摘要任务的 content/锚点更新互不干扰
+            summaryMapper.updateTopic(conversationId, latest.getSegmentId(), topic);
             log.info("[agent] name latest segment, thread={}, segment={}, topic={}",
                     conversationId, latest.getSegmentId(), topic);
             return latest;

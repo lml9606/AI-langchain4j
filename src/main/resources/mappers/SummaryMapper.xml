@@ -23,17 +23,24 @@
             (#{conversationId}, #{segmentId}, #{topic}, #{content}, #{startMessageId}, #{coveredMessageId})
     </insert>
 
+    <!-- 增量覆盖：只更新 content/锚点，不碰 topic（补名走 updateTopic，防异步摘要用旧 topic 覆盖新名） -->
     <insert id="upsertIncrement" parameterType="com.example.langchain4j.repository.entity.ConversationSummary">
         INSERT INTO ai_conversation_summary
             (conversation_id, segment_id, topic, content, start_message_id, covered_message_id)
         VALUES
             (#{conversationId}, #{segmentId}, #{topic}, #{content}, #{startMessageId}, #{coveredMessageId})
         ON CONFLICT (conversation_id, segment_id) DO UPDATE SET
-            topic = #{topic},
             content = #{content},
             covered_message_id = #{coveredMessageId},
             updated_at = now()
     </insert>
+
+    <!-- 补名专用：仅更新 topic，不动 content/锚点 -->
+    <update id="updateTopic">
+        UPDATE ai_conversation_summary
+        SET topic = #{topic}, updated_at = now()
+        WHERE conversation_id = #{conversationId} AND segment_id = #{segmentId}
+    </update>
 
     <select id="selectByConversationId" resultMap="SummaryMap">
         SELECT id, conversation_id, segment_id, topic, content, start_message_id, covered_message_id,
@@ -41,6 +48,15 @@
         FROM ai_conversation_summary
         WHERE conversation_id = #{conversationId}
         ORDER BY segment_id ASC
+    </select>
+
+    <!-- 单段查询：唯一约束至多一行，LIMIT 1 防御 -->
+    <select id="selectBySegment" resultMap="SummaryMap">
+        SELECT id, conversation_id, segment_id, topic, content, start_message_id, covered_message_id,
+               created_at, updated_at
+        FROM ai_conversation_summary
+        WHERE conversation_id = #{conversationId} AND segment_id = #{segmentId}
+        LIMIT 1
     </select>
 
     <select id="maxSegmentId" resultType="int">

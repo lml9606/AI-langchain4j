@@ -63,6 +63,10 @@ public class ConversationService {
     /**
      * 持久化一条消息（用户/助手），失败向上抛由全局异常处理转 DB_UNAVAILABLE。
      * 返回落库后的消息（含数据库回填的自增 id，供话题段起点锚定）。
+     * <p>
+     * 段归属规则：user 消息落库时暂不带段号（段归属决策在其后，由
+     * {@link #updateMessageSegment} 回填）；assistant 消息自动继承同轮 user 的段号
+     * （同轮 user 已在锁内回填），resume 恢复轮同理。
      */
     @Transactional(rollbackFor = Exception.class)
     public Message saveMessage(String conversationId, String role, String content,
@@ -73,8 +77,16 @@ public class ConversationService {
         message.setContent(content == null ? "" : content);
         message.setModel(model);
         message.setTokenUsage(tokenUsage);
+        if (Message.ROLE_ASSISTANT.equals(role)) {
+            message.setSegmentId(messageMapper.selectLatestUserSegmentId(conversationId));
+        }
         messageMapper.insert(message);
         return message;
+    }
+
+    /** 回填消息的话题段归属（user 消息落库 → 段归属决策 → 回填段号） */
+    public void updateMessageSegment(Long messageId, int segmentId) {
+        messageMapper.updateSegmentId(messageId, segmentId);
     }
 
     /** 最后一轮是否已闭环：最新一条消息是 assistant（含超时降级轮）；无消息视为已闭环 */
@@ -101,11 +113,10 @@ public class ConversationService {
     }
 
     /**
-     * 改写视图：取最近 limit 条历史消息（正序，role/content 键值对，跨话题段），
-     * 排除当前刚保存的用户消息。
+     * 改写视图：跨话题取最近 limit 条历史（正序，role/content 键值对），排除当前刚保存的用户消息。
      * <p>
-     * 用途：图外指代消解（QueryRewriter）。指代几乎都发生在最近 1~2 轮，
-     * 窗口小、单条截断短，改写调用更快更省 token，与生成视图预算分离。
+     * 【只给图外改写器用】（指代消解 + 话题判断），不进生成 LLM。指代判断需要最近的
+     * 对话流（可能跨话题），与生成视图（当前话题段内原文）是两条独立路径，互不混用。
      */
     public List<Map<String, String>> rewriteHistoryView(String conversationId, int limit, int itemMaxLength) {
         int bounded = Math.min(Math.max(limit, 1), MAX_MESSAGE_LIMIT);
@@ -128,17 +139,17 @@ public class ConversationService {
     }
 
     /**
-     * 生成视图：取当前话题段内最近的消息（正序，role/content 键值对），
+     * 生成视图：取当前话题段内最近的消息（正序，role/content 键值对，按段号过滤），
      * 按 token 预算从最新往回装配，排除当前刚保存的用户消息。
      * <p>
-     * 用途：图内生成节点的原文回放。只注入当前话题段的原文（切回旧话题时
-     * 也只带该段的窗口），窗口外的历史由段摘要承接，实现“只读本任务记录”。
+     * 【只给图内生成 LLM 用】（原文回放）。按段号精确过滤：切回旧话题只带该段原文；
+     * 新话题首轮历史为空 —— 其他话题的消息一条都不带。
      */
-    public List<Map<String, String>> generationHistoryView(String conversationId, long segmentStartId,
+    public List<Map<String, String>> generationHistoryView(String conversationId, int segmentId,
                                                            int maxTokens, int itemMaxLength,
                                                            int candidateLimit) {
         int bounded = Math.min(Math.max(candidateLimit, 1), MAX_MESSAGE_LIMIT);
-        List<Message> messages = messageMapper.selectRecentFromId(conversationId, segmentStartId, bounded);
+        List<Message> messages = messageMapper.selectRecentBySegment(conversationId, segmentId, bounded);
         if (messages == null || messages.isEmpty()) {
             return List.of();
         }

@@ -5,7 +5,7 @@ import com.example.langchain4j.dto.RewriteResult;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.Message;
-import lombok.Data;
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -57,8 +57,8 @@ public class QueryRewriter {
             return RewriteResult.degrade(cleaned);
         }
         try {
-            // 步骤3：LLM 话题归属 + 改写一步完成（prompt 要求输出严格 JSON）
-            String output = llmGateway.generate(model, PromptTemplates.REWRITE_SYSTEM,
+            // 步骤3：LLM 话题归属 + 改写一步完成（json_object 模式约束输出，prompt 要求严格 JSON）
+            String output = llmGateway.generateJson(model, PromptTemplates.REWRITE_SYSTEM,
                     buildUserPrompt(cleaned, history, topics)).text();
             return parse(output, cleaned);
         } catch (Exception e) {
@@ -68,26 +68,27 @@ public class QueryRewriter {
         }
     }
 
-    /** 解析 LLM 输出的 JSON：rewritten 与 topic 各自独立降级，互不拖累 */
+    /** 解析 LLM 输出的 JSON：字段级容错（JsonNode 手取而非强类型反序列化），rewritten 与 topic 各自独立降级 */
     private RewriteResult parse(String output, String original) {
         String cleanedOut = clean(output);
         if (cleanedOut.isEmpty()) {
             return RewriteResult.degrade(original);
         }
         try {
-            RewriteDto dto = JsonUtil.fromJson(extractJson(cleanedOut), RewriteDto.class);
-            if (dto == null) {
+            JsonNode node = JsonUtil.fromJson(extractJson(cleanedOut), JsonNode.class);
+            if (node == null) {
                 return RewriteResult.degrade(original);
             }
+            // 字段缺失/类型错（如 newTopic 为字符串）不致整体失败：asText/asBoolean 对任何类型都安全
             // rewritten 防御：空或异常冗长（模型可能带解释废话）→ 降级原句
-            String rewritten = clean(dto.getRewritten());
+            String rewritten = clean(node.path("rewritten").asText(""));
             if (rewritten.isEmpty() || rewritten.length() > original.length() * 3 + OUTPUT_LENGTH_SLACK) {
                 log.warn("[rewrite] invalid rewritten length={}, fallback to original query", rewritten.length());
                 rewritten = original;
             }
             // topic 防御：清洗后为空则视为未判断，由调用方段解析兜底
-            String topic = clean(dto.getTopic());
-            return new RewriteResult(rewritten, topic, Boolean.TRUE.equals(dto.getNewTopic()));
+            String topic = clean(node.path("topic").asText(""));
+            return new RewriteResult(rewritten, topic, node.path("newTopic").asBoolean(false));
         } catch (Exception e) {
             log.warn("[rewrite] parse output failed, fallback to original query: {}", e.getMessage());
             return RewriteResult.degrade(original);
@@ -132,13 +133,5 @@ public class QueryRewriter {
             return "";
         }
         return text.replaceAll("[\\p{Cntrl}]", " ").trim();
-    }
-
-    /** LLM 输出载体：与 REWRITE_SYSTEM 要求输出的 JSON 字段一一对应 */
-    @Data
-    private static class RewriteDto {
-        private String rewritten;
-        private String topic;
-        private Boolean newTopic;
     }
 }
