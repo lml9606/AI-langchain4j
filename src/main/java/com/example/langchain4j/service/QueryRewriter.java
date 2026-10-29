@@ -1,7 +1,6 @@
 package com.example.langchain4j.service;
 
 import com.example.langchain4j.common.util.JsonUtil;
-import com.example.langchain4j.dto.RewriteResult;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.Message;

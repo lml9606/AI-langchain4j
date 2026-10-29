@@ -1,4 +1,4 @@
-package com.example.langchain4j.cache;
+package com.example.langchain4j.guard;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;

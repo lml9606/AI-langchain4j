@@ -1,38 +1,31 @@
 package com.example.langchain4j.service;
 
-import com.example.langchain4j.cache.RateLimiter;
-import com.example.langchain4j.cache.SessionLock;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.metrics.AgentMetrics;
-import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.ChatRequest;
 import com.example.langchain4j.dto.ChatResponse;
-import com.example.langchain4j.dto.RewriteResult;
-import com.example.langchain4j.event.GraphEvent;
+import com.example.langchain4j.graph.GraphEvent;
 import com.example.langchain4j.graph.state.WorkflowState;
+import com.example.langchain4j.guard.RateLimiter;
+import com.example.langchain4j.guard.SessionLock;
 import com.example.langchain4j.llm.ModelRegistry;
 import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.ConversationSummary;
 import com.example.langchain4j.repository.entity.GraphExecution;
 import com.example.langchain4j.repository.entity.Message;
-import com.example.langchain4j.repository.mapper.GraphExecutionMapper;
-import com.example.langchain4j.repository.mapper.SummaryMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.GraphInput;
-import org.bsc.langgraph4j.NodeOutput;
 import org.bsc.langgraph4j.RunnableConfig;
 import org.bsc.langgraph4j.state.StateSnapshot;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
@@ -54,7 +47,6 @@ import java.util.concurrent.TimeoutException;
 @Service
 public class AgentService {
 
-    private static final int MAX_AUDIT_JSON_LENGTH = 4000;
     /** 生成视图候选集上限：段内最近消息取这么多条参与 token 预算装配 */
     private static final int GENERATION_CANDIDATE_LIMIT = 40;
 
@@ -63,9 +55,9 @@ public class AgentService {
     private final SessionLock sessionLock;
     private final ConversationService conversationService;
     private final QueryRewriter queryRewriter;
-    private final SummaryMapper summaryMapper;
+    private final SegmentService segmentService;
+    private final AuditService auditService;
     private final SummaryService summaryService;
-    private final GraphExecutionMapper graphExecutionMapper;
     private final ModelRegistry modelRegistry;
     private final ThreadPoolTaskExecutor agentExecutor;
     private final AgentProperties properties;
@@ -76,9 +68,9 @@ public class AgentService {
                         SessionLock sessionLock,
                         ConversationService conversationService,
                         QueryRewriter queryRewriter,
-                        SummaryMapper summaryMapper,
+                        SegmentService segmentService,
+                        AuditService auditService,
                         SummaryService summaryService,
-                        GraphExecutionMapper graphExecutionMapper,
                         ModelRegistry modelRegistry,
                         ThreadPoolTaskExecutor agentExecutor,
                         AgentProperties properties,
@@ -88,9 +80,9 @@ public class AgentService {
         this.sessionLock = sessionLock;
         this.conversationService = conversationService;
         this.queryRewriter = queryRewriter;
-        this.summaryMapper = summaryMapper;
+        this.segmentService = segmentService;
+        this.auditService = auditService;
         this.summaryService = summaryService;
-        this.graphExecutionMapper = graphExecutionMapper;
         this.modelRegistry = modelRegistry;
         this.agentExecutor = agentExecutor;
         this.properties = properties;
@@ -167,7 +159,7 @@ public class AgentService {
             Map<String, Object> inputs = buildInputs(query, turn.rewrite().rewritten(),
                     turn.history(), turn.summary(), model);
             var nodeOutputs = agentGraph.stream(inputs, config);
-            return () -> new AuditingEventIterator(conversationId, nodeOutputs.iterator(), lock);
+            return () -> new AuditingEventIterator(conversationId, nodeOutputs.iterator(), lock, auditService);
         } catch (Exception e) {
             // 准备阶段任何异常：立即释放锁，避免锁泄漏（此前只能靠 Watchdog 兜底）
             try {
@@ -250,6 +242,9 @@ public class AgentService {
      * 与 Controller @Valid 的分工：@Valid 拦空串与超长（4000），这里堵
      * “全是控制字符”的漏网输入，并保证存库/改写/入图全链路使用同一份清洗后的 query。
      * QueryRewriter 与 EntryNode 内的清洗保留为兜底（幂等，再洗一遍无害）。
+     *
+     * @param query 原始用户输入（可为 null）
+     * @return 清洗后的输入；清洗后为空抛 {@link BizException}（BAD_REQUEST）
      */
     private String normalizeQuery(String query) {
         String cleaned = query == null ? "" : query.replaceAll("[\\p{Cntrl}]", " ").trim();
@@ -259,7 +254,14 @@ public class AgentService {
         return cleaned;
     }
 
-    /** 锁内准备并执行图：保存用户消息 → 双视图装配 → 改写 → 图执行（同步路径） */
+    /**
+     * 锁内准备并执行图（同步路径）：保存用户消息 → 双视图装配 → 改写 → 图执行。
+     *
+     * @param conversationId 会话 ID（threadId）
+     * @param query          原始用户输入
+     * @param model          本轮模型名（已解析）
+     * @return 图执行最终状态
+     */
     private WorkflowState prepareAndInvoke(String conversationId, String query, String model) {
         PreparedTurn turn = prepareTurn(conversationId, query, model);
         return invokeGraph(conversationId, query, turn.rewrite().rewritten(),
@@ -272,6 +274,11 @@ public class AgentService {
      *   <li>改写视图（跨话题最近 N 条）→ 【只给改写器】：指代消解 + 话题判断；</li>
      *   <li>生成视图（当前话题段内原文）→ 【只给生成 LLM】：原文回放，其他话题不带。</li>
      * </ul>
+     *
+     * @param conversationId 会话 ID（threadId）
+     * @param query          原始用户输入（落库与改写输入）
+     * @param model          本轮模型名（改写调用与消息落库共用）
+     * @return 每轮准备产物（改写结果 + 生成视图 + 当前段摘要）
      */
     private PreparedTurn prepareTurn(String conversationId, String query, String model) {
         // 步骤1：存用户消息（段号待步骤5.5回填），拿自增 id 供话题段起点锚定
@@ -282,18 +289,18 @@ public class AgentService {
                 conversationId, properties.getHistory().getRewriteWindowSize(),
                 properties.getHistory().getRewriteItemMaxLength());
         // 步骤3：已有话题段 → 话题标签列表（供改写器做归属判断）
-        List<ConversationSummary> segments = summaryMapper.selectByConversationId(conversationId);
-        List<String> topics = segments == null ? List.of() : segments.stream()
+        List<ConversationSummary> segments = segmentService.listSegments(conversationId);
+        List<String> topics = segments.stream()
                 .map(ConversationSummary::getTopic)
                 .filter(t -> t != null && !t.isBlank())
                 .toList();
         // 步骤4：改写 + 话题归属（一次 LLM 调用；内部无历史短路/LLM 失败降级），审计落库便于排查
         long rewriteStart = System.currentTimeMillis();
         RewriteResult rewrite = queryRewriter.rewrite(query, rewriteView, topics, model);
-        audit(conversationId, "rewrite", GraphExecution.STATUS_SUCCESS,
+        auditService.audit(conversationId, "rewrite", GraphExecution.STATUS_SUCCESS,
                 query, rewrite.rewritten(), null, System.currentTimeMillis() - rewriteStart);
         // 步骤5：话题段归属：命中旧段复用（切回任务A只读A的窗口+摘要），新话题新建段
-        ConversationSummary segment = resolveSegment(conversationId, segments, rewrite, userMessage.getId());
+        ConversationSummary segment = segmentService.resolveSegment(conversationId, segments, rewrite, userMessage.getId());
         // 步骤5.5：回填本轮 user 消息的段归属（assistant 落库时继承），生成视图按段号精确过滤防混段
         conversationService.updateMessageSegment(userMessage.getId(), segment.getSegmentId());
         // 步骤6：生成视图（当前话题段内原文，只给生成 LLM；token 预算装配，排除当前消息）
@@ -308,69 +315,20 @@ public class AgentService {
                 segment.getContent() == null ? "" : segment.getContent());
     }
 
-    /**
-     * 话题段归属：改写器 topic 精确命中已有段 → 复用该段；最新段未命名且改写器给出
-     * 话题名 → 复用并补名；newTopic → 新建段；未判断/解析降级 → 兜底最新段。
-     * 复用旧段时生成视图与摘要自动只取该段内容。
-     */
-    private ConversationSummary resolveSegment(String conversationId, List<ConversationSummary> segments,
-                                               RewriteResult rewrite, Long userMessageId) {
-        String topic = rewrite.topic();
-        // 1. 无段：创建第一段（首轮话题，topic 可能为空）
-        if (segments == null || segments.isEmpty()) {
-            return createSegment(conversationId, 1, topic, userMessageId);
-        }
-        // 2. topic 精确命中已有段 → 复用（用户切回旧话题）
-        if (topic != null && !topic.isBlank()) {
-            for (ConversationSummary s : segments) {
-                if (topic.equals(s.getTopic())) {
-                    log.info("[agent] switch back to topic segment, thread={}, segment={}, topic={}",
-                            conversationId, s.getSegmentId(), topic);
-                    return s;
-                }
-            }
-        }
-        // 3. 最新段尚未命名且改写器给出话题名 → 复用最新段并补名
-        //    （首轮创建的段 topic 为空，补名后首轮内容纳入该段，不游离在段外）
-        ConversationSummary latest = segments.get(segments.size() - 1);
-        if (topic != null && !topic.isBlank()
-                && (latest.getTopic() == null || latest.getTopic().isBlank())) {
-            latest.setTopic(topic);
-            // 补名走专用 updateTopic：只改 topic，与异步摘要任务的 content/锚点更新互不干扰
-            summaryMapper.updateTopic(conversationId, latest.getSegmentId(), topic);
-            log.info("[agent] name latest segment, thread={}, segment={}, topic={}",
-                    conversationId, latest.getSegmentId(), topic);
-            return latest;
-        }
-        // 4. 改写器判定为新话题 → 新建段（话题漂移）
-        if (rewrite.newTopic()) {
-            int next = segments.stream()
-                    .mapToInt(s -> s.getSegmentId() == null ? 0 : s.getSegmentId())
-                    .max().orElse(0) + 1;
-            return createSegment(conversationId, next, topic, userMessageId);
-        }
-        // 5. 兜底：归属最新段（segmentId 最大）
-        return latest;
-    }
-
-    /** 新建话题段：start_message_id 锚定当前用户消息，content 为空等摘要任务异步填充 */
-    private ConversationSummary createSegment(String conversationId, int segmentId, String topic, Long startMessageId) {
-        ConversationSummary summary = new ConversationSummary();
-        summary.setConversationId(conversationId);
-        summary.setSegmentId(segmentId);
-        summary.setTopic(topic == null ? "" : topic);
-        summary.setContent("");
-        summary.setStartMessageId(startMessageId);
-        summaryMapper.insert(summary);
-        log.info("[agent] new topic segment created, thread={}, segment={}, topic={}",
-                conversationId, segmentId, topic);
-        return summary;
-    }
-
     /** 每轮准备产物：改写结果 + 生成视图 + 当前段摘要，供同步/流式共用 */
     private record PreparedTurn(RewriteResult rewrite, List<Map<String, String>> history, String summary) {
     }
 
+    /**
+     * 组装图输入：query / 模型名 / 改写句 / 生成视图 / 段摘要（空值兜底为空串或空列表）。
+     *
+     * @param query     原始用户输入
+     * @param rewritten 改写后的自包含句
+     * @param history   生成视图（当前话题段内原文，role/content 键值对）
+     * @param summary   当前话题段摘要（可为空）
+     * @param model     本轮模型名
+     * @return 图输入键值对（key 为 WorkflowState 字段名常量）
+     */
     private Map<String, Object> buildInputs(String query, String rewritten,
                                             List<Map<String, String>> history, String summary, String model) {
         return Map.of(
@@ -381,6 +339,21 @@ public class AgentService {
                 WorkflowState.SUMMARY, summary == null ? "" : summary);
     }
 
+    /**
+     * 图执行（同步路径）：提交专用线程池 + 整体超时中止 + 异常转换为业务错误码。
+     * <p>
+     * 超时策略：future.cancel(true) 尽力中断工作线程，本轮改返回降级应答
+     * （user + assistant 照常落库），一问一答闭环；cancel 返回 false 说明任务恰在
+     * 超时点完成，直接取回结果，不浪费本轮执行。
+     *
+     * @param conversationId 会话 ID（threadId，checkpoint 隔离维度）
+     * @param query          原始用户输入（审计用）
+     * @param rewritten      改写后的自包含句（图内实际使用）
+     * @param history        生成视图（当前话题段内原文，role/content 键值对）
+     * @param summary        当前话题段摘要（可为空）
+     * @param model          本轮模型名（已解析）
+     * @return 图执行最终状态；超时返回降级 WorkflowState（fallback=true）
+     */
     private WorkflowState invokeGraph(String conversationId, String query, String rewritten,
                                       List<Map<String, String>> history, String summary, String model) {
         long start = System.currentTimeMillis();
@@ -407,12 +380,12 @@ public class AgentService {
         try {
             WorkflowState state = future.get(timeoutSeconds, TimeUnit.SECONDS);
             if (state == null) {
-                audit(conversationId, "workflow", GraphExecution.STATUS_FAILED,
+                auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED,
                         query, null, "图执行未返回状态", null);
                 throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行未返回结果");
             }
             metrics.recordGraphDuration(System.currentTimeMillis() - start);
-            audit(conversationId, "workflow", GraphExecution.STATUS_SUCCESS,
+            auditService.audit(conversationId, "workflow", GraphExecution.STATUS_SUCCESS,
                     query, state.result(), null, null);
             return state;
         } catch (TimeoutException e) {
@@ -421,7 +394,7 @@ public class AgentService {
             if (future.cancel(true)) {
                 // 超时即中止：取消后台任务，返回降级应答而非报错 ——
                 // 本轮 user + 降级 assistant 照常落库，历史一问一答完整，用户可直接重发。
-                audit(conversationId, "workflow", GraphExecution.STATUS_FAILED,
+                auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED,
                         query, null, "执行超时已中止", null);
                 log.warn("[agent] execution timeout after {}s, thread={}, task cancelled, return fallback answer",
                         timeoutSeconds, conversationId);
@@ -437,7 +410,7 @@ public class AgentService {
                 }
                 log.info("[agent] execution completed just after timeout, thread={}", conversationId);
                 metrics.recordGraphDuration(System.currentTimeMillis() - start);
-                audit(conversationId, "workflow", GraphExecution.STATUS_SUCCESS,
+                auditService.audit(conversationId, "workflow", GraphExecution.STATUS_SUCCESS,
                         query, completed.result(), null, null);
                 return completed;
             } catch (ExecutionException ex) {
@@ -446,7 +419,7 @@ public class AgentService {
                     throw biz;
                 }
                 log.error("[agent] graph execution failed, thread={}", conversationId, cause);
-                audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query, null, rootMessage(cause), null);
+                auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query, null, rootMessage(cause), null);
                 throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行失败: " + rootMessage(cause));
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
@@ -461,110 +434,17 @@ public class AgentService {
                 throw biz;
             }
             log.error("[agent] graph execution failed, thread={}", conversationId, cause);
-            audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query, null, rootMessage(cause), null);
+            auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query, null, rootMessage(cause), null);
             throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行失败: " + rootMessage(cause));
         }
     }
 
-    /** 审计落库（失败仅告警，不阻断主流程） */
-    private void audit(String conversationId, String nodeName, String status,
-                       String input, String output, String errorMsg, Long costMs) {
-        try {
-            GraphExecution execution = new GraphExecution();
-            execution.setExecutionId(UUID.randomUUID().toString().replace("-", ""));
-            execution.setConversationId(conversationId);
-            execution.setNodeName(nodeName);
-            execution.setStatus(status);
-            execution.setInputJson(truncate(JsonUtil.toJson(Map.of("query", input == null ? "" : input))));
-            execution.setOutputJson(truncate(JsonUtil.toJson(Map.of("result", output == null ? "" : output))));
-            execution.setErrorMsg(errorMsg);
-            execution.setCostMs(costMs);
-            graphExecutionMapper.insert(execution);
-        } catch (Exception e) {
-            log.warn("[agent] audit insert failed, degrade: {}", e.getMessage());
-        }
-    }
-
-    private String truncate(String json) {
-        if (json == null || json.length() <= MAX_AUDIT_JSON_LENGTH) {
-            return json;
-        }
-        return json.substring(0, MAX_AUDIT_JSON_LENGTH) + "...[truncated]";
-    }
-
+    /** 取异常链最深处的 message（业务原因通常在最底层），避免向上只看到包装信息 */
     private String rootMessage(Throwable t) {
         Throwable cur = t;
         while (cur.getCause() != null && cur.getCause() != cur) {
             cur = cur.getCause();
         }
         return String.valueOf(cur.getMessage());
-    }
-
-    /**
-     * 流式事件迭代器：包装图 NodeOutput 流，逐节点审计并转换为 GraphEvent。
-     * <p>
-     * NodeOutput 三种形态：
-     * <ul>
-     *   <li>isSTART()：节点刚被调度（还未执行），推 NODE_START 事件；</li>
-     *   <li>isEND()：图整体执行完毕，推 RESULT 事件携带最终答案；</li>
-     *   <li>其他：单节点执行完毕，携带该节点更新后的状态，推 NODE_END 事件。
-     * </ul>
-     */
-    private class AuditingEventIterator implements Iterator<GraphEvent> {
-
-        private final String conversationId;
-        private final Iterator<NodeOutput<WorkflowState>> delegate;
-        private final AutoCloseable lock;
-        private boolean closed = false;
-
-        AuditingEventIterator(String conversationId,
-                              Iterator<NodeOutput<WorkflowState>> delegate,
-                              AutoCloseable lock) {
-            this.conversationId = conversationId;
-            this.delegate = delegate;
-            this.lock = lock;
-        }
-
-        @Override
-        public boolean hasNext() {
-            boolean hasNext = delegate.hasNext();
-            if (!hasNext) {
-                closeQuietly();
-            }
-            return hasNext;
-        }
-
-        @Override
-        public GraphEvent next() {
-            NodeOutput<WorkflowState> output = delegate.next();
-            WorkflowState state = output.state() != null
-                    ? output.state()
-                    : new WorkflowState(Map.of());
-            String node = output.node();
-            audit(conversationId, node, GraphExecution.STATUS_SUCCESS,
-                    state.query(), state.result(), state.error(), null);
-            if (output.isSTART()) {
-                return GraphEvent.nodeStart(node);
-            }
-            if (output.isEND()) {
-                return GraphEvent.result(node, state.result());
-            }
-            if (state.error() != null && !state.error().isBlank()) {
-                return GraphEvent.error(node, state.error());
-            }
-            return GraphEvent.nodeEnd(node);
-        }
-
-        private void closeQuietly() {
-            if (closed) {
-                return;
-            }
-            closed = true;
-            try {
-                lock.close();
-            } catch (Exception e) {
-                log.warn("[agent] stream lock release failed: {}", e.getMessage());
-            }
-        }
     }
 }

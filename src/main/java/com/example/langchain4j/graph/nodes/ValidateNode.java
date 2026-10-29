@@ -107,6 +107,7 @@ public class ValidateNode implements NodeAction<WorkflowState> {
         return text.substring(start, end + 1);
     }
 
+    /** 失败原因截断：防 LLM 输出超长原因占用状态与日志（MAX_REASON_LENGTH 上限） */
     private String truncate(String text) {
         if (text == null) {
             return "";

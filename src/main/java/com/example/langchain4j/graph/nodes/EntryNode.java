@@ -17,6 +17,7 @@ import java.util.Map;
 @Component
 public class EntryNode implements NodeAction<WorkflowState> {
 
+    /** 单条输入最大长度：超出部分直接截断，保护下游 token 开销（与 Controller @Size 一致，此处为图内兜底） */
     private static final int MAX_QUERY_LENGTH = 4000;
 
     @Override

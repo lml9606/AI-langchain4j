@@ -25,7 +25,7 @@ public class EmbeddingService {
      * 文本嵌入。
      *
      * @param text 输入文本（已做防御性校验）
-     * @return 向量；模型不可用时抛 {@link BizException}，由调用方降级
+     * @return 向量；模型不可用时抛 {@link BizException}（检索链路由 VectorSearchService 降级，导入链路直接失败）
      */
     public float[] embed(String text) {
         if (text == null || text.isBlank()) {

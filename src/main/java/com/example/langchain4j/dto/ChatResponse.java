@@ -8,12 +8,17 @@ import lombok.Data;
 @Data
 public class ChatResponse {
 
+    /** 会话 ID（同时是 LangGraph threadId） */
     private String conversationId;
+    /** 最终回答（保证非空，兜底路径也返回降级答案） */
     private String result;
     /** 是否走了兜底节点（业务可据此提示降级） */
     private boolean fallback;
+    /** 本轮生成消耗的 token 总数（模型未返回时为空） */
     private Integer tokenUsage;
+    /** 服务端处理耗时（毫秒，不含网络传输） */
     private long costMs;
+    /** 本轮是否已闭环（正常与兜底路径均为 true；图执行异常时此对象不返回） */
     private boolean done;
 
     public static ChatResponse of(String conversationId, String result, boolean fallback,

@@ -8,7 +8,7 @@ import com.example.langchain4j.dto.ChatRequest;
 import com.example.langchain4j.dto.ChatResponse;
 import com.example.langchain4j.dto.MessageDto;
 import com.example.langchain4j.dto.ResumeRequest;
-import com.example.langchain4j.event.GraphEvent;
+import com.example.langchain4j.graph.GraphEvent;
 import com.example.langchain4j.service.AgentService;
 import com.example.langchain4j.service.ConversationService;
 import jakarta.validation.Valid;
@@ -142,7 +142,7 @@ public class AgentController {
     }
 
     /** 会话历史消息（默认 50 条，上限 200） */
-    @GetMapping("/api/conversation/{id}/messages")
+    @GetMapping("/conversation/{id}/messages")
     public ApiResponse<List<MessageDto>> messages(@PathVariable("id") String conversationId,
                                                   @RequestParam(defaultValue = "50") int limit) {
         List<MessageDto> messages = conversationService.listMessages(conversationId, limit).stream()

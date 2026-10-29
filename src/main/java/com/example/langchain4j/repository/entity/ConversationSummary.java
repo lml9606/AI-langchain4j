@@ -5,13 +5,13 @@ import lombok.Data;
 import java.time.OffsetDateTime;
 
 /**
- * 会话段摘要：会话内一个话题段（segment）的增量摘要。
+ * 会话段摘要：会话内一个话题段（segment）的完整摘要（重写式，见 SummaryService）。
  * <p>
  * 生命周期：
  * <ol>
  *   <li>话题切换时创建段记录（start_message_id = 当前消息 id，content 为空）；</li>
- *   <li>段内滑出窗口的消息达到阈值后，异步压缩并增量追加到 content，
- *       covered_message_id 记录已覆盖到哪条消息（增量锚点）；</li>
+ *   <li>段内滑出窗口的消息达到阈值后，异步把「已有摘要 + 新增对话」重写为完整摘要
+ *       覆盖 content（非增量拼接），covered_message_id 记录已覆盖到哪条消息（增量锚点）；</li>
  *   <li>用户切回旧话题时，按段注入对应摘要 + 该段窗口，其他段不注入。</li>
  * </ol>
  */
@@ -25,7 +25,7 @@ public class ConversationSummary {
     private Integer segmentId;
     /** 话题标签（改写器输出，可空） */
     private String topic;
-    /** 段摘要内容（增量追加） */
+    /** 段摘要内容（重写式完整摘要，非增量） */
     private String content;
     /** 段起点消息 id（含） */
     private Long startMessageId;

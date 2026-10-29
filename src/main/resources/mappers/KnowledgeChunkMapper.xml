@@ -7,7 +7,7 @@
         <id property="id" column="id"/>
         <result property="content" column="content"/>
         <result property="embedding" column="embedding"
-                typeHandler="com.example.langchain4j.common.util.VectorTypeHandler"/>
+                typeHandler="com.example.langchain4j.repository.typehandler.VectorTypeHandler"/>
         <result property="metadata" column="metadata"/>
         <result property="createdAt" column="created_at"/>
     </resultMap>
@@ -17,7 +17,7 @@
         INSERT INTO ai_knowledge_chunk (content, embedding, metadata)
         VALUES (
             #{content},
-            #{embedding, typeHandler=com.example.langchain4j.common.util.VectorTypeHandler}::vector,
+            #{embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
             CAST(#{metadata} AS jsonb)
         )
     </insert>
@@ -26,8 +26,8 @@
         SELECT id, content, embedding, metadata::text AS metadata, created_at
         FROM ai_knowledge_chunk
         WHERE embedding IS NOT NULL
-          AND (1 - (embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.common.util.VectorTypeHandler})) &gt;= #{minScore}
-        ORDER BY embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.common.util.VectorTypeHandler}
+          AND (1 - (embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler})) &gt;= #{minScore}
+        ORDER BY embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}
         LIMIT #{topK}
     </select>
 

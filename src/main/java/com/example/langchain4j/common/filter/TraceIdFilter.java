@@ -14,7 +14,6 @@ import java.io.IOException;
 
 /**
  * TraceId 过滤器：为每个 HTTP 请求生成/透传 traceId。
- * <p>
  * <ul>
  *   <li>上游已带 X-Trace-Id 则透传（跨服务串联），否则新生成；</li>
  *   <li>写入 SLF4J MDC，配合 logback pattern 中的 %X{traceId} 输出到每条日志；</li>

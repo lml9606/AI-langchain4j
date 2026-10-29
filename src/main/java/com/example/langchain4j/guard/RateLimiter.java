@@ -1,4 +1,4 @@
-package com.example.langchain4j.cache;
+package com.example.langchain4j.guard;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
@@ -49,7 +49,7 @@ public class RateLimiter {
      * 尝试获取一个令牌（计数 +1）。
      *
      * @param dimension 限流维度标识（如 userId、IP），将拼入 Redis key
-     * @return true=放行，false=触发限流（或限流被禁用）
+     * @return true=放行（含限流禁用与 Redis 故障 fail-open）；false=拒绝（触发限流或 fail-closed）
      */
     public boolean tryAcquire(String dimension) {
         if (!properties.getRateLimit().isEnabled()) {

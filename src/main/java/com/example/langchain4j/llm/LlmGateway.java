@@ -13,6 +13,7 @@ import dev.langchain4j.model.chat.request.ChatRequestParameters;
 import dev.langchain4j.model.chat.request.ResponseFormat;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -26,7 +27,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * LLM 网关：图内所有模型调用必须经过此网关。
+ * LLM 网关：所有模型调用的统一入口（图内节点与图外 QueryRewriter/SummaryService 都经此网关）。
  * 提供三层防护：
  * 1. 超时控制（Future.get + timeout，防止模型挂起拖垮线程池）；
  * 2. 指数退避重试（1s/2s/4s + 随机抖动，避免瞬时抖动直接失败）；
@@ -45,18 +46,23 @@ public class LlmGateway {
     private final ModelRegistry modelRegistry;
     private final StringRedisTemplate redisTemplate;
     private final AgentProperties properties;
+    /**
+     * LLM 调用执行器：独立于图执行线程池（llmExecutor Bean）。
+     * 隔离原因：图执行线程会同步等待本执行器上的 LLM 任务，共用同一池时高并发下
+     * 两者相互等待形成准死锁；独立池后等待只阻塞调用线程，不影响其他 LLM 任务执行。
+     */
     private final Executor llmExecutor;
     private final AgentMetrics metrics;
 
     public LlmGateway(ModelRegistry modelRegistry,
                       StringRedisTemplate redisTemplate,
                       AgentProperties properties,
-                      Executor agentExecutor,
+                      @Qualifier("llmExecutor") Executor llmExecutor,
                       AgentMetrics metrics) {
         this.modelRegistry = modelRegistry;
         this.redisTemplate = redisTemplate;
         this.properties = properties;
-        this.llmExecutor = agentExecutor;
+        this.llmExecutor = llmExecutor;
         this.metrics = metrics;
     }
 

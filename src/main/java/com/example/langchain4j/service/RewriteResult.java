@@ -1,4 +1,4 @@
-package com.example.langchain4j.dto;
+package com.example.langchain4j.service;
 
 /**
  * 查询改写结果：改写句 + 话题归属（与改写合并为一次 LLM 调用输出）。

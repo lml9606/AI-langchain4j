@@ -1,4 +1,4 @@
-package com.example.langchain4j.common.util;
+package com.example.langchain4j.repository.typehandler;
 
 import com.pgvector.PGvector;
 import org.apache.ibatis.type.BaseTypeHandler;

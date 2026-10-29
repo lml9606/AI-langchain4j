@@ -18,6 +18,9 @@ public class AgentProperties {
     /** 图执行线程池配置 */
     private Executor executor = new Executor();
 
+    /** LLM 调用线程池配置（与图执行线程池隔离） */
+    private LlmExecutor llmExecutor = new LlmExecutor();
+
     /** LLM 网关防护配置 */
     private Llm llm = new Llm();
 
@@ -72,6 +75,18 @@ public class AgentProperties {
         private int corePoolSize = 4;
         private int maxPoolSize = 16;
         private int queueCapacity = 200;
+        private int keepAliveSeconds = 60;
+    }
+
+    /**
+     * LLM 调用线程池配置：隔离图执行线程池，避免图线程与 LLM 任务相互等待。
+     * 合理并发数 ≈ LLM 配额(QPS) × 平均响应秒数（利特尔法则），按实际配额调优。
+     */
+    @Data
+    public static class LlmExecutor {
+        private int corePoolSize = 8;
+        private int maxPoolSize = 32;
+        private int queueCapacity = 400;
         private int keepAliveSeconds = 60;
     }
 

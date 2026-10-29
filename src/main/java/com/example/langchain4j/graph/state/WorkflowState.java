@@ -13,8 +13,7 @@ import java.util.Map;
  * 更新机制：节点不直接改状态，而是返回 {@code Map<String,Object>} 增量更新 ——
  * 框架把返回值合并进状态后生成新状态对象传给下一个节点（不可变更新），
  * 每个节点看到的是“前序节点完成后”的快照，天然支持 checkpoint 回放与并发安全。
- * 继承框架的 {@link AgentState}（与 {@code com.example.langchain4j.graph.state.WorkflowState}
- * 同简单名，注意 import 范围）。
+ * 继承框架的 {@link AgentState}，数据存放在其内部 Map 中。
  */
 public class WorkflowState extends AgentState {
 
@@ -115,7 +114,7 @@ public class WorkflowState extends AgentState {
     }
 
     public int retryCount() {
-        // 步骤1：取出原始值（缺省 0，二参重载等价 orElse，无需 Optional 包装）
+        // 步骤1：取出原始值（缺省 0）
         Object v = value(RETRY_COUNT, 0);
         // 步骤2：数字直接取值；字符串漂移（checkpoint 反序列化）尝试解析
         if (v instanceof Number number) {
