@@ -30,6 +30,10 @@ public class WorkflowState extends AgentState {
     public static final String RESULT = "result";
     public static final String RETRY_COUNT = "retryCount";
     public static final String VALIDATED = "validated";
+    /** 校验失败类型（format=规则层失败 / grounding=LLM 质检发现与资料矛盾），供路由决定回生成还是回检索 */
+    public static final String VALIDATION_ISSUE = "validationIssue";
+    /** 校验失败原因（LLM 质检给出的具体矛盾描述），供重查时改写 query 与重试指令引用 */
+    public static final String VALIDATION_REASON = "validationReason";
     public static final String ERROR = "error";
     public static final String FALLBACK = "fallback";
     public static final String TOKEN_USAGE = "tokenUsage";
@@ -44,7 +48,7 @@ public class WorkflowState extends AgentState {
     // 为什么不用字段直接取值：状态底层是 Map<String,Object>，任何节点都可能写错类型
     // 或漏写 key；访问器统一做类型转换 + 默认值兜底，节点代码永远拿到安全值。
     // retryCount/validated/tokenUsage 等还需防御“数字/布尔被写成字符串”的场景
-    // （如 checkpoint 反序列化后类型漂移），因此逐个 instanceof 判断。
+    // （如 checkpoint 反序列化后类型漂移）：字符串能解析则解析，失败才回退默认值。
 
     public String query() {
         return value(QUERY, "");
@@ -111,16 +115,34 @@ public class WorkflowState extends AgentState {
     }
 
     public int retryCount() {
-        // 步骤1：取出原始值（缺省 0）
-        Object v = value(RETRY_COUNT).orElse(0);
-        // 步骤2：防御类型漂移 —— 非数字（如被写成字符串）一律回退 0
-        return v instanceof Number number ? number.intValue() : 0;
+        // 步骤1：取出原始值（缺省 0，二参重载等价 orElse，无需 Optional 包装）
+        Object v = value(RETRY_COUNT, 0);
+        // 步骤2：数字直接取值；字符串漂移（checkpoint 反序列化）尝试解析
+        if (v instanceof Number number) {
+            return number.intValue();
+        }
+        // 步骤3：解析失败（脏数据）才回退 0
+        try {
+            return Integer.parseInt(String.valueOf(v).trim());
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 
     public boolean validated() {
         // 步骤1：取出原始值（缺省 false）
         // 步骤2：统一转为字符串后解析布尔，兼容 "true"/布尔/数字等写法
         return Boolean.parseBoolean(String.valueOf(value(VALIDATED).orElse(false)));
+    }
+
+    /** 校验失败类型：format=规则层失败（回生成重试）；grounding=与资料矛盾（回检索重查）；未失败时为空 */
+    public String validationIssue() {
+        return value(VALIDATION_ISSUE, "");
+    }
+
+    /** 校验失败原因：LLM 质检的矛盾描述，供重查改写 query 与重试指令引用；未失败时为空 */
+    public String validationReason() {
+        return value(VALIDATION_REASON, "");
     }
 
     public String error() {

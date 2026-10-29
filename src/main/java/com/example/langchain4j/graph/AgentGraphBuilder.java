@@ -130,10 +130,12 @@ public class AgentGraphBuilder {
             graph.addConditionalEdges(NODE_GENERATE, edge_async(router.afterGenerate()),
                     Map.of(Router.TO_VALIDATE, NODE_VALIDATE,
                             Router.TO_FALLBACK, NODE_FALLBACK));
-            // 校验路由：通过 → 收尾；未达重试上限 → 回生成；超限 → 兜底
+            // 校验路由：通过 → 收尾；未达重试上限时按原因分叉
+            //           （grounding → 回检索重查；format 等 → 回生成重试）；超限 → 兜底
             graph.addConditionalEdges(NODE_VALIDATE, edge_async(router.afterValidate()),
                     Map.of(Router.TO_FINALIZE, NODE_FINALIZE,
                             Router.TO_GENERATE, NODE_GENERATE,
+                            Router.TO_RETRIEVAL, NODE_RETRIEVAL,
                             Router.TO_FALLBACK, NODE_FALLBACK));
             // 兜底与转人工都直连收尾：任何路径最终都汇入 finalize 后结束
             graph.addEdge(NODE_FALLBACK, NODE_FINALIZE);
@@ -155,15 +157,15 @@ public class AgentGraphBuilder {
     /**
      * 递归上限：正常路径 + 校验重试环上限 + 安全余量，防御路由死循环。
      * <p>
-     * 推导：最坏情况下 validate→generate 环最多跑 maxRetries 次，
-     * 每次环占 2 个节点（validate + generate），乘 2 后加固定余量 10
+     * 推导：最坏情况下 validate→retrieval→generate 环最多跑 maxRetries 次，
+     * 每次环占 3 个节点（validate + retrieval + generate），乘 3 后加固定余量 10
      * 覆盖 entry/intent/retrieval/fallback/finalize 等线性节点开销。
      * 若路由配置错误导致死循环，达到上限后框架会抛异常中断，而非无限跑。
      */
     private int recursionLimit() {
         // 步骤1：读取配置的校验重试上限，至少为 1（防御配置为 0/负数）
         int maxRetries = Math.max(1, properties.getMaxValidateRetries());
-        // 步骤2：环内 2 个节点（validate + generate）× 重试次数 + 10 个线性节点余量
-        return maxRetries * 2 + 10;
+        // 步骤2：环内 3 个节点（validate + retrieval + generate）× 重试次数 + 10 个线性节点余量
+        return maxRetries * 3 + 10;
     }
 }

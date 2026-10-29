@@ -58,14 +58,44 @@ public final class PromptTemplates {
 
     /**
      * 校验失败后的重试提示（要求模型重新生成）。
-     * 护栏：明确“不得编造”——重试压力下模型易凑输出，防幻觉在重试环中被放大。
+     * 护栏：明确“不得编造”——重试压力下模型易凑输出，防幻觉在重试环中被放大；
+     * 带失败原因时模型能针对性地修正而非盲目重写。
      */
     public static final String VALIDATE_RETRY_PROMPT = """
-            你上一次的输出不符合要求（可能为空、过于简短或格式错误）。
+            你上一次的输出未通过质量校验%s。
             请重新生成：内容完整、结构清晰、使用 Markdown 格式；
             必须基于参考资料与对话事实回答，不得编造不存在的内容。
             用户需求：%s
             """;
+
+    /**
+     * 生成结果质检（LLM 内容层校验）：判断回答是否基于参考资料、是否回答了用户需求。
+     * 只输出 JSON；issue 取值：grounding=编造/与资料矛盾，incomplete=未完整回答问题，
+     * irrelevant=答非所问。valid=true 时 issue 填空串。
+     */
+    public static final String VALIDATE_LLM_SYSTEM = """
+            你是回答质量质检员：根据用户需求与参考资料，判断候选回答是否合格。
+            判断标准：
+            1. grounding：回答的关键事实与参考资料矛盾或编造了资料中不存在的内容；
+            2. incomplete：回答未完整回应用户需求（漏了关键部分）；
+            3. irrelevant：回答与用户需求不相关。
+            回答合格时 valid=true、issue 为空串；不合格时给出 issue 与一句具体 reason（指出矛盾点或缺失点）。
+            只输出严格 JSON，不要任何解释、引号或前后缀：
+            {"valid": true, "issue": "", "reason": ""}
+            """;
+
+    /**
+     * 重查 query 改写：质检发现回答与资料矛盾时，根据失败原因生成更精确的检索查询，
+     * 避免用原 query 重查拿回同一批不相关/矛盾资料。只输出改写后的查询文本。
+     */
+    public static final String REQUERY_SYSTEM = """
+            你是查询改写器：根据原查询与质检失败原因，输出一个更精确的检索查询。
+            要求：
+            1. 针对失败原因中提到的具体矛盾点或缺失点，让查询更聚焦；
+            2. 保持原查询的核心意图不变；
+            3. 只输出查询文本本身，不要任何解释或引号。
+            """;
+
 
     /** 多轮对话改写：话题归属判断 + 指代消解一次完成，输出严格 JSON */
     public static final String REWRITE_SYSTEM = """

@@ -111,9 +111,13 @@ public class GenerateNode implements NodeAction<WorkflowState> {
 
     private String buildUserPrompt(WorkflowState state) {
         StringBuilder sb = new StringBuilder();
-        // 步骤1：校验重试时（重试计数 > 0），拼入重试修正指令（用有效查询）
+        // 步骤1：校验重试时（重试计数 > 0），拼入重试修正指令（带质检失败原因 + 有效查询）
         if (state.retryCount() > 0) {
-            sb.append(String.format(PromptTemplates.VALIDATE_RETRY_PROMPT, state.effectiveQuery())).append("\n\n");
+            // 失败原因可能为空（如格式校验失败未写原因），组装成“（原因：xxx）”括号片断；
+            // 空则只提示未通过校验，不输出空括号
+            String reason = state.validationReason();
+            String reasonPart = (reason == null || reason.isBlank()) ? "" : "（原因：" + reason + "）";
+            sb.append(String.format(PromptTemplates.VALIDATE_RETRY_PROMPT, reasonPart, state.effectiveQuery())).append("\n\n");
         }
         // 步骤2：拼入用户需求正文（有效查询：改写后的自包含句，未改写时即原始 query）
         sb.append("用户需求：").append(state.effectiveQuery());

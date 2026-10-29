@@ -2,6 +2,7 @@ package com.example.langchain4j.graph.edges;
 
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.nodes.IntentNode;
+import com.example.langchain4j.graph.nodes.ValidateNode;
 import com.example.langchain4j.graph.state.WorkflowState;
 import org.bsc.langgraph4j.action.EdgeAction;
 import org.springframework.stereotype.Component;
@@ -16,7 +17,7 @@ public class Router {
     // ---- 路由 key：条件边返回的通道名，与 AgentGraphBuilder 中的 mapping 一一对应 ----
     /** entry 校验通过 → 意图识别 */
     public static final String TO_INTENT = "to_intent";
-    /** intent 有效意图 → 知识检索 */
+    /** intent 有效意图 → 知识检索；validate 质检发现与资料矛盾（grounding）→ 回检索重查 */
     public static final String TO_RETRIEVAL = "to_retrieval";
     /** validate 失败且未达重试上限 → 回生成节点（有限重试环） */
     public static final String TO_GENERATE = "to_generate";
@@ -96,9 +97,15 @@ public class Router {
             if (state.validated()) {
                 return TO_FINALIZE;
             }
-            // 步骤2：校验失败但重试次数未达上限 → 回生成节点重试
+            // 步骤2：校验失败但重试次数未达上限 → 按失败原因分路由
             int maxRetries = Math.max(1, properties.getMaxValidateRetries());
             if (state.retryCount() < maxRetries) {
+                // 2.1：质检发现回答与资料矛盾/编造（grounding）→ 回检索节点
+                //      （RetrievalNode 会用失败原因改写 query 重新检索，换一批上下文再生成）
+                if (ValidateNode.ISSUE_GROUNDING.equals(state.validationIssue())) {
+                    return TO_RETRIEVAL;
+                }
+                // 2.2：其余失败（格式问题等）→ 回生成节点重试
                 return TO_GENERATE;
             }
             // 步骤3：重试次数超限 → 放弃重试，兜底收尾
