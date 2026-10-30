@@ -2,11 +2,13 @@ package com.example.langchain4j.graph;
 
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.edges.Router;
+import com.example.langchain4j.graph.nodes.DecomposeNode;
 import com.example.langchain4j.graph.nodes.EntryNode;
 import com.example.langchain4j.graph.nodes.FallbackNode;
 import com.example.langchain4j.graph.nodes.FinalizeNode;
 import com.example.langchain4j.graph.nodes.GenerateNode;
 import com.example.langchain4j.graph.nodes.HandoffNode;
+import com.example.langchain4j.graph.nodes.HopCheckNode;
 import com.example.langchain4j.graph.nodes.IntentNode;
 import com.example.langchain4j.graph.nodes.RetrievalNode;
 import com.example.langchain4j.graph.nodes.ValidateNode;
@@ -29,16 +31,18 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
 
 /**
  * 图装配器：节点注册 + 边连接 + 条件路由 + 编译。
- * 图结构：START → entry(守卫) ⇢ intent(意图) → retrieval(检索) ⇢ generate(生成)
- *        → validate(校验) ⇄（有限重试环）→ fallback(兜底) → finalize(收尾) → END
+ * 图结构：START → entry(守卫) ⇢ intent(意图) → decompose(问题分解) → retrieval(检索)
+ *        ⇄ hopCheck(多跳判断，有限补查环) → generate(生成) → validate(校验)
+ *        ⇄（Corrective RAG 有限重试环）→ fallback(兜底) → finalize(收尾) → END
  *        （entry 校验失败 → 直接 fallback，跳过 intent，省一次 LLM 调用）
+ *        （代码生成意图跳过 decompose/hopCheck，直接 retrieval → generate）
  *        （检索无结果 → 直接 handoff 转人工，不进入 LLM 生成）
  * <p>
  * 说明：
  * <ul>
  *   <li>checkpointSaver 由调用方（config 层）传入，Postgres 不可用时外部降级为 MemorySaver</li>
  *   <li>图装配失败属于启动期配置错误，直接 fail-fast 抛异常，不吞掉</li>
- *   <li>recursionLimit 基于重试上限动态计算，防御路由死循环</li>
+ *   <li>recursionLimit 基于多跳上限与重试上限动态计算，防御路由死循环</li>
  * </ul>
  */
 @Component
@@ -47,7 +51,9 @@ public class AgentGraphBuilder {
     /** 节点名常量：路由映射与节点注册共用，避免字符串漂移 */
     public static final String NODE_ENTRY = "entry";
     public static final String NODE_INTENT = "intent";
+    public static final String NODE_DECOMPOSE = "decompose";
     public static final String NODE_RETRIEVAL = "retrieval";
+    public static final String NODE_HOP_CHECK = "hop_check";
     public static final String NODE_GENERATE = "generate";
     public static final String NODE_VALIDATE = "validate";
     public static final String NODE_FALLBACK = "fallback";
@@ -58,7 +64,9 @@ public class AgentGraphBuilder {
     private final Router router;
     private final EntryNode entryNode;
     private final IntentNode intentNode;
+    private final DecomposeNode decomposeNode;
     private final RetrievalNode retrievalNode;
+    private final HopCheckNode hopCheckNode;
     private final GenerateNode generateNode;
     private final ValidateNode validateNode;
     private final FallbackNode fallbackNode;
@@ -70,7 +78,9 @@ public class AgentGraphBuilder {
                              Router router,
                              EntryNode entryNode,
                              IntentNode intentNode,
+                             DecomposeNode decomposeNode,
                              RetrievalNode retrievalNode,
+                             HopCheckNode hopCheckNode,
                              GenerateNode generateNode,
                              ValidateNode validateNode,
                              FallbackNode fallbackNode,
@@ -81,7 +91,9 @@ public class AgentGraphBuilder {
         this.router = router;
         this.entryNode = entryNode;
         this.intentNode = intentNode;
+        this.decomposeNode = decomposeNode;
         this.retrievalNode = retrievalNode;
+        this.hopCheckNode = hopCheckNode;
         this.generateNode = generateNode;
         this.validateNode = validateNode;
         this.fallbackNode = fallbackNode;
@@ -103,29 +115,39 @@ public class AgentGraphBuilder {
             // 步骤2：注册全部节点（异步包装，节点内部各自负责防御与日志）
             graph.addNode(NODE_ENTRY, node_async(entryNode));
             graph.addNode(NODE_INTENT, node_async(intentNode));
+            graph.addNode(NODE_DECOMPOSE, node_async(decomposeNode));
             graph.addNode(NODE_RETRIEVAL, node_async(retrievalNode));
+            graph.addNode(NODE_HOP_CHECK, node_async(hopCheckNode));
             graph.addNode(NODE_GENERATE, node_async(generateNode));
             graph.addNode(NODE_VALIDATE, node_async(validateNode));
             graph.addNode(NODE_FALLBACK, node_async(fallbackNode));
             graph.addNode(NODE_HANDOFF, node_async(handoffNode));
             graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
 
-            // 步骤3：连接主链路 START → entry → intent → retrieval ⇢ generate → validate → finalize → END
-            //        （retrieval 后条件路由：无结果转 handoff；generate 后条件路由：异常转 fallback）
-            // 入口直连：START 无条件进入守卫节点（空输入校验 + 清洗 + 重试计数归零）
+            // 步骤3：连接主链路 START → entry → intent → decompose ⇢ retrieval ⇄ hop_check → generate → validate → finalize → END
+            //        （retrieval 后条件路由：无结果转 handoff；hop_check 后条件路由：信息不足回检索补查）
+            // 入口直连：START 无条件进入守卫节点（空输入校验 + 清洗 + 重试/多跳计数归零）
             graph.addEdge(START, NODE_ENTRY);
             // 守卫路由：输入校验失败（空输入）直接兜底，跳过意图识别，省一次 LLM 调用
             graph.addConditionalEdges(NODE_ENTRY, edge_async(router.afterEntry()),
                     Map.of(Router.TO_INTENT, NODE_INTENT,
                             Router.TO_FALLBACK, NODE_FALLBACK));
-            // 意图路由：有效意图 → 检索；reject/异常 → 兜底
+            // 意图路由：知识问答 → 问题分解；代码生成 → 直接检索；reject/异常 → 兜底
             graph.addConditionalEdges(NODE_INTENT, edge_async(router.afterIntent()),
-                    Map.of(Router.TO_RETRIEVAL, NODE_RETRIEVAL,
+                    Map.of(Router.TO_DECOMPOSE, NODE_DECOMPOSE,
+                            Router.TO_RETRIEVAL, NODE_RETRIEVAL,
                             Router.TO_FALLBACK, NODE_FALLBACK));
-            // 检索路由：无结果（上下文为空）→ 转人工；有结果 → 生成
+            // 分解直连：分解后（含降级单查询）无条件进入检索
+            graph.addEdge(NODE_DECOMPOSE, NODE_RETRIEVAL);
+            // 检索路由：无结果（上下文为空）→ 转人工；知识问答 → 多跳判断；代码生成 → 直接生成
             graph.addConditionalEdges(NODE_RETRIEVAL, edge_async(router.afterRetrieval()),
-                    Map.of(Router.TO_GENERATE, NODE_GENERATE,
+                    Map.of(Router.TO_HOP_CHECK, NODE_HOP_CHECK,
+                            Router.TO_GENERATE, NODE_GENERATE,
                             Router.TO_HANDOFF, NODE_HANDOFF));
+            // 多跳路由：上下文足够/超限 → 生成；不足且未达上限 → 回检索补查（有限多跳环）
+            graph.addConditionalEdges(NODE_HOP_CHECK, edge_async(router.afterHopCheck()),
+                    Map.of(Router.TO_GENERATE, NODE_GENERATE,
+                            Router.TO_RETRIEVAL, NODE_RETRIEVAL));
             // 生成后路由：LLM 异常 → 兜底；正常 → 校验
             graph.addConditionalEdges(NODE_GENERATE, edge_async(router.afterGenerate()),
                     Map.of(Router.TO_VALIDATE, NODE_VALIDATE,
@@ -155,17 +177,19 @@ public class AgentGraphBuilder {
     }
 
     /**
-     * 递归上限：正常路径 + 校验重试环上限 + 安全余量，防御路由死循环。
+     * 递归上限：正常路径 + 多跳环上限 + 校验重试环上限 + 安全余量，防御路由死循环。
      * <p>
-     * 推导：最坏情况下 validate→retrieval→generate 环最多跑 maxRetries 次，
-     * 每次环占 3 个节点（validate + retrieval + generate），乘 3 后加固定余量 10
-     * 覆盖 entry/intent/retrieval/fallback/finalize 等线性节点开销。
+     * 推导：图上有两个环 ——
+     * 多跳环 hop_check→retrieval 每次占 2 个节点，最多 maxHops 轮；
+     * 质检环 validate→retrieval→generate 每次占 3 个节点，最多 maxRetries 轮；
+     * 两者之和再加固定余量 10 覆盖 entry/intent/decompose/fallback/finalize 等线性节点开销。
      * 若路由配置错误导致死循环，达到上限后框架会抛异常中断，而非无限跑。
      */
     private int recursionLimit() {
-        // 步骤1：读取配置的校验重试上限，至少为 1（防御配置为 0/负数）
+        // 步骤1：读取配置的多跳与校验重试上限，至少为 1（防御配置为 0/负数）
+        int maxHops = Math.max(1, properties.getMaxHops());
         int maxRetries = Math.max(1, properties.getMaxValidateRetries());
-        // 步骤2：环内 3 个节点（validate + retrieval + generate）× 重试次数 + 10 个线性节点余量
-        return maxRetries * 3 + 10;
+        // 步骤2：多跳环 2 节点 × 轮数 + 质检环 3 节点 × 轮数 + 10 个线性节点余量
+        return maxHops * 2 + maxRetries * 3 + 10;
     }
 }

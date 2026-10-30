@@ -43,7 +43,7 @@ public class IntentNode implements NodeAction<WorkflowState> {
             //        用有效查询（改写后的自包含句，未改写时即原始 query）
             String raw = llmGateway.generateJson(state.model(),
                     PromptTemplates.INTENT_CLASSIFY_SYSTEM, state.effectiveQuery()).text();
-            JsonNode node = JsonUtil.fromJson(extractJson(raw), JsonNode.class);
+            JsonNode node = JsonUtil.fromJson(JsonUtil.extractJsonObject(raw), JsonNode.class);
             // 步骤2：读取 intent 字段（缺失时用默认意图兜底）
             String intent = node != null && node.hasNonNull("intent")
                     ? node.get("intent").asText().trim()
@@ -77,21 +77,5 @@ public class IntentNode implements NodeAction<WorkflowState> {
                     WorkflowState.INTENT_REASON, "解析降级",
                     WorkflowState.ERROR, "");
         }
-    }
-
-    /** 提取 JSON 片段：模型可能在 JSON 外包裹说明文字 */
-    private String extractJson(String raw) {
-        // 步骤1：空输入直接返回空串，交给上层解析降级
-        if (raw == null || raw.isBlank()) {
-            return "";
-        }
-        // 步骤2：定位第一个 '{' 与最后一个 '}'，截取中间片段
-        int start = raw.indexOf('{');
-        int end = raw.lastIndexOf('}');
-        if (start >= 0 && end > start) {
-            return raw.substring(start, end + 1);
-        }
-        // 步骤3：没有花括号则原样返回（上层解析失败会走降级）
-        return raw;
     }
 }

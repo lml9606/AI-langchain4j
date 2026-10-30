@@ -20,9 +20,11 @@ public class ChatResponse {
     private long costMs;
     /** 本轮是否已闭环（正常与兜底路径均为 true；图执行异常时此对象不返回） */
     private boolean done;
+    /** 检索根因（COMPLEX_QUERY=问题复杂 / EXPRESSION_ISSUE=表述不当 / KNOWLEDGE_MISSING=知识缺失；正常命中为空串） */
+    private String rootCause;
 
     public static ChatResponse of(String conversationId, String result, boolean fallback,
-                                  Integer tokenUsage, long costMs, boolean done) {
+                                  Integer tokenUsage, long costMs, boolean done, String rootCause) {
         ChatResponse response = new ChatResponse();
         response.conversationId = conversationId;
         response.result = result == null || result.isBlank() ? "抱歉，未能生成有效回答，请稍后重试。" : result;
@@ -30,6 +32,7 @@ public class ChatResponse {
         response.tokenUsage = tokenUsage;
         response.costMs = costMs;
         response.done = done;
+        response.rootCause = rootCause == null ? "" : rootCause;
         return response;
     }
 }

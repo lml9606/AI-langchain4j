@@ -36,6 +36,12 @@ public class AgentProperties {
     /** 校验重试上限（图内重试环次数） */
     private int maxValidateRetries = 3;
 
+    /** 多跳检索上限（不含首轮；HopCheck 判定信息不足时最多再检索 maxHops 轮，防成本失控） */
+    private int maxHops = 2;
+
+    /** 问题分解子查询上限（DecomposeNode 白名单校验，超限只取前 N 个） */
+    private int maxSubQueries = 3;
+
     /** 多轮上下文（短期记忆）配置 */
     private History history = new History();
 

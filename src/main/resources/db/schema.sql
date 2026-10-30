@@ -81,6 +81,11 @@ CREATE TABLE IF NOT EXISTS ai_graph_execution (
 );
 CREATE INDEX IF NOT EXISTS idx_execution_thread ON ai_graph_execution (conversation_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_execution_id ON ai_graph_execution (execution_id);
+-- 已存在表补列（幂等）：检索根因（COMPLEX_QUERY/EXPRESSION_ISSUE/KNOWLEDGE_MISSING，正常命中为空）
+-- 数据闭环：按 node_name='workflow' 与 root_cause 分组统计知识缺口/表述问题，驱动补知识与改写优化
+ALTER TABLE ai_graph_execution ADD COLUMN IF NOT EXISTS root_cause VARCHAR(32);
+-- 根因统计索引（按根因聚合审计记录，支撑知识缺口报表）
+CREATE INDEX IF NOT EXISTS idx_execution_root_cause ON ai_graph_execution (root_cause, created_at DESC);
 
 -- 知识块表（pgvector 向量检索）
 CREATE TABLE IF NOT EXISTS ai_knowledge_chunk (

@@ -76,7 +76,7 @@ public class ValidateNode implements NodeAction<WorkflowState> {
         try {
             String raw = llmGateway.generateJson(state.model(),
                     PromptTemplates.VALIDATE_LLM_SYSTEM, userPrompt).text();
-            JsonNode node = JsonUtil.fromJson(extractJson(raw), JsonNode.class);
+            JsonNode node = JsonUtil.fromJson(JsonUtil.extractJsonObject(raw), JsonNode.class);
             if (node == null) {
                 return QaResult.pass();
             }
@@ -95,16 +95,6 @@ public class ValidateNode implements NodeAction<WorkflowState> {
             log.warn("[validate] llm check degraded, pass: {}", e.getMessage());
             return QaResult.pass();
         }
-    }
-
-    /** 提取 JSON 主体：截取第一个 '{' 到最后一个 '}'，防御模型带 ```json 围栏或前后缀 */
-    private String extractJson(String text) {
-        int start = text.indexOf('{');
-        int end = text.lastIndexOf('}');
-        if (start < 0 || end <= start) {
-            throw new IllegalArgumentException("no json object in output");
-        }
-        return text.substring(start, end + 1);
     }
 
     /** 失败原因截断：防 LLM 输出超长原因占用状态与日志（MAX_REASON_LENGTH 上限） */

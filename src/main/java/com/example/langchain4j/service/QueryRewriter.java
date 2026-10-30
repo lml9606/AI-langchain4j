@@ -74,7 +74,7 @@ public class QueryRewriter {
             return RewriteResult.degrade(original);
         }
         try {
-            JsonNode node = JsonUtil.fromJson(extractJson(cleanedOut), JsonNode.class);
+            JsonNode node = JsonUtil.fromJson(JsonUtil.extractJsonObject(cleanedOut), JsonNode.class);
             if (node == null) {
                 return RewriteResult.degrade(original);
             }
@@ -92,16 +92,6 @@ public class QueryRewriter {
             log.warn("[rewrite] parse output failed, fallback to original query: {}", e.getMessage());
             return RewriteResult.degrade(original);
         }
-    }
-
-    /** 提取 JSON 主体：截取第一个 '{' 到最后一个 '}'，防御模型带 ```json 围栏或前后缀 */
-    private String extractJson(String text) {
-        int start = text.indexOf('{');
-        int end = text.lastIndexOf('}');
-        if (start < 0 || end <= start) {
-            throw new IllegalArgumentException("no json object in output");
-        }
-        return text.substring(start, end + 1);
     }
 
     /** 拼装改写 user prompt：已有话题列表 + 历史（角色标注）+ 最新输入 */

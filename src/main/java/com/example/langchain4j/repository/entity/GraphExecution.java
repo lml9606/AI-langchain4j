@@ -31,6 +31,8 @@ public class GraphExecution {
     private String errorMsg;
     /** 节点耗时（毫秒） */
     private Long costMs;
+    /** 检索根因（WorkflowState.ROOT_CAUSE_*：COMPLEX_QUERY/EXPRESSION_ISSUE/KNOWLEDGE_MISSING；正常命中为空） */
+    private String rootCause;
     /** 创建时间 */
     private OffsetDateTime createdAt;
 }

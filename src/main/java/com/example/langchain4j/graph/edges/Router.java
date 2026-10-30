@@ -19,6 +19,10 @@ public class Router {
     public static final String TO_INTENT = "to_intent";
     /** intent 有效意图 → 知识检索；validate 质检发现与资料矛盾（grounding）→ 回检索重查 */
     public static final String TO_RETRIEVAL = "to_retrieval";
+    /** intent 为知识问答 → 问题分解（拆并列复合问题） */
+    public static final String TO_DECOMPOSE = "to_decompose";
+    /** retrieval 有上下文且知识问答意图 → 多跳判断（上下文完备性评估） */
+    public static final String TO_HOP_CHECK = "to_hop_check";
     /** validate 失败且未达重试上限 → 回生成节点（有限重试环） */
     public static final String TO_GENERATE = "to_generate";
     /** generate 成功 → 质量校验 */
@@ -48,33 +52,57 @@ public class Router {
         };
     }
 
-    /** 意图节点后：有效意图走检索，reject/异常走兜底 */
+    /** 意图节点后：知识问答 → 问题分解（拆并列复合问题）；代码生成 → 直接检索（无需分解）；reject/异常 → 兜底 */
     public EdgeAction<WorkflowState> afterIntent() {
         return state -> {
             // 步骤1：error 非空（理论不常见，意图节点已降级）→ 兜底
             if (state.error() != null && !state.error().isBlank()) {
                 return TO_FALLBACK;
             }
-            // 步骤2：代码生成/知识问答两类有效意图 → 检索
-            String intent = state.intent();
-            if (IntentNode.INTENT_CODE_GENERATE.equals(intent)
-                    || IntentNode.INTENT_KNOWLEDGE_QA.equals(intent)) {
+            // 步骤2：代码生成意图 → 直接检索（无需分解，检索上下文对代码意图参考价值低）
+            if (IntentNode.INTENT_CODE_GENERATE.equals(state.intent())) {
                 return TO_RETRIEVAL;
             }
-            // 步骤3：reject（非法内容）或未知意图 → 兜底拒绝回答
+            // 步骤3：知识问答意图 → 问题分解节点（拆并列复合问题，单问题原样放行）
+            if (IntentNode.INTENT_KNOWLEDGE_QA.equals(state.intent())) {
+                return TO_DECOMPOSE;
+            }
+            // 步骤4：reject（非法内容）或未知意图 → 兜底拒绝回答
             return TO_FALLBACK;
         };
     }
 
-    /** 检索节点后：上下文为空（无命中/检索降级）→ 转人工；有结果 → 生成 */
+    /**
+     * 检索节点后：上下文为空 → 转人工；知识问答 → 多跳判断；代码生成 → 直接生成。
+     * <p>
+     * 根因职责说明：条件边只能返回路由 key（框架 EdgeAction 返回 String，不能写状态），
+     * 因此「首轮检索为空」的知识缺失根因（KNOWLEDGE_MISSING）由 RetrievalNode 首轮写入，
+     * 本路由只负责根据空上下文转人工；根因最终透出到响应与审计表。
+     */
     public EdgeAction<WorkflowState> afterRetrieval() {
         return state -> {
             // 步骤1：上下文为空说明知识库无匹配（或检索降级）→ 转人工，不进入 LLM
             if (state.context() == null || state.context().isBlank()) {
                 return TO_HANDOFF;
             }
-            // 步骤2：有检索上下文 → 进入生成节点
+            // 步骤2：知识问答意图 → 多跳判断（评估上下文是否足以回答，不足则补充检索）
+            if (IntentNode.INTENT_KNOWLEDGE_QA.equals(state.intent())) {
+                return TO_HOP_CHECK;
+            }
+            // 步骤3：代码生成意图 → 直接生成（无需多跳补全）
             return TO_GENERATE;
+        };
+    }
+
+    /** 多跳判断节点后：上下文足够/超限 → 生成；不足且未达上限 → 回检索（多跳环） */
+    public EdgeAction<WorkflowState> afterHopCheck() {
+        return state -> {
+            // 步骤1：HopCheckNode 写入的显式判定标记（足够/超限 → 生成，路由只读标记避免逻辑重复）
+            if (state.hopSufficient()) {
+                return TO_GENERATE;
+            }
+            // 步骤2：不足且未达上限 → 回检索节点，用下一跳查询补查
+            return TO_RETRIEVAL;
         };
     }
 

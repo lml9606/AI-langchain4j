@@ -13,19 +13,20 @@
         <result property="outputJson" column="output_json"/>
         <result property="errorMsg" column="error_msg"/>
         <result property="costMs" column="cost_ms"/>
+        <result property="rootCause" column="root_cause"/>
         <result property="createdAt" column="created_at"/>
     </resultMap>
 
     <insert id="insert" parameterType="com.example.langchain4j.repository.entity.GraphExecution"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_graph_execution
-            (execution_id, conversation_id, node_name, status, input_json, output_json, error_msg, cost_ms)
+            (execution_id, conversation_id, node_name, status, input_json, output_json, error_msg, cost_ms, root_cause)
         VALUES
-            (#{executionId}, #{conversationId}, #{nodeName}, #{status}, #{inputJson}, #{outputJson}, #{errorMsg}, #{costMs})
+            (#{executionId}, #{conversationId}, #{nodeName}, #{status}, #{inputJson}, #{outputJson}, #{errorMsg}, #{costMs}, #{rootCause})
     </insert>
 
     <select id="selectByConversationId" resultMap="GraphExecutionMap">
-        SELECT id, execution_id, conversation_id, node_name, status, input_json, output_json, error_msg, cost_ms, created_at
+        SELECT id, execution_id, conversation_id, node_name, status, input_json, output_json, error_msg, cost_ms, root_cause, created_at
         FROM ai_graph_execution
         WHERE conversation_id = #{conversationId}
         ORDER BY id DESC

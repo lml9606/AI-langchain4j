@@ -128,7 +128,7 @@ public class AgentService {
             metrics.recordFallback();
         }
         return ChatResponse.of(conversationId, state.result(), state.fallback(),
-                state.tokenUsage(), System.currentTimeMillis() - start, state.done());
+                state.tokenUsage(), System.currentTimeMillis() - start, state.done(), state.rootCause());
     }
 
     /**
@@ -386,7 +386,7 @@ public class AgentService {
             }
             metrics.recordGraphDuration(System.currentTimeMillis() - start);
             auditService.audit(conversationId, "workflow", GraphExecution.STATUS_SUCCESS,
-                    query, state.result(), null, null);
+                    query, state.result(), null, null, state.rootCause());
             return state;
         } catch (TimeoutException e) {
             // 超时即中止：取消后台任务（中断工作线程，尽力而为）。
@@ -411,7 +411,7 @@ public class AgentService {
                 log.info("[agent] execution completed just after timeout, thread={}", conversationId);
                 metrics.recordGraphDuration(System.currentTimeMillis() - start);
                 auditService.audit(conversationId, "workflow", GraphExecution.STATUS_SUCCESS,
-                        query, completed.result(), null, null);
+                        query, completed.result(), null, null, completed.rootCause());
                 return completed;
             } catch (ExecutionException ex) {
                 Throwable cause = ex.getCause() == null ? ex : ex.getCause();

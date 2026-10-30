@@ -29,7 +29,7 @@ public class AuditService {
     }
 
     /**
-     * 审计落库（失败仅告警，不阻断主流程）。
+     * 审计落库（失败仅告警，不阻断主流程）。节点级审计无需根因，委托重载版本传 null。
      *
      * @param conversationId 会话 ID（threadId）
      * @param nodeName       节点名（图外步骤如 "rewrite" 也复用此字段）
@@ -41,6 +41,23 @@ public class AuditService {
      */
     public void audit(String conversationId, String nodeName, String status,
                       String input, String output, String errorMsg, Long costMs) {
+        audit(conversationId, nodeName, status, input, output, errorMsg, costMs, null);
+    }
+
+    /**
+     * 审计落库（失败仅告警，不阻断主流程）。
+     *
+     * @param conversationId 会话 ID（threadId）
+     * @param nodeName       节点名（图外步骤如 "rewrite" 也复用此字段）
+     * @param status         执行状态（GraphExecution.STATUS_*）
+     * @param input          输入摘要（写入 inputJson）
+     * @param output         输出摘要（写入 outputJson）
+     * @param errorMsg       错误信息（成功时为空）
+     * @param costMs         耗时（毫秒，可为空）
+     * @param rootCause      检索根因（workflow 级/节点级带根因的记录写此列；无根因时为空）
+     */
+    public void audit(String conversationId, String nodeName, String status,
+                      String input, String output, String errorMsg, Long costMs, String rootCause) {
         try {
             GraphExecution execution = new GraphExecution();
             execution.setExecutionId(UUID.randomUUID().toString().replace("-", ""));
@@ -51,6 +68,7 @@ public class AuditService {
             execution.setOutputJson(truncate(JsonUtil.toJson(Map.of("result", output == null ? "" : output))));
             execution.setErrorMsg(errorMsg);
             execution.setCostMs(costMs);
+            execution.setRootCause(rootCause == null || rootCause.isBlank() ? null : rootCause);
             graphExecutionMapper.insert(execution);
         } catch (Exception e) {
             log.warn("[audit] audit insert failed, degrade: {}", e.getMessage());

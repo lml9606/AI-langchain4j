@@ -57,7 +57,7 @@ class AuditingEventIterator implements Iterator<GraphEvent> {
                 : new WorkflowState(Map.of());
         String node = output.node();
         auditService.audit(conversationId, node, GraphExecution.STATUS_SUCCESS,
-                state.query(), state.result(), state.error(), null);
+                state.query(), state.result(), state.error(), null, state.rootCause());
         if (output.isSTART()) {
             return GraphEvent.nodeStart(node);
         }

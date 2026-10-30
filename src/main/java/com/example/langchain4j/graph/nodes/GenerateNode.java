@@ -126,6 +126,10 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         if (context != null && !context.isBlank()) {
             sb.append("\n\n").append(context);
         }
+        // 步骤4：多跳超限仍信息不足时追加声明（防模型在资料缺失时脑补，明确回答边界）
+        if (state.contextIncomplete()) {
+            sb.append(PromptTemplates.CONTEXT_INCOMPLETE_NOTE);
+        }
         return sb.toString();
     }
 }
