@@ -1,10 +1,10 @@
 package com.example.langchain4j.graph.nodes;
 
-import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
+import com.example.langchain4j.service.PromptTemplateService;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
@@ -16,13 +16,14 @@ import java.util.Map;
 /**
  * 多跳判断节点：判断已检索上下文是否足以回答用户问题（生成前的主动补全，与质检重查的纠错驱动互补）。
  * <p>
- * 三种走向：
+ * 三种走向（首轮空上下文也可进入：换问法补查可能挽救，仍空由路由闸门转人工）：
  * <ul>
- *   <li>足够（或判断失败 fail-open）→ hopSufficient=true，路由去生成；若此前经历过多跳补查且尚无根因，
- *       标记根因为表述不当（EXPRESSION_ISSUE：首轮证据链不足，改写补查后才命中）；</li>
- *   <li>不足且未达多跳上限 → 写入下一跳查询、hopCount+1、hopSufficient=false，路由回检索；</li>
- *   <li>不足且已达上限 → 标记上下文不完整与知识缺失（KNOWLEDGE_MISSING）、hopSufficient=true，
- *       带已有资料进生成（生成端声明信息不全）。</li>
+ *   <li>足够（或判断失败 fail-open）→ hop.sufficient=true，路由去生成；若此前经历过多跳补查
+ *       （根因尚空或为首轮空预判的 KNOWLEDGE_MISSING），标记根因为表述不当
+ *       （EXPRESSION_ISSUE：首轮证据链不足或全空，换问法补查后才命中）；</li>
+ *   <li>不足且未达多跳上限 → 写入下一跳查询、hop.count+1、hop.sufficient=false，路由回检索；</li>
+ *   <li>不足且已达上限 → 标记上下文不完整与知识缺失（KNOWLEDGE_MISSING）、hop.sufficient=true，
+ *       带已有资料进生成（生成端声明信息不全）；上下文仍空时由 afterHopCheck 闸门转人工。</li>
  * </ul>
  * 防御策略：LLM 失败/解析失败/不足但未给出下一跳查询 → 一律视为足够放行去生成，不阻断主流程。
  */
@@ -35,10 +36,13 @@ public class HopCheckNode implements NodeAction<WorkflowState> {
 
     private final LlmGateway llmGateway;
     private final AgentProperties properties;
+    private final PromptTemplateService promptTemplateService;
 
-    public HopCheckNode(LlmGateway llmGateway, AgentProperties properties) {
+    public HopCheckNode(LlmGateway llmGateway, AgentProperties properties,
+                        PromptTemplateService promptTemplateService) {
         this.llmGateway = llmGateway;
         this.properties = properties;
+        this.promptTemplateService = promptTemplateService;
     }
 
     @Override
@@ -52,11 +56,12 @@ public class HopCheckNode implements NodeAction<WorkflowState> {
         // 步骤1：上下文足够 → 清空下一跳查询，放行去生成
         if (result.sufficient()) {
             Map<String, Object> updates = new LinkedHashMap<>();
-            updates.put(WorkflowState.HOP_SUFFICIENT, true);
-            updates.put(WorkflowState.PENDING_QUERY, "");
-            // 经历过补查才足够且尚无根因 → 表述不当（首轮证据链不足，改写补查后命中）；
-            // 首轮即足够（hopCount=0）不写，保留 RetrievalNode 首轮可能写入的 COMPLEX_QUERY
-            if (state.hopCount() > 0 && state.rootCause().isBlank()) {
+            updates.put(WorkflowState.HOP, WorkflowState.Hop.of(state.hop().count(), "", true));
+            // 经历过补查才足够 → 表述不当（首轮证据链不足或全空，换问法补查后命中）；
+            // 根因尚空直接写；根因为首轮空预判的 KNOWLEDGE_MISSING 时覆盖为表述不当（问法差可挽救）
+            // 首轮即足够（count=0）不写，保留 RetrievalNode 首轮可能写入的 COMPLEX_QUERY
+            if (state.hop().count() > 0 && (state.rootCause().isBlank()
+                    || WorkflowState.ROOT_CAUSE_KNOWLEDGE_MISSING.equals(state.rootCause()))) {
                 updates.put(WorkflowState.ROOT_CAUSE, WorkflowState.ROOT_CAUSE_EXPRESSION_ISSUE);
             }
             return updates;
@@ -64,23 +69,20 @@ public class HopCheckNode implements NodeAction<WorkflowState> {
         int maxHops = Math.max(1, properties.getMaxHops());
         // 步骤2：不足但已达多跳上限 → 标记上下文不完整，带已有资料进生成
         //        （已有部分资料可答，生成端声明边界；不转人工——与「首轮检索就空」场景区分）
-        if (state.hopCount() >= maxHops) {
+        if (state.hop().count() >= maxHops) {
             log.warn("[hop-check] context insufficient but maxHops reached, generate with incomplete context, hops={}",
-                    state.hopCount());
+                    state.hop().count());
             // 补查超限仍不足 → 知识缺失（覆盖此前的复杂/表述根因，终局结论以缺失为准）
             return Map.of(
-                    WorkflowState.HOP_SUFFICIENT, true,
-                    WorkflowState.PENDING_QUERY, "",
+                    WorkflowState.HOP, WorkflowState.Hop.of(state.hop().count(), "", true),
                     WorkflowState.CONTEXT_INCOMPLETE, true,
                     WorkflowState.ROOT_CAUSE, WorkflowState.ROOT_CAUSE_KNOWLEDGE_MISSING);
         }
         // 步骤3：不足且未达上限 → 写入下一跳查询、计数 +1，路由回检索
         log.info("[hop-check] context insufficient, hop {} -> {}, nextQuery={}",
-                state.hopCount(), state.hopCount() + 1, result.nextQuery());
+                state.hop().count(), state.hop().count() + 1, result.nextQuery());
         return Map.of(
-                WorkflowState.HOP_SUFFICIENT, false,
-                WorkflowState.PENDING_QUERY, result.nextQuery(),
-                WorkflowState.HOP_COUNT, state.hopCount() + 1);
+                WorkflowState.HOP, WorkflowState.Hop.of(state.hop().count() + 1, result.nextQuery(), false));
     }
 
     /** 调用 LLM 判断；任何失败 fail-open 视为足够（放行去生成），不阻断主流程 */
@@ -89,10 +91,12 @@ public class HopCheckNode implements NodeAction<WorkflowState> {
         String userPrompt = "用户问题：\n" + state.effectiveQuery()
                 + "\n\n已检索到的参考资料：\n" + state.context();
         try {
-            String raw = llmGateway.generateJson(state.model(),
-                    PromptTemplates.HOP_CHECK_SYSTEM, userPrompt).text();
-            JsonNode node = JsonUtil.fromJson(JsonUtil.extractJsonObject(raw), JsonNode.class);
-            // 步骤2：sufficient 缺失视为放行（fail-open：漏判优于误杀，与质检同哲学）
+            // 步骤1：调用 LLM 判断（网关封装：json_object 约束 + 截断感知 + 提取解析，不可用时返回 null）
+            // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
+            JsonNode node = llmGateway.generateJsonNode(state.model(),
+                    promptTemplateService.resolve("HOP_CHECK_SYSTEM", PromptTemplates.HOP_CHECK_SYSTEM),
+                    userPrompt, "hop-check");
+            // 步骤2：截断/解析失败或 sufficient 缺失均视为放行（fail-open：漏判优于误杀，与质检同哲学）
             if (node == null || !node.hasNonNull("sufficient")) {
                 return HopResult.passed();
             }

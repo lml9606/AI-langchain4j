@@ -1,5 +1,6 @@
 package com.example.langchain4j.service;
 
+import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.metrics.AgentMetrics;
@@ -59,9 +60,11 @@ public class AgentService {
     private final AuditService auditService;
     private final SummaryService summaryService;
     private final ModelRegistry modelRegistry;
+    private final TicketService ticketService;
     private final ThreadPoolTaskExecutor agentExecutor;
     private final AgentProperties properties;
     private final AgentMetrics metrics;
+    private final PromptTemplateService promptTemplateService;
 
     public AgentService(CompiledGraph<WorkflowState> agentGraph,
                         RateLimiter rateLimiter,
@@ -72,9 +75,11 @@ public class AgentService {
                         AuditService auditService,
                         SummaryService summaryService,
                         ModelRegistry modelRegistry,
+                        TicketService ticketService,
                         ThreadPoolTaskExecutor agentExecutor,
                         AgentProperties properties,
-                        AgentMetrics metrics) {
+                        AgentMetrics metrics,
+                        PromptTemplateService promptTemplateService) {
         this.agentGraph = agentGraph;
         this.rateLimiter = rateLimiter;
         this.sessionLock = sessionLock;
@@ -84,9 +89,11 @@ public class AgentService {
         this.auditService = auditService;
         this.summaryService = summaryService;
         this.modelRegistry = modelRegistry;
+        this.ticketService = ticketService;
         this.agentExecutor = agentExecutor;
         this.properties = properties;
         this.metrics = metrics;
+        this.promptTemplateService = promptTemplateService;
     }
 
     /**
@@ -99,15 +106,17 @@ public class AgentService {
     public ChatResponse chat(ChatRequest request) {
         long start = System.currentTimeMillis();
         metrics.recordAgentRequest();
+        // 身份以 JWT 为准（JwtAuthFilter 已解析写入上下文；request.userId 已废弃不可信）
+        String userId = UserContext.require();
         // 1. 限流（超限抛 429）
-        rateLimiter.checkAcquire(request.getUserId());
+        rateLimiter.checkAcquire(userId);
         // 2. 输入规整：控制字符清洗 + trim（Controller @Valid 拦空/超长，这里堵“全是控制字符”的漏网输入）
         String query = normalizeQuery(request.getQuery());
         // 3. 解析本轮模型（前端指定优先，空则默认；未知模型抛 400 快速失败）
         String model = modelRegistry.resolve(request.getModel());
         // 4. 会话初始化（失败抛 DB_UNAVAILABLE，快速失败）
         String conversationId = conversationService.ensureConversation(
-                request.getUserId(), request.getConversationId(), query);
+                userId, request.getConversationId(), query);
         // 5. 会话锁内：保存用户消息 → 装配记忆 → 图执行 → 保存助手消息
         //    用户与助手消息都在锁内落库，一轮对话闭环后才释放锁；
         //    否则上一轮释放锁后、下一轮先读到历史时，上一轮回答尚未落库，
@@ -127,6 +136,10 @@ public class AgentService {
         if (state.fallback()) {
             metrics.recordFallback();
         }
+        // 转人工轮自动建单（运营闭环；失败降级不阻断响应）
+        if (state.handoff()) {
+            ticketService.createIfAbsent(userId, conversationId, query, state.rootCause());
+        }
         return ChatResponse.of(conversationId, state.result(), state.fallback(),
                 state.tokenUsage(), System.currentTimeMillis() - start, state.done(), state.rootCause());
     }
@@ -143,12 +156,13 @@ public class AgentService {
      * </ul>
      */
     public Iterable<GraphEvent> stream(ChatRequest request) {
-        rateLimiter.checkAcquire(request.getUserId());
+        String userId = UserContext.require();
+        rateLimiter.checkAcquire(userId);
         // 输入规整（与同步版同一语义：堵“全是控制字符”的漏网输入，全链路用清洗后的 query）
         String query = normalizeQuery(request.getQuery());
         String model = modelRegistry.resolve(request.getModel());
         String conversationId = conversationService.ensureConversation(
-                request.getUserId(), request.getConversationId(), query);
+                userId, request.getConversationId(), query);
 
         // 手动加锁：锁跨"消息落库 + 改写 + 流消费"全过程，消费结束才释放
         AutoCloseable lock = sessionLock.lock(conversationId);
@@ -207,6 +221,11 @@ public class AgentService {
                                 s.result(), s.model(), s.tokenUsage());
                     } catch (Exception e) {
                         log.warn("[agent] resume save assistant message failed, degrade: {}", e.getMessage());
+                    }
+                    // 恢复轮转人工同样自动建单（运营闭环；失败降级不阻断）
+                    if (s.handoff()) {
+                        ticketService.createIfAbsent(UserContext.require(), conversationId,
+                                s.query(), s.rootCause());
                     }
                 });
                 return state;
@@ -399,7 +418,8 @@ public class AgentService {
                 log.warn("[agent] execution timeout after {}s, thread={}, task cancelled, return fallback answer",
                         timeoutSeconds, conversationId);
                 return new WorkflowState(Map.of(
-                        WorkflowState.RESULT, PromptTemplates.FALLBACK_TIMEOUT_ANSWER,
+                        WorkflowState.RESULT,
+                        promptTemplateService.resolve("FALLBACK_TIMEOUT_ANSWER", PromptTemplates.FALLBACK_TIMEOUT_ANSWER),
                         WorkflowState.FALLBACK, true,
                         WorkflowState.DONE, true));
             }

@@ -9,29 +9,107 @@
         <result property="embedding" column="embedding"
                 typeHandler="com.example.langchain4j.repository.typehandler.VectorTypeHandler"/>
         <result property="metadata" column="metadata"/>
+        <result property="userId" column="user_id"/>
         <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
     </resultMap>
 
     <insert id="insert" parameterType="com.example.langchain4j.repository.entity.KnowledgeChunk"
             useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO ai_knowledge_chunk (content, embedding, metadata)
+        INSERT INTO ai_knowledge_chunk (content, embedding, metadata, user_id)
         VALUES (
             #{content},
             #{embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
-            CAST(#{metadata} AS jsonb)
+            CAST(#{metadata} AS jsonb),
+            #{userId}
         )
     </insert>
 
     <select id="searchSimilar" resultMap="KnowledgeChunkMap">
-        SELECT id, content, embedding, metadata::text AS metadata, created_at
+        SELECT id, content, embedding, metadata::text AS metadata, user_id, created_at
         FROM ai_knowledge_chunk
         WHERE embedding IS NOT NULL
           AND (1 - (embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler})) &gt;= #{minScore}
+          AND (user_id IS NULL OR user_id = #{userId})
         ORDER BY embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}
+        LIMIT #{topK}
+    </select>
+
+    <!--
+      词面检索（混合检索的词面通道）：pg_trgm word_similarity 按三元组相似度降序取 topK。
+      注意：WHERE 中直接用 word_similarity 函数无法走 GIN 索引（索引加速需 set_config 会话阈值 + <% 操作符），
+      小规模知识表全表扫描可接受；数据量大时改用操作符写法。
+      用户隔离：user_id IS NULL（公共库）或等于当前用户；#{userId} 为 null 时仅可见公共库（匿名默认）。
+    -->
+    <select id="searchLexical" resultMap="KnowledgeChunkMap">
+        SELECT id, content, embedding, metadata::text AS metadata, user_id, created_at
+        FROM ai_knowledge_chunk
+        WHERE word_similarity(content, #{query}) &gt;= #{minScore}
+          AND (user_id IS NULL OR user_id = #{userId})
+        ORDER BY word_similarity(content, #{query}) DESC
         LIMIT #{topK}
     </select>
 
     <select id="count" resultType="long">
         SELECT count(*) FROM ai_knowledge_chunk
+    </select>
+
+    <!--
+      批量插入：单条 INSERT 多 VALUES 语句（单语句天然原子，无需事务）。
+      文档导入时把分块后的全部知识块一次落库，减少 DB 往返。
+    -->
+    <insert id="insertBatch">
+        INSERT INTO ai_knowledge_chunk (content, embedding, metadata, user_id)
+        VALUES
+        <foreach collection="chunks" item="chunk" separator=",">
+            (
+                #{chunk.content},
+                #{chunk.embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
+                CAST(#{chunk.metadata} AS jsonb),
+                #{chunk.userId}
+            )
+        </foreach>
+    </insert>
+
+    <!-- 按 ID + 用户查询（可见范围 = 公共库 + 本人私有库），服务层据此做归属校验 -->
+    <select id="selectById" resultMap="KnowledgeChunkMap">
+        SELECT id, content, embedding, metadata::text AS metadata, user_id, created_at, updated_at
+        FROM ai_knowledge_chunk
+        WHERE id = #{id}
+          AND (user_id IS NULL OR user_id = #{userId})
+    </select>
+
+    <!-- 更新内容 + 重嵌向量：SQL 层按 user_id 过滤（双保险防 TOCTOU 越权），公共库块无法命中 -->
+    <update id="updateContent">
+        UPDATE ai_knowledge_chunk
+        SET content = #{content},
+            embedding = #{embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
+            metadata = CAST(#{metadata} AS jsonb),
+            updated_at = now()
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </update>
+
+    <!-- 删除：仅本人私有块可删（公共库块服务层直接拒绝，SQL 层再过滤双保险） -->
+    <delete id="deleteById">
+        DELETE FROM ai_knowledge_chunk
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </delete>
+
+    <!--
+      健康度聚合：一次 SQL 完成全部统计（无向量块 = 嵌入失败残留应重嵌，空内容 = 脏数据应清理）。
+      范围 = 当前用户可见（公共库 + 本人私有库），支撑个人知识库健康观测。
+    -->
+    <select id="healthStats" resultType="com.example.langchain4j.repository.mapper.KnowledgeChunkMapper$HealthStats">
+        SELECT count(*)                                                              AS total_chunks,
+               count(*) FILTER (WHERE user_id IS NOT NULL)                          AS private_chunks,
+               count(*) FILTER (WHERE user_id IS NULL)                              AS public_chunks,
+               count(*) FILTER (WHERE content IS NULL OR length(trim(content)) = 0) AS empty_content,
+               count(*) FILTER (WHERE embedding IS NULL)                            AS no_embedding,
+               COALESCE(AVG(length(content)), 0)                                    AS avg_content_length,
+               MAX(created_at)                                                      AS last_imported_at
+        FROM ai_knowledge_chunk
+        WHERE user_id IS NULL OR user_id = #{userId}
     </select>
 </mapper>

@@ -1,11 +1,13 @@
 package com.example.langchain4j.graph.nodes;
 
 import com.example.langchain4j.common.exception.BizException;
+import com.example.langchain4j.common.guard.OutputGuardService;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.LlmResult;
 import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.Message;
+import com.example.langchain4j.service.PromptTemplateService;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
@@ -35,9 +37,14 @@ import java.util.Map;
 public class GenerateNode implements NodeAction<WorkflowState> {
 
     private final LlmGateway llmGateway;
+    private final OutputGuardService outputGuardService;
+    private final PromptTemplateService promptTemplateService;
 
-    public GenerateNode(LlmGateway llmGateway) {
+    public GenerateNode(LlmGateway llmGateway, OutputGuardService outputGuardService,
+                        PromptTemplateService promptTemplateService) {
         this.llmGateway = llmGateway;
+        this.outputGuardService = outputGuardService;
+        this.promptTemplateService = promptTemplateService;
     }
 
     @Override
@@ -47,7 +54,9 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         // 步骤2：窗口外的历史要点（段摘要）拼入 system prompt，帮助模型回忆早期内容
         String summary = state.summary();
         if (summary != null && !summary.isBlank()) {
-            systemPrompt = systemPrompt + String.format(PromptTemplates.SUMMARY_BLOCK, summary);
+            // 提示词走配置化解析：DB 有覆盖用 DB 版（含字面 % 等非法格式时兑底默认模板），否则兑底代码默认值
+            systemPrompt = systemPrompt + promptTemplateService.resolveFormatted(
+                    "SUMMARY_BLOCK", PromptTemplates.SUMMARY_BLOCK, summary);
         }
         // 步骤3：拼装 user prompt（重试修正指令 + 有效查询 + 检索上下文）
         String userPrompt = buildUserPrompt(state);
@@ -61,8 +70,14 @@ public class GenerateNode implements NodeAction<WorkflowState> {
             LlmResult result = llmGateway.generate(state.model(), messages);
             log.info("[generate] cost={}ms, outputLength={}",
                     System.currentTimeMillis() - start, result.text().length());
+            // 步骤5.5：输出侧审核：命中敏感词替换为拒答文案（不透出命中词，防用户绕过测试）
+            String text = result.text();
+            if (outputGuardService.blocked(text)) {
+                log.warn("[generate] output blocked by sensitive word guard");
+                text = OutputGuardService.BLOCKED_ANSWER;
+            }
             // 步骤6：写入结果与 token 用量（用量可能为空，防御性判空）
-            updates.put(WorkflowState.RESULT, result.text());
+            updates.put(WorkflowState.RESULT, text);
             if (result.tokenUsage() != null) {
                 updates.put(WorkflowState.TOKEN_USAGE, result.tokenUsage());
             }
@@ -101,12 +116,12 @@ public class GenerateNode implements NodeAction<WorkflowState> {
     }
 
     private String selectSystemPrompt(String intent) {
-        // 步骤1：代码生成意图 → 代码专用模板
+        // 步骤1：代码生成意图 → 代码专用模板（提示词走配置化解析，DB 覆盖优先）
         if (IntentNode.INTENT_CODE_GENERATE.equals(intent)) {
-            return PromptTemplates.CODE_GENERATE_SYSTEM;
+            return promptTemplateService.resolve("CODE_GENERATE_SYSTEM", PromptTemplates.CODE_GENERATE_SYSTEM);
         }
         // 步骤2：其余（含默认意图）→ 知识问答模板
-        return PromptTemplates.KNOWLEDGE_QA_SYSTEM;
+        return promptTemplateService.resolve("KNOWLEDGE_QA_SYSTEM", PromptTemplates.KNOWLEDGE_QA_SYSTEM);
     }
 
     private String buildUserPrompt(WorkflowState state) {
@@ -115,9 +130,10 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         if (state.retryCount() > 0) {
             // 失败原因可能为空（如格式校验失败未写原因），组装成“（原因：xxx）”括号片断；
             // 空则只提示未通过校验，不输出空括号
-            String reason = state.validationReason();
+            String reason = state.validation().reason();
             String reasonPart = (reason == null || reason.isBlank()) ? "" : "（原因：" + reason + "）";
-            sb.append(String.format(PromptTemplates.VALIDATE_RETRY_PROMPT, reasonPart, state.effectiveQuery())).append("\n\n");
+            sb.append(promptTemplateService.resolveFormatted(
+                    "VALIDATE_RETRY_PROMPT", PromptTemplates.VALIDATE_RETRY_PROMPT, reasonPart, state.effectiveQuery())).append("\n\n");
         }
         // 步骤2：拼入用户需求正文（有效查询：改写后的自包含句，未改写时即原始 query）
         sb.append("用户需求：").append(state.effectiveQuery());
@@ -128,7 +144,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         }
         // 步骤4：多跳超限仍信息不足时追加声明（防模型在资料缺失时脑补，明确回答边界）
         if (state.contextIncomplete()) {
-            sb.append(PromptTemplates.CONTEXT_INCOMPLETE_NOTE);
+            sb.append(promptTemplateService.resolve("CONTEXT_INCOMPLETE_NOTE", PromptTemplates.CONTEXT_INCOMPLETE_NOTE));
         }
         return sb.toString();
     }

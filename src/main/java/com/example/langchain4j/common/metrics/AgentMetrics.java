@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>agent_rate_limited_total —— 限流拒绝次数；</li>
  *   <li>llm_calls_total{model,outcome} —— LLM 调用次数（按模型、成功/失败）；</li>
  *   <li>llm_call_duration_seconds{model} —— LLM 单次调用耗时（含重试）；</li>
+ *   <li>llm_truncated_total{model} —— LLM 输出被 maxOutputTokens 截断次数（截断感知，不再静默降级）；</li>
  *   <li>llm_circuit_open —— 熔断器状态（1=打开，0=关闭）。</li>
  * </ul>
  * 线程池指标（队列深度/活跃线程）在 AsyncConfig 注册，此处不重复。
@@ -77,6 +78,19 @@ public class AgentMetrics {
         registry.timer("llm.call.duration",
                         "model", safeLabel(model))
                 .record(costMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 记录一次 LLM 输出截断（finishReason=LENGTH）。
+     * 截断时结构化 JSON 大概率不完整，调用方已按各自 fail-open 路径降级，此处打点消除静默不可感知。
+     *
+     * @param model 模型名（标签值）
+     */
+    public void recordLlmTruncated(String model) {
+        registry.counter("llm.truncated.total",
+                        "model", safeLabel(model),
+                        "description", "LLM 输出被 maxOutputTokens 截断的次数")
+                .increment();
     }
 
     /** 更新熔断器状态（打开=1 / 关闭=0） */

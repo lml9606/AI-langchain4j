@@ -2,6 +2,7 @@ package com.example.langchain4j.graph.nodes;
 
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.PromptTemplates;
+import com.example.langchain4j.service.PromptTemplateService;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Component;
@@ -15,14 +16,22 @@ import java.util.Map;
 @Component
 public class FallbackNode implements NodeAction<WorkflowState> {
 
+    private final PromptTemplateService promptTemplateService;
+
+    public FallbackNode(PromptTemplateService promptTemplateService) {
+        this.promptTemplateService = promptTemplateService;
+    }
+
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：记录进入兜底的原因（错误信息 + 当前意图），便于问题排查
         log.warn("[fallback] entering fallback, error={}, intent={}",
                 state.error(), state.intent());
         // 步骤2：返回增量更新：固定降级答案 + 兜底标记 + 保留原始错误信息
+        // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
         return Map.of(
-                WorkflowState.RESULT, PromptTemplates.FALLBACK_ANSWER,
+                WorkflowState.RESULT,
+                promptTemplateService.resolve("FALLBACK_ANSWER", PromptTemplates.FALLBACK_ANSWER),
                 WorkflowState.FALLBACK, true,
                 WorkflowState.ERROR, state.error());
     }

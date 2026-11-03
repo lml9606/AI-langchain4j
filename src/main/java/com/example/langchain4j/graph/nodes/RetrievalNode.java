@@ -4,6 +4,7 @@ import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.knowledge.VectorSearchService;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
+import com.example.langchain4j.service.PromptTemplateService;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Component;
@@ -17,12 +18,13 @@ import java.util.Map;
  * <p>
  * 三种模式（按状态字段组合判别）：
  * <ul>
- *   <li>首轮检索：遍历问题分解后的子查询各自检索（并列复合问题分别召回），按子问题分组标注合并；未分解时用有效查询单查；</li>
- *   <li>多跳检索：HopCheck 判定信息不足路由回来，用下一跳查询（pendingQuery）检索并把新上下文追加合并（保留证据链）；</li>
+ *   <li>首轮检索：遍历本轮子查询各自检索（并列复合问题分别召回），按子问题分组标注合并；未分解时为 entry 种入的默认单查询；</li>
+ *   <li>多跳检索：HopCheck 判定信息不足路由回来，用下一跳查询（hop.pendingQuery）检索并把新上下文追加合并（保留证据链）；</li>
  *   <li>纠错重查：质检发现回答与资料矛盾（grounding）路由回来，先让 LLM 根据失败原因改写 query 再检索，替换原上下文。</li>
  * </ul>
- * 根因判定（仅首轮可判定，多跳/重查轮不覆盖）：首轮上下文为空 → 知识缺失（KNOWLEDGE_MISSING）；
- * 真正发生分解且命中 → 问题复杂（COMPLEX_QUERY）；未分解单查命中 → 无根因。
+ * 根因判定（仅首轮可判定，多跳/重查轮不覆盖）：首轮上下文为空 → 知识缺失预判（KNOWLEDGE_MISSING，
+ * 非终局——换问法补查命中由 HopCheckNode 覆盖为表述不当）；真正发生分解且命中 → 问题复杂（COMPLEX_QUERY）；
+ * 未分解单查命中 → 无根因。
  * <p>
  * 防御策略：检索失败（DB/向量服务不可用）返回空上下文，不阻断主流程。
  */
@@ -35,10 +37,13 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
 
     private final VectorSearchService vectorSearchService;
     private final LlmGateway llmGateway;
+    private final PromptTemplateService promptTemplateService;
 
-    public RetrievalNode(VectorSearchService vectorSearchService, LlmGateway llmGateway) {
+    public RetrievalNode(VectorSearchService vectorSearchService, LlmGateway llmGateway,
+                         PromptTemplateService promptTemplateService) {
         this.vectorSearchService = vectorSearchService;
         this.llmGateway = llmGateway;
+        this.promptTemplateService = promptTemplateService;
     }
 
     @Override
@@ -49,8 +54,8 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
         RetrievalResult result = resolveContext(state);
         // 步骤3：记录检索耗时与上下文长度，便于观测检索质量
         log.info("[retrieval] cost={}ms, requery={}, hops={}, contextLength={}, rootCause={}",
-                System.currentTimeMillis() - start, !state.validationIssue().isBlank(),
-                state.hopCount(), result.context().length(), result.rootCause());
+                System.currentTimeMillis() - start, !state.validation().issue().isBlank(),
+                state.hop().count(), result.context().length(), result.rootCause());
         // 步骤4：返回增量更新：检索上下文与根因写入状态，供生成/路由节点使用
         Map<String, Object> updates = new LinkedHashMap<>();
         updates.put(WorkflowState.CONTEXT, result.context());
@@ -62,16 +67,16 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
      * 分派检索模式并产出上下文与根因：
      * <ul>
      *   <li>纠错重查（grounding）→ 替换上下文，根因沿用；</li>
-     *   <li>多跳检索（pendingQuery）→ 追加合并，根因沿用（HopCheckNode 负责补查类根因）；</li>
+     *   <li>多跳检索（hop.pendingQuery）→ 追加合并，根因沿用（HopCheckNode 负责补查类根因）；</li>
      *   <li>首轮检索 → 遍历子查询合并，同时判定根因（知识缺失/问题复杂，仅首轮可判定）。</li>
      * </ul>
      */
     private RetrievalResult resolveContext(WorkflowState state) {
-        if (ValidateNode.ISSUE_GROUNDING.equals(state.validationIssue())) {
+        if (ValidateNode.ISSUE_GROUNDING.equals(state.validation().issue())) {
             // 纠错重查：原上下文已证与回答矛盾，替换而非追加
             return new RetrievalResult(requery(state), state.rootCause());
         }
-        if (!state.pendingQuery().isBlank()) {
+        if (!state.hop().pendingQuery().isBlank()) {
             // 多跳检索：用下一跳查询检索，追加到已有上下文（回答需要完整证据链）
             return new RetrievalResult(appendHop(state), state.rootCause());
         }
@@ -87,7 +92,8 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
     /**
      * 首轮检索根因判定（仅首轮可判定这两类根因，多跳/重查轮不覆盖）：
      * <ul>
-     *   <li>上下文为空 → 知识缺失（所有子查询均未召回，Router 据此转人工，不进入 LLM）；</li>
+     *   <li>上下文为空 → 知识缺失预判（所有子查询均未召回；非终局——进 hop_check 换问法补查，
+     *       命中则覆盖为表述不当，仍空才转人工）；</li>
      *   <li>真正发生分解（子查询数 &gt;1 或单子查询与原查询不同）且命中 → 问题复杂（问法本身没问题，是复合问题）；</li>
      *   <li>未分解单查命中 → 无根因（正常命中，返回空串）。</li>
      * </ul>
@@ -117,16 +123,16 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
     }
 
     /**
-     * 首轮检索：遍历子查询（分解后的独立查询点），各自召回后按子问题分组标注合并。
-     * 未分解（subQueries 空）时退化为单查询检索，与旧行为一致。
+     * 首轮检索：遍历本轮子查询（entry 种入默认单查询，decompose 覆盖为分解结果），
+     * 各自召回后按子问题分组标注合并（生成模型可对号入座）。
      */
     private String firstRound(WorkflowState state) {
         List<String> subQueries = state.subQueries();
-        // 步骤1：未分解 → 有效查询单查
+        // 步骤1：防御旧 checkpoint（改造前 entry 未种入默认值）：空列表回退为原查询单查
         if (subQueries.isEmpty()) {
-            return vectorSearchService.buildContext(vectorSearchService.search(state.effectiveQuery()));
+            subQueries = List.of(state.effectiveQuery());
         }
-        // 步骤2：分解后 → 每个子问题独立召回，按子问题分组标注（生成模型可对号入座）
+        // 步骤2：每个子问题独立召回，按子问题分组标注
         StringBuilder sb = new StringBuilder();
         int index = 1;
         for (String subQuery : subQueries) {
@@ -147,13 +153,13 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
      */
     private String appendHop(WorkflowState state) {
         String part = vectorSearchService.buildContext(
-                vectorSearchService.search(state.pendingQuery()));
+                vectorSearchService.search(state.hop().pendingQuery()));
         // 步骤1：本跳无新结果 → 保持原上下文（多跳判断会再次评估，超限后进生成）
         if (part.isBlank()) {
             return state.context();
         }
-        // 步骤2：追加合并 + 总长截断防御
-        String merged = state.context() + "\n" + part;
+        // 步骤2：追加合并（空基线直接作为新上下文，避免前导换行）+ 总长截断防御
+        String merged = state.context().isBlank() ? part : state.context() + "\n" + part;
         return merged.length() > MAX_CONTEXT_LENGTH ? merged.substring(0, MAX_CONTEXT_LENGTH) : merged;
     }
 
@@ -171,14 +177,16 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
      * @return 实际用于向量检索的 query
      */
     private String resolveSearchQuery(WorkflowState state) {
-        if (!ValidateNode.ISSUE_GROUNDING.equals(state.validationIssue())) {
+        if (!ValidateNode.ISSUE_GROUNDING.equals(state.validation().issue())) {
             return state.effectiveQuery();
         }
         String userPrompt = "原查询：\n" + state.effectiveQuery()
-                + "\n\n质检失败原因：\n" + state.validationReason();
+                + "\n\n质检失败原因：\n" + state.validation().reason();
         try {
+            // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
             String refined = llmGateway.generate(state.model(),
-                    PromptTemplates.REQUERY_SYSTEM, userPrompt).text();
+                    promptTemplateService.resolve("REQUERY_SYSTEM", PromptTemplates.REQUERY_SYSTEM),
+                    userPrompt).text();
             String cleaned = clean(refined);
             if (!cleaned.isBlank()) {
                 log.info("[retrieval] requery refined: {} -> {}", state.effectiveQuery(), cleaned);

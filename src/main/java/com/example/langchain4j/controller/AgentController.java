@@ -1,5 +1,6 @@
 package com.example.langchain4j.controller;
 
+import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.response.ApiResponse;
@@ -127,6 +128,7 @@ public class AgentController {
     /** 断点恢复：从最近 checkpoint 继续执行（POST 便于扩展恢复参数） */
     @PostMapping("/resume")
     public ApiResponse<Map<String, Object>> resume(@Valid @RequestBody ResumeRequest request) {
+        requireOwnership(request.conversationId());
         return agentService.resume(request.conversationId())
                 .map(state -> ApiResponse.success(state.data()))
                 .orElse(ApiResponse.error(ErrorCode.NOT_FOUND,
@@ -136,6 +138,7 @@ public class AgentController {
     /** 查询 checkpoint 执行状态 */
     @GetMapping("/state/{threadId}")
     public ApiResponse<Map<String, Object>> state(@PathVariable String threadId) {
+        requireOwnership(threadId);
         return agentService.getState(threadId)
                 .map(snapshot -> ApiResponse.success(snapshot.state().data()))
                 .orElse(ApiResponse.error(ErrorCode.NOT_FOUND, "无 checkpoint 记录"));
@@ -145,11 +148,17 @@ public class AgentController {
     @GetMapping("/conversation/{id}/messages")
     public ApiResponse<List<MessageDto>> messages(@PathVariable("id") String conversationId,
                                                   @RequestParam(defaultValue = "50") int limit) {
+        requireOwnership(conversationId);
         List<MessageDto> messages = conversationService.listMessages(conversationId, limit).stream()
                 .map(m -> new MessageDto(m.getRole(), m.getContent(), m.getModel(),
                         m.getTokenUsage(), m.getCreatedAt()))
                 .toList();
         return ApiResponse.success(messages);
+    }
+
+    /** 会话归属校验：threadId/会话 ID 直查接口的水平越权防御（404 不存在 / 403 他人会话） */
+    private void requireOwnership(String conversationId) {
+        conversationService.requireOwnership(conversationId, UserContext.require());
     }
 
     private void sendQuietly(SseEmitter emitter, SseEmitter.SseEventBuilder builder) {

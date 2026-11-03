@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.EvalResultMapper">
+
+    <resultMap id="EvalResultMap" type="com.example.langchain4j.repository.entity.EvalResult">
+        <id property="id" column="id"/>
+        <result property="runId" column="run_id"/>
+        <result property="caseId" column="case_id"/>
+        <result property="question" column="question"/>
+        <result property="retrievedCtx" column="retrieved_ctx"/>
+        <result property="answer" column="answer"/>
+        <result property="recallScore" column="recall_score"/>
+        <result property="faithfulness" column="faithfulness"/>
+        <result property="status" column="status"/>
+        <result property="errorMsg" column="error_msg"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.EvalResult"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_eval_result (run_id, case_id, question, retrieved_ctx, answer,
+                                    recall_score, faithfulness, status, error_msg)
+        VALUES (#{runId}, #{caseId}, #{question}, #{retrievedCtx}, #{answer},
+                #{recallScore}, #{faithfulness}, #{status}, #{errorMsg})
+    </insert>
+
+    <select id="selectByRunId" resultMap="EvalResultMap">
+        SELECT id, run_id, case_id, question, retrieved_ctx, answer,
+               recall_score, faithfulness, status, error_msg, created_at
+        FROM ai_eval_result
+        WHERE run_id = #{runId}
+        ORDER BY id
+    </select>
+
+    <select id="selectLatestRunId" resultType="string">
+        SELECT run_id
+        FROM ai_eval_result
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+    </select>
+
+    <!-- 批次汇总：AVG 忽略 NULL 指标行（无关键词的召回、判分失败的忠实度不参与均值） -->
+    <select id="selectRunStats" resultType="com.example.langchain4j.repository.mapper.EvalResultMapper$RunStat">
+        SELECT run_id,
+               AVG(recall_score)   AS avg_recall,
+               AVG(faithfulness)   AS avg_faithfulness,
+               COUNT(*)            AS total,
+               COUNT(*) FILTER (WHERE status = 'FAILED') AS failed,
+               MAX(created_at)     AS created_at
+        FROM ai_eval_result
+        GROUP BY run_id
+        ORDER BY MAX(created_at) DESC
+        LIMIT #{limit}
+    </select>
+</mapper>

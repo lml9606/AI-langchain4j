@@ -1,9 +1,12 @@
 package com.example.langchain4j.common.exception;
 
+import lombok.Getter;
+
 /**
  * 统一错误码定义。
  * 分类约定：4xxx 客户端错误（可预期），5xxx 服务端错误（需关注告警）。
  */
+@Getter
 public enum ErrorCode {
 
     SUCCESS(0, "成功"),
@@ -14,6 +17,11 @@ public enum ErrorCode {
     FORBIDDEN(40300, "无权限"),
     NOT_FOUND(40400, "资源不存在"),
     TOO_MANY_REQUESTS(42900, "请求过于频繁，请稍后重试"),
+
+    // ---- 认证 ----
+    INVALID_CREDENTIALS(40101, "用户名或密码错误"),
+    TOKEN_INVALID(40102, "登录已失效，请重新登录"),
+    USERNAME_TAKEN(40902, "用户名已存在"),
 
     // ---- Agent 业务 ----
     AGENT_RATE_LIMITED(42901, "触发限流，请稍后重试"),
@@ -35,11 +43,4 @@ public enum ErrorCode {
         this.message = message;
     }
 
-    public int getCode() {
-        return code;
-    }
-
-    public String getMessage() {
-        return message;
-    }
 }

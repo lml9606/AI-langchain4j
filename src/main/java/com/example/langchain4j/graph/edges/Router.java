@@ -31,7 +31,7 @@ public class Router {
     public static final String TO_FALLBACK = "to_fallback";
     /** validate 通过 → 收尾节点 */
     public static final String TO_FINALIZE = "to_finalize";
-    /** 知识库检索无结果 → 转人工节点 */
+    /** 检索无结果（换问法补查仍空/代码生成查空）→ 转人工节点 */
     public static final String TO_HANDOFF = "to_handoff";
 
     private final AgentProperties properties;
@@ -73,35 +73,43 @@ public class Router {
     }
 
     /**
-     * 检索节点后：上下文为空 → 转人工；知识问答 → 多跳判断；代码生成 → 直接生成。
+     * 检索节点后：知识问答 → 多跳判断（首轮空上下文也进，给换问法补查机会）；代码生成 → 空转人工/有资料直接生成。
      * <p>
      * 根因职责说明：条件边只能返回路由 key（框架 EdgeAction 返回 String，不能写状态），
-     * 因此「首轮检索为空」的知识缺失根因（KNOWLEDGE_MISSING）由 RetrievalNode 首轮写入，
-     * 本路由只负责根据空上下文转人工；根因最终透出到响应与审计表。
+     * 因此「首轮检索为空」的知识缺失预判（KNOWLEDGE_MISSING）由 RetrievalNode 首轮写入，
+     * 换问法补查命中后由 HopCheckNode 覆盖为表述不当（EXPRESSION_ISSUE）；
+     * 「空资料不许进生成」的最终闸门在 afterHopCheck（足够但上下文仍空 → 转人工）。
      */
     public EdgeAction<WorkflowState> afterRetrieval() {
         return state -> {
-            // 步骤1：上下文为空说明知识库无匹配（或检索降级）→ 转人工，不进入 LLM
-            if (state.context() == null || state.context().isBlank()) {
-                return TO_HANDOFF;
-            }
-            // 步骤2：知识问答意图 → 多跳判断（评估上下文是否足以回答，不足则补充检索）
+            // 步骤1：知识问答意图 → 多跳判断（首轮空上下文也进：换问法补查可能挽救，仍空由 afterHopCheck 闸门转人工）
             if (IntentNode.INTENT_KNOWLEDGE_QA.equals(state.intent())) {
                 return TO_HOP_CHECK;
             }
-            // 步骤3：代码生成意图 → 直接生成（无需多跳补全）
+            // 步骤2：代码生成空上下文 → 转人工（无改写补查环节，不进入 LLM 生成）
+            if (state.context() == null || state.context().isBlank()) {
+                return TO_HANDOFF;
+            }
+            // 步骤3：代码生成有资料 → 直接生成（无需多跳补全）
             return TO_GENERATE;
         };
     }
 
-    /** 多跳判断节点后：上下文足够/超限 → 生成；不足且未达上限 → 回检索（多跳环） */
+    /**
+     * 多跳判断节点后：足够但上下文仍空 → 转人工（空资料不许进生成）；足够 → 生成；不足且未达上限 → 回检索（多跳环）。
+     * 空上下文闸门兑住两类误判：换问法补查全部失败，或判断 LLM fail-open 在空上下文上误判足够。
+     */
     public EdgeAction<WorkflowState> afterHopCheck() {
         return state -> {
-            // 步骤1：HopCheckNode 写入的显式判定标记（足够/超限 → 生成，路由只读标记避免逻辑重复）
-            if (state.hopSufficient()) {
+            // 步骤1：足够但上下文仍空（补查失败/fail-open 误判）→ 转人工，空资料不许进生成
+            if (state.hop().sufficient() && (state.context() == null || state.context().isBlank())) {
+                return TO_HANDOFF;
+            }
+            // 步骤2：HopCheckNode 写入的显式判定标记（足够/超限 → 生成，路由只读标记避免逻辑重复）
+            if (state.hop().sufficient()) {
                 return TO_GENERATE;
             }
-            // 步骤2：不足且未达上限 → 回检索节点，用下一跳查询补查
+            // 步骤3：不足且未达上限 → 回检索节点，用下一跳查询补查
             return TO_RETRIEVAL;
         };
     }
@@ -122,7 +130,7 @@ public class Router {
     public EdgeAction<WorkflowState> afterValidate() {
         return state -> {
             // 步骤1：读取 ValidateNode 写入的显式判定标记（路由只读标记，避免逻辑重复）
-            if (state.validated()) {
+            if (state.validation().validated()) {
                 return TO_FINALIZE;
             }
             // 步骤2：校验失败但重试次数未达上限 → 按失败原因分路由
@@ -130,7 +138,7 @@ public class Router {
             if (state.retryCount() < maxRetries) {
                 // 2.1：质检发现回答与资料矛盾/编造（grounding）→ 回检索节点
                 //      （RetrievalNode 会用失败原因改写 query 重新检索，换一批上下文再生成）
-                if (ValidateNode.ISSUE_GROUNDING.equals(state.validationIssue())) {
+                if (ValidateNode.ISSUE_GROUNDING.equals(state.validation().issue())) {
                     return TO_RETRIEVAL;
                 }
                 // 2.2：其余失败（格式问题等）→ 回生成节点重试

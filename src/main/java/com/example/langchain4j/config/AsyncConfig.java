@@ -1,5 +1,6 @@
 package com.example.langchain4j.config;
 
+import com.example.langchain4j.common.auth.UserContext;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
@@ -40,7 +41,7 @@ public class AsyncConfig {
         executor.setQueueCapacity(exec.getQueueCapacity());
         executor.setKeepAliveSeconds(exec.getKeepAliveSeconds());
         executor.setThreadNamePrefix("agent-exec-");
-        executor.setTaskDecorator(mdcTaskDecorator());
+        executor.setTaskDecorator(contextTaskDecorator());
         // 拒绝策略：队列满抛异常 → service 捕获转业务错误码，而不是无限等待
         executor.setRejectedExecutionHandler(abortPolicy("agent executor overloaded, queue full"));
         // 优雅停机：等待在途任务收尾
@@ -68,7 +69,7 @@ public class AsyncConfig {
         executor.setQueueCapacity(exec.getQueueCapacity());
         executor.setKeepAliveSeconds(exec.getKeepAliveSeconds());
         executor.setThreadNamePrefix("llm-exec-");
-        executor.setTaskDecorator(mdcTaskDecorator());
+        executor.setTaskDecorator(contextTaskDecorator());
         // 拒绝策略：队列满抛异常 → LlmGateway 重试/熔断兜底
         executor.setRejectedExecutionHandler(abortPolicy("llm executor overloaded, queue full"));
         executor.setWaitForTasksToCompleteOnShutdown(true);
@@ -78,17 +79,25 @@ public class AsyncConfig {
         return executor;
     }
 
-    /** MDC 上下文传递装饰器：HTTP 线程的 traceId 随任务带入工作线程，异步日志不丢链路标识 */
-    private TaskDecorator mdcTaskDecorator() {
+    /**
+     * 上下文传递装饰器：HTTP 线程的 traceId（MDC）与登录身份（UserContext）随任务带入工作线程。
+     * 身份透传的必要性：图执行线程池内的知识检索按当前用户做数据隔离，
+     * 不透传时图内检索会退化为“匿名仅见公共库”。
+     */
+    private TaskDecorator contextTaskDecorator() {
         return runnable -> {
-            Map<String, String> context = MDC.getCopyOfContextMap();
+            Map<String, String> mdcContext = MDC.getCopyOfContextMap();
+            String userId = UserContext.get();
+            String role = UserContext.role();
             return () -> {
-                if (context != null) {
-                    MDC.setContextMap(context);
+                if (mdcContext != null) {
+                    MDC.setContextMap(mdcContext);
                 }
+                UserContext.set(userId, role);
                 try {
                     runnable.run();
                 } finally {
+                    UserContext.clear();
                     MDC.clear();
                 }
             };

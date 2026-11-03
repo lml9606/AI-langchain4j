@@ -3,7 +3,9 @@ package com.example.langchain4j.llm;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.metrics.AgentMetrics;
+import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
+import com.fasterxml.jackson.databind.JsonNode;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -12,6 +14,7 @@ import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.request.ChatRequestParameters;
 import dev.langchain4j.model.chat.request.ResponseFormat;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.output.FinishReason;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -42,6 +45,8 @@ public class LlmGateway {
     private static final String CB_FAILURES_KEY = "agent:llm:cb:failures";
     private static final String CB_OPEN_KEY = "agent:llm:cb:open";
     private static final long BASE_BACKOFF_MS = 1000L;
+    /** 日志用原始输出截断长度：防 LLM 超长输出刷屏 */
+    private static final int MAX_LOG_TEXT_LENGTH = 200;
 
     private final ModelRegistry modelRegistry;
     private final StringRedisTemplate redisTemplate;
@@ -77,6 +82,45 @@ public class LlmGateway {
      */
     public LlmResult generateJson(String modelName, String systemPrompt, String userPrompt) {
         return generate(modelName, buildMessages(systemPrompt, userPrompt), ResponseFormat.JSON);
+    }
+
+    /**
+     * JSON 结构化输出便捷方法：generateJson + 截断感知 + 提取解析一步到位，
+     * 消除各结构化调用点重复的「截断检查 + extractJsonObject + fromJson」样板代码。
+     * <p>
+     * 返回 null 表示输出不可用（被 maxOutputTokens 截断或提取解析失败，网关已打点告警），
+     * 由调用方按各自业务语义 fail-open 降级；LLM 调用失败（BizException）仍向上抛出，
+     * 不在此层吞掉，保持「网关感知截断、调用方决策降级」的职责分离。
+     *
+     * @param modelName    模型名（路由到注册表对应 ChatModel）
+     * @param systemPrompt 系统提示词（可为空）
+     * @param userPrompt   用户提示词
+     * @param scene        场景标识（如 hop-check/decompose），仅用于日志定位
+     * @return 解析出的 JSON 节点；截断或提取解析失败返回 null
+     */
+    public JsonNode generateJsonNode(String modelName, String systemPrompt, String userPrompt, String scene) {
+        LlmResult result = generateJson(modelName, systemPrompt, userPrompt);
+        // 输出被 maxOutputTokens 截断 → JSON 不完整，返回 null 交给调用方降级（doGenerate 已打点 llm_truncated_total）
+        if (result.truncated()) {
+            log.warn("[{}] llm output truncated, json unavailable", scene);
+            return null;
+        }
+        try {
+            // 提取前控制字符清洗（防裸控制字符破坏 JSON 解析，与调用方字段级清洗规则一致）
+            String cleaned = result.text().replaceAll("[\\p{Cntrl}]", " ");
+            return JsonUtil.fromJson(JsonUtil.extractJsonObject(cleaned), JsonNode.class);
+        } catch (Exception e) {
+            log.warn("[{}] json extract/parse failed, raw={}: {}", scene, abbreviate(result.text()), e.getMessage());
+            return null;
+        }
+    }
+
+    /** 日志用文本截断：防 LLM 超长输出刷屏（MAX_LOG_TEXT_LENGTH 上限） */
+    private String abbreviate(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.length() <= MAX_LOG_TEXT_LENGTH ? text : text.substring(0, MAX_LOG_TEXT_LENGTH);
     }
 
     private List<ChatMessage> buildMessages(String systemPrompt, String userPrompt) {
@@ -149,6 +193,7 @@ public class LlmGateway {
                     .messages(messages)
                     .parameters(ChatRequestParameters.builder()
                             .responseFormat(responseFormat)
+                            .maxOutputTokens(properties.getLlm().getMaxOutputTokens())
                             .build())
                     .build());
         }, llmExecutor);
@@ -158,7 +203,14 @@ public class LlmGateway {
                 throw new IllegalStateException("模型返回空响应");
             }
             Integer tokens = response.tokenUsage() != null ? response.tokenUsage().totalTokenCount() : null;
-            return LlmResult.of(response.aiMessage().text(), tokens);
+            FinishReason finishReason = response.finishReason();
+            // 输出被 maxOutputTokens 截断：结构化 JSON 大概率不完整，打点告警；
+            // 不在此处抛错 —— 调用方按 truncated() 走各自 fail-open 降级（解析层与控制层职责分离）
+            if (FinishReason.LENGTH.equals(finishReason)) {
+                log.warn("[llm] output truncated by maxOutputTokens, model={}", modelName);
+                metrics.recordLlmTruncated(modelName);
+            }
+            return LlmResult.of(response.aiMessage().text(), tokens, finishReason);
         } catch (TimeoutException e) {
             future.cancel(true);
             throw new IllegalStateException("模型调用超时（" + timeoutSeconds + "s）", e);

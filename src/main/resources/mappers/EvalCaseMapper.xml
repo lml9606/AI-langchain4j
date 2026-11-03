@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.EvalCaseMapper">
+
+    <resultMap id="EvalCaseMap" type="com.example.langchain4j.repository.entity.EvalCase">
+        <id property="id" column="id"/>
+        <result property="question" column="question"/>
+        <result property="keywords" column="keywords"/>
+        <result property="expectedAnswer" column="expected_answer"/>
+        <result property="enabled" column="enabled"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.EvalCase"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_eval_case (question, keywords, expected_answer, enabled)
+        VALUES (#{question}, #{keywords}, #{expectedAnswer}, COALESCE(#{enabled}, TRUE))
+    </insert>
+
+    <select id="selectEnabled" resultMap="EvalCaseMap">
+        SELECT id, question, keywords, expected_answer, enabled, created_at
+        FROM ai_eval_case
+        WHERE enabled = TRUE
+        ORDER BY id
+    </select>
+
+    <select id="selectAll" resultMap="EvalCaseMap">
+        SELECT id, question, keywords, expected_answer, enabled, created_at
+        FROM ai_eval_case
+        ORDER BY id
+    </select>
+
+    <update id="updateEnabled">
+        UPDATE ai_eval_case SET enabled = #{enabled} WHERE id = #{id}
+    </update>
+</mapper>

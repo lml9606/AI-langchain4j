@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.FeedbackMapper">
+
+    <resultMap id="FeedbackMap" type="com.example.langchain4j.repository.entity.Feedback">
+        <id property="id" column="id"/>
+        <result property="conversationId" column="conversation_id"/>
+        <result property="userId" column="user_id"/>
+        <result property="messageId" column="message_id"/>
+        <result property="rating" column="rating"/>
+        <result property="comment" column="comment"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.Feedback"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_feedback (conversation_id, user_id, message_id, rating, comment)
+        VALUES (#{conversationId}, #{userId}, #{messageId}, #{rating}, #{comment})
+    </insert>
+
+    <select id="selectByConversationId" resultMap="FeedbackMap">
+        SELECT id, conversation_id, user_id, message_id, rating, comment, created_at
+        FROM ai_feedback
+        WHERE conversation_id = #{conversationId}
+        ORDER BY created_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 点踩按天统计：驱动知识治理（近 N 天点踩趋势） -->
+    <select id="selectDownStats" resultType="com.example.langchain4j.repository.mapper.FeedbackMapper$DownStat">
+        SELECT to_char(created_at, 'YYYY-MM-DD') AS day,
+               COUNT(*)                          AS down_count
+        FROM ai_feedback
+        WHERE rating = 'DOWN'
+          AND created_at &gt;= now() - (#{limit} || ' days')::interval
+        GROUP BY to_char(created_at, 'YYYY-MM-DD')
+        ORDER BY day DESC
+    </select>
+</mapper>

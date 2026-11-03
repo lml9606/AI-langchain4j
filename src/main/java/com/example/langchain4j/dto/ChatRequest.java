@@ -21,7 +21,9 @@ public class ChatRequest {
     @Size(max = 64, message = "model 长度不能超过 64")
     private String model;
 
-    @NotBlank(message = "userId 不能为空")
-    @Size(max = 64, message = "userId 长度不能超过 64")
+    /**
+     * 用户 ID（已废弃）：身份以 JWT 为准（服务端从 Authorization 头解析，忽略此字段）；
+     * 保留仅为兼容旧客户端，可传任意值不影响鉴权结果。
+     */
     private String userId;
 }

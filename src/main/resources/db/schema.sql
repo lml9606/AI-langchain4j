@@ -7,6 +7,17 @@
 -- 向量扩展（pgvector/pgvector:pg16 镜像已内置）
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- 用户表（JWT 认证：BCrypt 密码哈希，用户名全局唯一；user_id 直接作为数据隔离维度）
+CREATE TABLE IF NOT EXISTS ai_user (
+    id            BIGSERIAL PRIMARY KEY,
+    username      VARCHAR(64)  NOT NULL UNIQUE,           -- 登录名（注册时唯一校验，查询走唯一索引）
+    password_hash VARCHAR(128) NOT NULL,                  -- BCrypt 哈希（含盐，不可逆；明文永不落库）
+    role          VARCHAR(16)  NOT NULL DEFAULT 'USER',   -- 角色：USER / ADMIN（注册默认 USER；管理员由运维 SQL 指定，不提供注册提权通道）
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+-- 存量库迁移：旧表补 role 列（幂等；新库 CREATE 已含该列，此处自动跳过）
+ALTER TABLE ai_user ADD COLUMN IF NOT EXISTS role VARCHAR(16) NOT NULL DEFAULT 'USER';
+
 -- 会话表
 CREATE TABLE IF NOT EXISTS ai_conversation (
     id              BIGSERIAL PRIMARY KEY,
@@ -95,6 +106,95 @@ CREATE TABLE IF NOT EXISTS ai_knowledge_chunk (
     metadata     JSONB,                                    -- 来源、标签等扩展信息
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 已存在表补列（幂等）：所属用户（NULL = 公共库对所有用户可见；非 NULL 仅本用户可见/可查）
+ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS user_id VARCHAR(64);
+-- 用户隔离检索索引：混合检索双通道均按 (user_id, id) 过滤，支撑单用户知识库下推
+CREATE INDEX IF NOT EXISTS idx_knowledge_user ON ai_knowledge_chunk (user_id);
+-- 已存在表补列（幂等）：知识块更新时间（知识治理更新闭环审计）
+ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
 -- HNSW 向量索引（余弦距离；写入量大的场景可考虑先写后建索引）
 CREATE INDEX IF NOT EXISTS idx_knowledge_embedding
     ON ai_knowledge_chunk USING hnsw (embedding vector_cosine_ops);
+
+-- 混合检索词面通道：pg_trgm 三元组相似度（中文无需分词；pgvector 官方镜像内置 contrib，开箱可用）
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS idx_knowledge_content_trgm
+    ON ai_knowledge_chunk USING gin (content gin_trgm_ops);
+
+-- 评测用例表（离线回归集：问题 + 期望关键词/参考答案；enabled 控制是否参与评测）
+CREATE TABLE IF NOT EXISTS ai_eval_case (
+    id              BIGSERIAL PRIMARY KEY,
+    question        TEXT    NOT NULL,                   -- 评测问题
+    keywords        TEXT,                               -- 期望关键词（JSON 数组字符串，召回评测命中判断）
+    expected_answer TEXT,                               -- 参考答案（忠实度评测参考，可空）
+    enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 评测结果表（runEval 每批一个 run_id，每用例一行；核心指标：召回率 + 忠实度）
+CREATE TABLE IF NOT EXISTS ai_eval_result (
+    id             BIGSERIAL PRIMARY KEY,
+    run_id         VARCHAR(64) NOT NULL,                -- 单次评测批次 ID（一批跑全量启用用例）
+    case_id        BIGINT      NOT NULL,
+    question       TEXT        NOT NULL,
+    retrieved_ctx  TEXT,                                -- 检索到的上下文（截断存储）
+    answer         TEXT,                                -- 基于检索上下文生成的答案
+    recall_score   NUMERIC(5,4),                        -- 召回率 0~1（期望关键词在检索上下文命中比例；无关键词为空）
+    faithfulness   NUMERIC(5,4),                        -- 忠实度 0~1（LLM 判分；判分失败为空）
+    status         VARCHAR(16) NOT NULL,                -- SUCCESS / FAILED
+    error_msg      TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_eval_result_run ON ai_eval_result (run_id, id);
+CREATE INDEX IF NOT EXISTS idx_eval_result_created ON ai_eval_result (created_at DESC);
+
+-- 反馈表（运营闭环：点踩/点赞 + 补充说明，驱动知识补录与改写优化）
+CREATE TABLE IF NOT EXISTS ai_feedback (
+    id              BIGSERIAL PRIMARY KEY,
+    conversation_id VARCHAR(64) NOT NULL,                -- 会话 ID（归属校验）
+    user_id         VARCHAR(64) NOT NULL,
+    message_id      BIGINT,                              -- 被反馈的 assistant 消息 ID（可空）
+    rating          VARCHAR(8)  NOT NULL,                -- UP / DOWN
+    comment         TEXT,                                -- 补充说明（点踩原因）
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_conversation ON ai_feedback (conversation_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_feedback_user ON ai_feedback (user_id, created_at DESC);
+
+-- 工单表（运营闭环：转人工自动建单，运营回复后结单；根因字段联动审计表驱动知识治理）
+CREATE TABLE IF NOT EXISTS ai_ticket (
+    id              BIGSERIAL PRIMARY KEY,
+    ticket_no       VARCHAR(64)  NOT NULL UNIQUE,        -- 工单号（展示用）
+    user_id         VARCHAR(64)  NOT NULL,
+    conversation_id VARCHAR(64)  NOT NULL,               -- 触发转人工的会话
+    question        TEXT         NOT NULL,               -- 触发转人工的问题
+    root_cause      VARCHAR(32),                         -- 检索根因（KNOWLEDGE_MISSING 等，可空）
+    status          VARCHAR(16)  NOT NULL DEFAULT 'OPEN',-- OPEN / RESOLVED / CLOSED
+    assignee        VARCHAR(64),                         -- 处理人（运营侧）
+    reply           TEXT,                                -- 运营回复（知识补录后告知用户）
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    resolved_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_user ON ai_ticket (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ticket_status ON ai_ticket (status, created_at DESC);
+
+-- 敏感词表（输出侧审核：生成答案命中任一启用词即拦截替换为拒答文案；专业场景应接入内容安全 API）
+CREATE TABLE IF NOT EXISTS ai_sensitive_word (
+    id         BIGSERIAL PRIMARY KEY,
+    word       VARCHAR(128) NOT NULL UNIQUE,             -- 敏感词（字面包含匹配）
+    enabled    BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- Prompt 配置表（配置化版本化：DB 覆盖代码默认值，保存后热生效；version 每次保存递增）
+-- 企业级可扩展 ai_prompt_version 历史表做多版本回滚，此处保留当前生效版本 + 版本号
+CREATE TABLE IF NOT EXISTS ai_prompt_config (
+    id         BIGSERIAL PRIMARY KEY,
+    prompt_key VARCHAR(64) NOT NULL UNIQUE,              -- 提示词 key（对应 PromptTemplates 常量名）
+    prompt_text TEXT NOT NULL,                           -- 生效文本（覆盖代码默认值）
+    version    INTEGER     NOT NULL DEFAULT 1,           -- 版本号（每次保存 +1，支持审计）
+    updated_by VARCHAR(64),                              -- 最后修改人
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

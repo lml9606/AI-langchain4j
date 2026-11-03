@@ -40,12 +40,20 @@ public class ConversationService {
     /**
      * 会话存在则复用，否则新建。
      * 会话 ID 同时作为 LangGraph 的 threadId（checkpoint 会话隔离）。
+     * <p>
+     * 用户隔离：传入会话已存在但归属他人时拒绝（403，防水平越权）；
+     * 传入不存在的会话 ID 按新会话处理（防御脏参数，不泄露资源存在性）。
      */
     @Transactional(rollbackFor = Exception.class)
     public String ensureConversation(String userId, String conversationId, String firstQuery) {
         if (conversationId != null && !conversationId.isBlank()) {
             Conversation existing = conversationMapper.selectByConversationId(conversationId);
             if (existing != null) {
+                if (!userId.equals(existing.getUserId())) {
+                    log.warn("[conversation] forbid cross-user access, conversation={}, user={}",
+                            conversationId, userId);
+                    throw new BizException(ErrorCode.FORBIDDEN, "无权访问该会话");
+                }
                 return existing.getConversationId();
             }
             // 传入的会话不存在：按新会话处理（防御脏参数）
@@ -180,6 +188,19 @@ public class ConversationService {
             throw new BizException(ErrorCode.NOT_FOUND, "会话不存在: " + conversationId);
         }
         return conversation;
+    }
+
+    /**
+     * 校验会话归属当前用户：会话不存在抛 404，归属他人抛 403（水平越权防御）。
+     * 用于历史/断点/状态等按会话 ID 直查的接口（chat 入口的校验在 ensureConversation 内）。
+     */
+    public void requireOwnership(String conversationId, String userId) {
+        Conversation conversation = getConversation(conversationId);
+        if (!userId.equals(conversation.getUserId())) {
+            log.warn("[conversation] forbid cross-user access, conversation={}, user={}",
+                    conversationId, userId);
+            throw new BizException(ErrorCode.FORBIDDEN, "无权访问该会话");
+        }
     }
 
     /** 从首条 query 派生会话标题（截断 + 控制字符清洗） */

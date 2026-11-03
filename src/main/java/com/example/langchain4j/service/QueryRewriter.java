@@ -1,6 +1,5 @@
 package com.example.langchain4j.service;
 
-import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.Message;
@@ -30,9 +29,11 @@ public class QueryRewriter {
     private static final int OUTPUT_LENGTH_SLACK = 200;
 
     private final LlmGateway llmGateway;
+    private final PromptTemplateService promptTemplateService;
 
-    public QueryRewriter(LlmGateway llmGateway) {
+    public QueryRewriter(LlmGateway llmGateway, PromptTemplateService promptTemplateService) {
         this.llmGateway = llmGateway;
+        this.promptTemplateService = promptTemplateService;
     }
 
     /**
@@ -56,41 +57,30 @@ public class QueryRewriter {
             return RewriteResult.degrade(cleaned);
         }
         try {
-            // 步骤3：LLM 话题归属 + 改写一步完成（json_object 模式约束输出，prompt 要求严格 JSON）
-            String output = llmGateway.generateJson(model, PromptTemplates.REWRITE_SYSTEM,
-                    buildUserPrompt(cleaned, history, topics)).text();
-            return parse(output, cleaned);
-        } catch (Exception e) {
-            // 步骤4：LLM 失败（超时/熔断等）→ 降级原句，不阻断主流程
-            log.warn("[rewrite] llm failed, fallback to original query: {}", e.getMessage());
-            return RewriteResult.degrade(cleaned);
-        }
-    }
-
-    /** 解析 LLM 输出的 JSON：字段级容错（JsonNode 手取而非强类型反序列化），rewritten 与 topic 各自独立降级 */
-    private RewriteResult parse(String output, String original) {
-        String cleanedOut = clean(output);
-        if (cleanedOut.isEmpty()) {
-            return RewriteResult.degrade(original);
-        }
-        try {
-            JsonNode node = JsonUtil.fromJson(JsonUtil.extractJsonObject(cleanedOut), JsonNode.class);
+            // 步骤3：LLM 话题归属 + 改写一步完成（网关封装：json_object 约束 + 截断感知 + 提取解析，不可用返回 null）
+            // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
+            JsonNode node = llmGateway.generateJsonNode(model,
+                    promptTemplateService.resolve("REWRITE_SYSTEM", PromptTemplates.REWRITE_SYSTEM),
+                    buildUserPrompt(cleaned, history, topics), "rewrite");
+            // 截断/解析失败 → 降级返回原句（宁可失忆不可失败）
             if (node == null) {
-                return RewriteResult.degrade(original);
+                return RewriteResult.degrade(cleaned);
             }
-            // 字段缺失/类型错（如 newTopic 为字符串）不致整体失败：asText/asBoolean 对任何类型都安全
+            // 步骤4：字段级容错（JsonNode 手取而非强类型反序列化），rewritten 与 topic 各自独立降级；
+            //        字段缺失/类型错（如 newTopic 为字符串）不致整体失败：asText/asBoolean 对任何类型都安全
             // rewritten 防御：空或异常冗长（模型可能带解释废话）→ 降级原句
             String rewritten = clean(node.path("rewritten").asText(""));
-            if (rewritten.isEmpty() || rewritten.length() > original.length() * 3 + OUTPUT_LENGTH_SLACK) {
+            if (rewritten.isEmpty() || rewritten.length() > cleaned.length() * 3 + OUTPUT_LENGTH_SLACK) {
                 log.warn("[rewrite] invalid rewritten length={}, fallback to original query", rewritten.length());
-                rewritten = original;
+                rewritten = cleaned;
             }
             // topic 防御：清洗后为空则视为未判断，由调用方段解析兜底
             String topic = clean(node.path("topic").asText(""));
             return new RewriteResult(rewritten, topic, node.path("newTopic").asBoolean(false));
         } catch (Exception e) {
-            log.warn("[rewrite] parse output failed, fallback to original query: {}", e.getMessage());
-            return RewriteResult.degrade(original);
+            // 步骤5：LLM 失败（超时/熔断等）→ 降级原句，不阻断主流程
+            log.warn("[rewrite] llm failed, fallback to original query: {}", e.getMessage());
+            return RewriteResult.degrade(cleaned);
         }
     }
 

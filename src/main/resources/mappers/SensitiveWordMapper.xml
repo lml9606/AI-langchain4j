@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.SensitiveWordMapper">
+
+    <resultMap id="SensitiveWordMap" type="com.example.langchain4j.repository.entity.SensitiveWord">
+        <id property="id" column="id"/>
+        <result property="word" column="word"/>
+        <result property="enabled" column="enabled"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.SensitiveWord"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_sensitive_word (word, enabled)
+        VALUES (#{word}, COALESCE(#{enabled}, TRUE))
+    </insert>
+
+    <select id="selectEnabled" resultMap="SensitiveWordMap">
+        SELECT id, word, enabled, created_at
+        FROM ai_sensitive_word
+        WHERE enabled = TRUE
+        ORDER BY id
+    </select>
+
+    <select id="selectAll" resultMap="SensitiveWordMap">
+        SELECT id, word, enabled, created_at
+        FROM ai_sensitive_word
+        ORDER BY id
+    </select>
+
+    <update id="updateEnabled">
+        UPDATE ai_sensitive_word SET enabled = #{enabled} WHERE id = #{id}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM ai_sensitive_word WHERE id = #{id}
+    </delete>
+</mapper>

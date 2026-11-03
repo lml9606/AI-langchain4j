@@ -43,17 +43,20 @@ public class SummaryService {
     private final LlmGateway llmGateway;
     private final AgentProperties properties;
     private final ThreadPoolTaskExecutor summaryExecutor;
+    private final PromptTemplateService promptTemplateService;
 
     public SummaryService(SummaryMapper summaryMapper,
                           MessageMapper messageMapper,
                           LlmGateway llmGateway,
                           AgentProperties properties,
-                          ThreadPoolTaskExecutor summaryExecutor) {
+                          ThreadPoolTaskExecutor summaryExecutor,
+                          PromptTemplateService promptTemplateService) {
         this.summaryMapper = summaryMapper;
         this.messageMapper = messageMapper;
         this.llmGateway = llmGateway;
         this.properties = properties;
         this.summaryExecutor = summaryExecutor;
+        this.promptTemplateService = promptTemplateService;
     }
 
     /**
@@ -164,8 +167,10 @@ public class SummaryService {
         }
         String userPrompt = "已有摘要：\n" + (segment.getContent().isBlank() ? "（无）" : segment.getContent())
                 + "\n\n" + sb;
+        // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
         String output = llmGateway.generate(properties.getLlm().getDefaultModel(),
-                PromptTemplates.SUMMARY_SYSTEM, userPrompt).text();
+                promptTemplateService.resolve("SUMMARY_SYSTEM", PromptTemplates.SUMMARY_SYSTEM),
+                userPrompt).text();
         if (output == null) {
             return "";
         }

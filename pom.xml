@@ -66,6 +66,8 @@
         <postgresql.version>42.7.7</postgresql.version>
         <!-- Redisson：分布式锁（RLock + Watchdog），其 3.49.0 POM 声明 spring-boot 3.5.0 与项目匹配 -->
         <redisson.version>3.49.0</redisson.version>
+        <!-- JWT 库（jjwt 0.12.x）：认证签发/校验，API 模块编译期可见，impl/jackson 仅运行时需要 -->
+        <jjwt.version>0.12.6</jjwt.version>
     </properties>
 
     <!-- ==================== 依赖管理：BOM 导入，统一各模块版本 ==================== -->
@@ -214,6 +216,31 @@
             <version>${redisson.version}</version>
         </dependency>
 
+        <!-- JWT 认证（jjwt 0.12.x）：签发/校验 Bearer Token；impl/jackson 为运行时实现与 JSON 序列化 -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <!-- BCrypt 密码哈希：只引加密工具模块（不含过滤器链），认证逻辑由自定义 JwtAuthFilter 实现；
+             版本由 Boot parent 统一管理 -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+        </dependency>
+
         <!-- 可观测性：Actuator 健康检查/指标端点（health/prometheus），
              配合 micrometer-registry-prometheus 输出 Prometheus 格式指标；
              版本由 Boot parent 统一管理 -->
@@ -239,12 +266,13 @@
             <artifactId>lombok</artifactId>
             <optional>true</optional>
         </dependency>
-        <!-- 测试依赖暂未启用：当前为纯框架搭建，无测试代码；后续补充单测时放开 -->
-        <!--        <dependency>-->
-        <!--            <groupId>org.springframework.boot</groupId>-->
-        <!--            <artifactId>spring-boot-starter-test</artifactId>-->
-        <!--            <scope>test</scope>-->
-        <!--        </dependency>-->
+        <!-- 测试：JUnit 5 + Mockito + AssertJ + MockMvc（Boot parent 统一版本管理）；
+             节点单测（纯 Mockito）与 API 契约测试（@WebMvcTest）共用 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <!-- ==================== 构建配置 ==================== -->

@@ -1,9 +1,9 @@
 package com.example.langchain4j.graph.nodes;
 
-import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
+import com.example.langchain4j.service.PromptTemplateService;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
@@ -34,9 +34,11 @@ public class ValidateNode implements NodeAction<WorkflowState> {
     public static final String ISSUE_GROUNDING = "grounding";
 
     private final LlmGateway llmGateway;
+    private final PromptTemplateService promptTemplateService;
 
-    public ValidateNode(LlmGateway llmGateway) {
+    public ValidateNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService) {
         this.llmGateway = llmGateway;
+        this.promptTemplateService = promptTemplateService;
     }
 
     @Override
@@ -53,7 +55,7 @@ public class ValidateNode implements NodeAction<WorkflowState> {
             }
         }
         // 步骤3：两层都过 → 写入通过标记，路由转收尾节点
-        return Map.of(WorkflowState.VALIDATED, true);
+        return Map.of(WorkflowState.VALIDATION, WorkflowState.Validation.of(true, "", ""));
     }
 
     /** 校验失败：重试计数 +1，写入失败类型与原因，交由路由判断回生成/回检索/兜底 */
@@ -63,9 +65,7 @@ public class ValidateNode implements NodeAction<WorkflowState> {
                 issue, retries, state.result() == null ? 0 : state.result().length());
         return Map.of(
                 WorkflowState.RETRY_COUNT, retries,
-                WorkflowState.VALIDATED, false,
-                WorkflowState.VALIDATION_ISSUE, issue,
-                WorkflowState.VALIDATION_REASON, truncate(reason));
+                WorkflowState.VALIDATION, WorkflowState.Validation.of(false, issue, truncate(reason)));
     }
 
     /** LLM 质检：输入用户需求 + 参考资料 + 候选回答，输出 {valid, issue, reason}；质检调用失败时放行（漏判优于误杀） */
@@ -74,9 +74,11 @@ public class ValidateNode implements NodeAction<WorkflowState> {
                 + "\n\n参考资料：\n" + state.context()
                 + "\n\n候选回答：\n" + state.result();
         try {
-            String raw = llmGateway.generateJson(state.model(),
-                    PromptTemplates.VALIDATE_LLM_SYSTEM, userPrompt).text();
-            JsonNode node = JsonUtil.fromJson(JsonUtil.extractJsonObject(raw), JsonNode.class);
+            // 网关封装：json_object 约束 + 截断感知 + 提取解析；截断/解析失败返回 null → 直接放行（fail-open：漏判优于误杀）
+            // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
+            JsonNode node = llmGateway.generateJsonNode(state.model(),
+                    promptTemplateService.resolve("VALIDATE_LLM_SYSTEM", PromptTemplates.VALIDATE_LLM_SYSTEM),
+                    userPrompt, "validate");
             if (node == null) {
                 return QaResult.pass();
             }

@@ -17,6 +17,10 @@ public class KnowledgeChunk {
     private float[] embedding;
     /** 元数据 JSON（来源、标签等扩展信息） */
     private String metadata;
+    /** 所属用户（NULL = 公共库对所有用户可见；非 NULL 仅本用户可见/可查） */
+    private String userId;
     /** 创建时间 */
     private OffsetDateTime createdAt;
+    /** 更新时间（知识治理更新闭环，可空 = 从未更新） */
+    private OffsetDateTime updatedAt;
 }

@@ -30,6 +30,9 @@ public class AgentProperties {
     /** 本地向量模型配置（Ollama 部署 BGE-M3） */
     private Embedding embedding = new Embedding();
 
+    /** 知识治理配置（分块/批量导入） */
+    private Knowledge knowledge = new Knowledge();
+
     /** 限流配置 */
     private RateLimit rateLimit = new RateLimit();
 
@@ -100,6 +103,8 @@ public class AgentProperties {
     public static class Llm {
         private int timeoutSeconds = 60;
         private int maxRetries = 3;
+        /** 结构化输出（generateJson）最大输出 token 数：JSON 节点输出短小，1024 足够；触顶即截断（finishReason=LENGTH） */
+        private int maxOutputTokens = 1024;
         /** 默认模型名：前端不传 model 参数时使用；必须是注册表已注册的模型 */
         private String defaultModel = "deepseek-flash";
         /** 千问模型名（与 langchain4j.community.dashscope.chat-model.model-name 保持一致） */
@@ -123,6 +128,20 @@ public class AgentProperties {
         private String baseUrl = "http://localhost:11434";
         /** 向量模型名（BGE-M3 输出 1024 维，与 pgvector 列维度一致） */
         private String modelName = "bge-m3";
+    }
+
+    /**
+     * 知识治理配置：分块参数可配（长文档导入时按 chunkSize 切分、chunkOverlap 保留跨块语义），
+     * 批量导入文档数上限防一次请求打爆嵌入服务。
+     */
+    @Data
+    public static class Knowledge {
+        /** 分块大小（字符）：长文档按此切分后逐块嵌入，单块语义聚焦检索更精准 */
+        private int chunkSize = 800;
+        /** 相邻分块重叠字符数：保留跨块边界的句间语义 */
+        private int chunkOverlap = 80;
+        /** 批量导入单次请求最大文档数（超限拒绝，防嵌入服务被打爆） */
+        private int batchMaxDocuments = 20;
     }
 
     @Data

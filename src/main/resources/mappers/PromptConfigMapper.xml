@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.PromptConfigMapper">
+
+    <resultMap id="PromptConfigMap" type="com.example.langchain4j.repository.entity.PromptConfig">
+        <id property="id" column="id"/>
+        <result property="promptKey" column="prompt_key"/>
+        <result property="promptText" column="prompt_text"/>
+        <result property="version" column="version"/>
+        <result property="updatedBy" column="updated_by"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="selectAll" resultMap="PromptConfigMap">
+        SELECT id, prompt_key, prompt_text, version, updated_by, created_at, updated_at
+        FROM ai_prompt_config
+        ORDER BY prompt_key
+    </select>
+
+    <select id="selectByKey" resultMap="PromptConfigMap">
+        SELECT id, prompt_key, prompt_text, version, updated_by, created_at, updated_at
+        FROM ai_prompt_config
+        WHERE prompt_key = #{promptKey}
+    </select>
+
+    <!-- 幂等覆盖：不存在则插入（version=1），已存在则更新文本、版本 +1 并刷新更新时间 -->
+    <insert id="upsert" parameterType="com.example.langchain4j.repository.entity.PromptConfig">
+        INSERT INTO ai_prompt_config (prompt_key, prompt_text, version, updated_by)
+        VALUES (#{promptKey}, #{promptText}, 1, #{updatedBy})
+        ON CONFLICT (prompt_key) DO UPDATE
+        SET prompt_text = EXCLUDED.prompt_text,
+            version     = ai_prompt_config.version + 1,
+            updated_by  = EXCLUDED.updated_by,
+            updated_at  = now()
+    </insert>
+
+    <delete id="deleteByKey">
+        DELETE FROM ai_prompt_config WHERE prompt_key = #{promptKey}
+    </delete>
+</mapper>

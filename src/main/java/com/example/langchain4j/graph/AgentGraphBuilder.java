@@ -36,7 +36,7 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
  *        ⇄（Corrective RAG 有限重试环）→ fallback(兜底) → finalize(收尾) → END
  *        （entry 校验失败 → 直接 fallback，跳过 intent，省一次 LLM 调用）
  *        （代码生成意图跳过 decompose/hopCheck，直接 retrieval → generate）
- *        （检索无结果 → 直接 handoff 转人工，不进入 LLM 生成）
+ *        （检索无结果：知识问答先经多跳换问法补查，仍空才转人工，不进入 LLM 生成）
  * <p>
  * 说明：
  * <ul>
@@ -113,56 +113,72 @@ public class AgentGraphBuilder {
         StateGraph<WorkflowState> graph = new StateGraph<>(stateSerializer);
         try {
             // 步骤2：注册全部节点（异步包装，节点内部各自负责防御与日志）
+            // entry 守卫节点：空输入拦截 + 长度截断/控制字符清理 + 重试与多跳计数归零 + 种入默认子查询
             graph.addNode(NODE_ENTRY, node_async(entryNode));
+            // intent 意图识别：knowledge_qa / code_generate / reject（失败默认 knowledge_qa）
             graph.addNode(NODE_INTENT, node_async(intentNode));
+            // decompose 问题分解：复合问题拆子查询（失败/空输出降级为单查询，等同未分解）
             graph.addNode(NODE_DECOMPOSE, node_async(decomposeNode));
+            // retrieval 知识检索：pgvector 语义检索，三种模式（首轮子查询遍历 / 多跳补查 / 纠错重查）
             graph.addNode(NODE_RETRIEVAL, node_async(retrievalNode));
+            // hop_check 多跳判断：上下文是否足以回答（不足且未达上限 → 回检索补查）
             graph.addNode(NODE_HOP_CHECK, node_async(hopCheckNode));
+            // generate 主生成：按意图选 prompt，结合检索上下文与多轮历史生成回答（异常转兜底）
             graph.addNode(NODE_GENERATE, node_async(generateNode));
+            // validate 质量校验：规则层（非空/长度/自曝错误）+ LLM 质检层（防幻觉）双门禁
             graph.addNode(NODE_VALIDATE, node_async(validateNode));
+            // fallback 兜底：所有异常路径的最终出口，输出固定降级答案，保证图永远有输出
             graph.addNode(NODE_FALLBACK, node_async(fallbackNode));
+            // handoff 转人工：检索无结果时的出口，返回固定提示，不进入 LLM 生成
             graph.addNode(NODE_HANDOFF, node_async(handoffNode));
+            // finalize 收尾：结果兜底组装（防空输出）+ 标记流程完成（持久化由 service 层负责）
             graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
 
-            // 步骤3：连接主链路 START → entry → intent → decompose ⇢ retrieval ⇄ hop_check → generate → validate → finalize → END
-            //        （retrieval 后条件路由：无结果转 handoff；hop_check 后条件路由：信息不足回检索补查）
-            // 入口直连：START 无条件进入守卫节点（空输入校验 + 清洗 + 重试/多跳计数归零）
+            // 步骤3：连接主链路与条件路由（注释格式：来源路由 → 条件 ⇒ 目标节点）
+            // START 直连 entry：图入口无条件进入守卫节点（空输入校验 + 清洗 + 计数归零 + 种入默认子查询）
             graph.addEdge(START, NODE_ENTRY);
-            // 守卫路由：输入校验失败（空输入）直接兜底，跳过意图识别，省一次 LLM 调用
+            // entry 守卫路由：校验失败（空输入）→ fallback 兜底；通过 → intent 意图识别
+            //                （失败跳过 intent，省一次 LLM 调用）
             graph.addConditionalEdges(NODE_ENTRY, edge_async(router.afterEntry()),
                     Map.of(Router.TO_INTENT, NODE_INTENT,
                             Router.TO_FALLBACK, NODE_FALLBACK));
-            // 意图路由：知识问答 → 问题分解；代码生成 → 直接检索；reject/异常 → 兜底
+            // intent 意图路由：knowledge_qa → decompose 分解；code_generate → retrieval 直接检索；
+            //                 reject/未知意图/异常 → fallback 兜底拒绝回答
             graph.addConditionalEdges(NODE_INTENT, edge_async(router.afterIntent()),
                     Map.of(Router.TO_DECOMPOSE, NODE_DECOMPOSE,
                             Router.TO_RETRIEVAL, NODE_RETRIEVAL,
                             Router.TO_FALLBACK, NODE_FALLBACK));
-            // 分解直连：分解后（含降级单查询）无条件进入检索
+            // decompose 直连 retrieval：分解完成（含降级单查询）无条件进入检索
             graph.addEdge(NODE_DECOMPOSE, NODE_RETRIEVAL);
-            // 检索路由：无结果（上下文为空）→ 转人工；知识问答 → 多跳判断；代码生成 → 直接生成
+            // retrieval 检索路由：knowledge_qa → hop_check 多跳判断（首轮空上下文也进，换问法补查）；
+            //                  code_generate：空上下文 → handoff 转人工；有资料 → generate 直接生成
             graph.addConditionalEdges(NODE_RETRIEVAL, edge_async(router.afterRetrieval()),
                     Map.of(Router.TO_HOP_CHECK, NODE_HOP_CHECK,
                             Router.TO_GENERATE, NODE_GENERATE,
                             Router.TO_HANDOFF, NODE_HANDOFF));
-            // 多跳路由：上下文足够/超限 → 生成；不足且未达上限 → 回检索补查（有限多跳环）
+            // hop_check 多跳路由（有限多跳环）：足够/超限 → generate 生成；足够但上下文仍空 → handoff 转人工（空资料不许生成）；
+            //                不足且未达上限 → retrieval 回检索补查（用下一跳查询追加证据链）
             graph.addConditionalEdges(NODE_HOP_CHECK, edge_async(router.afterHopCheck()),
                     Map.of(Router.TO_GENERATE, NODE_GENERATE,
-                            Router.TO_RETRIEVAL, NODE_RETRIEVAL));
-            // 生成后路由：LLM 异常 → 兜底；正常 → 校验
+                            Router.TO_RETRIEVAL, NODE_RETRIEVAL,
+                            Router.TO_HANDOFF, NODE_HANDOFF));
+            // generate 生成后路由：LLM 异常（error 非空）→ fallback 兜底；正常 → validate 质量校验
             graph.addConditionalEdges(NODE_GENERATE, edge_async(router.afterGenerate()),
                     Map.of(Router.TO_VALIDATE, NODE_VALIDATE,
                             Router.TO_FALLBACK, NODE_FALLBACK));
-            // 校验路由：通过 → 收尾；未达重试上限时按原因分叉
-            //           （grounding → 回检索重查；format 等 → 回生成重试）；超限 → 兜底
+            // validate 校验路由（有限重试环）：通过 → finalize 收尾；
+            //                 grounding（回答与资料矛盾）→ retrieval 回检索重查；
+            //                 format 等其他失败未达重试上限 → generate 回生成重试；超限 → fallback 兜底
             graph.addConditionalEdges(NODE_VALIDATE, edge_async(router.afterValidate()),
                     Map.of(Router.TO_FINALIZE, NODE_FINALIZE,
                             Router.TO_GENERATE, NODE_GENERATE,
                             Router.TO_RETRIEVAL, NODE_RETRIEVAL,
                             Router.TO_FALLBACK, NODE_FALLBACK));
-            // 兜底与转人工都直连收尾：任何路径最终都汇入 finalize 后结束
+            // fallback 直连 finalize：兜底降级答案汇入收尾（任何异常路径都保证有输出）
             graph.addEdge(NODE_FALLBACK, NODE_FINALIZE);
+            // handoff 直连 finalize：转人工提示汇入收尾
             graph.addEdge(NODE_HANDOFF, NODE_FINALIZE);
-            // 收尾直连：finalize 保证结果非空后无条件进入 END
+            // finalize 直连 END：收尾组装非空结果后无条件结束
             graph.addEdge(NODE_FINALIZE, END);
 
             // 步骤4：编译图 —— 挂 checkpoint 持久化器 + 递归上限（防路由死循环）
