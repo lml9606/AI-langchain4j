@@ -16,11 +16,11 @@ import dev.langchain4j.model.chat.request.ResponseFormat;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.output.FinishReason;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RedissonClient;
+import org.redisson.client.codec.StringCodec;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -34,7 +34,7 @@ import java.util.concurrent.TimeoutException;
  * 提供三层防护：
  * 1. 超时控制（Future.get + timeout，防止模型挂起拖垮线程池）；
  * 2. 指数退避重试（1s/2s/4s + 随机抖动，避免瞬时抖动直接失败）；
- * 3. Redis 计数熔断（连续失败达阈值后冷却期内快速失败，保护下游与自身线程池）。
+ * 3. Redis 计数熔断（Redisson 实现：连续失败达阈值后冷却期内快速失败，保护下游与自身线程池）。
  *
  * Redis 不可用时熔断自动 fail-open（放行调用），保证可用性优先。
  */
@@ -49,23 +49,24 @@ public class LlmGateway {
     private static final int MAX_LOG_TEXT_LENGTH = 200;
 
     private final ModelRegistry modelRegistry;
-    private final StringRedisTemplate redisTemplate;
+    private final RedissonClient redissonClient;
     private final AgentProperties properties;
     /**
      * LLM 调用执行器：独立于图执行线程池（llmExecutor Bean）。
-     * 隔离原因：图执行线程会同步等待本执行器上的 LLM 任务，共用同一池时高并发下
+     * 隔离原因：图执行线程会同步等待本执行器上的 LLM
+     * 任务，共用同一池时高并发下
      * 两者相互等待形成准死锁；独立池后等待只阻塞调用线程，不影响其他 LLM 任务执行。
      */
     private final Executor llmExecutor;
     private final AgentMetrics metrics;
 
     public LlmGateway(ModelRegistry modelRegistry,
-                      StringRedisTemplate redisTemplate,
+                      RedissonClient redissonClient,
                       AgentProperties properties,
                       @Qualifier("llmExecutor") Executor llmExecutor,
                       AgentMetrics metrics) {
         this.modelRegistry = modelRegistry;
-        this.redisTemplate = redisTemplate;
+        this.redissonClient = redissonClient;
         this.properties = properties;
         this.llmExecutor = llmExecutor;
         this.metrics = metrics;
@@ -85,6 +86,18 @@ public class LlmGateway {
     }
 
     /**
+     * JSON 模式 + 自定义输出预算：整份简历改稿等长输出场景使用。
+     * 不覆盖全局 {@code agent.llm.max-output-tokens}（短 JSON 节点仍用全局值）。
+     *
+     * @param maxOutputTokens 本次调用的输出 token 上限
+     */
+    public LlmResult generateJson(String modelName, String systemPrompt, String userPrompt,
+                                  int maxOutputTokens) {
+        return generate(modelName, buildMessages(systemPrompt, userPrompt), ResponseFormat.JSON,
+                maxOutputTokens);
+    }
+
+    /**
      * JSON 结构化输出便捷方法：generateJson + 截断感知 + 提取解析一步到位，
      * 消除各结构化调用点重复的「截断检查 + extractJsonObject + fromJson」样板代码。
      * <p>
@@ -99,7 +112,17 @@ public class LlmGateway {
      * @return 解析出的 JSON 节点；截断或提取解析失败返回 null
      */
     public JsonNode generateJsonNode(String modelName, String systemPrompt, String userPrompt, String scene) {
-        LlmResult result = generateJson(modelName, systemPrompt, userPrompt);
+        return generateJsonNode(modelName, systemPrompt, userPrompt, scene,
+                properties.getLlm().getMaxOutputTokens());
+    }
+
+    /**
+     * JSON 结构化输出 + 自定义输出预算：截断感知 + 提取解析一步到位。
+     * 供简历优化等需要长输出的结构化场景使用。
+     */
+    public JsonNode generateJsonNode(String modelName, String systemPrompt, String userPrompt,
+                                     String scene, int maxOutputTokens) {
+        LlmResult result = generateJson(modelName, systemPrompt, userPrompt, maxOutputTokens);
         // 输出被 maxOutputTokens 截断 → JSON 不完整，返回 null 交给调用方降级（doGenerate 已打点 llm_truncated_total）
         if (result.truncated()) {
             log.warn("[{}] llm output truncated, json unavailable", scene);
@@ -133,7 +156,11 @@ public class LlmGateway {
     }
 
     public LlmResult generate(String modelName, List<ChatMessage> messages) {
-        return generate(modelName, messages, null);
+        return generate(modelName, messages, null, null);
+    }
+
+    private LlmResult generate(String modelName, List<ChatMessage> messages, ResponseFormat responseFormat) {
+        return generate(modelName, messages, responseFormat, null);
     }
 
     /**
@@ -144,8 +171,10 @@ public class LlmGateway {
      * 达到阈值时打开熔断（冷却期内所有调用直接快速失败，不再触碰模型）。
      *
      * @param responseFormat 非空时以 json_object 模式请求（不支持的供应商会报错，由调用方降级兜底）
+     * @param maxOutputTokens 本次调用的输出 token 上限；null 时使用全局 agent.llm.max-output-tokens
      */
-    private LlmResult generate(String modelName, List<ChatMessage> messages, ResponseFormat responseFormat) {
+    private LlmResult generate(String modelName, List<ChatMessage> messages,
+                               ResponseFormat responseFormat, Integer maxOutputTokens) {
         if (messages == null || messages.isEmpty()) {
             throw new BizException(ErrorCode.BAD_REQUEST, "LLM 调用消息不能为空");
         }
@@ -160,7 +189,7 @@ public class LlmGateway {
                 throw new BizException(ErrorCode.AGENT_LLM_UNAVAILABLE, "大模型服务熔断中，请稍后重试");
             }
             try {
-                LlmResult result = doGenerate(modelName, messages, responseFormat);
+                LlmResult result = doGenerate(modelName, messages, responseFormat, maxOutputTokens);
                 onSuccess();
                 metrics.recordLlmCall(modelName, true, System.currentTimeMillis() - start);
                 return result;
@@ -182,9 +211,13 @@ public class LlmGateway {
     }
 
     /** 单次调用 + 超时控制（按模型名从注册表取 ChatModel；responseFormat 非空时走 ChatRequest 传参） */
-    private LlmResult doGenerate(String modelName, List<ChatMessage> messages, ResponseFormat responseFormat) throws Exception {
+    private LlmResult doGenerate(String modelName, List<ChatMessage> messages,
+                                 ResponseFormat responseFormat, Integer maxOutputTokens) throws Exception {
         ChatModel chatModel = modelRegistry.chatModel(modelName);
         long timeoutSeconds = Math.max(1, properties.getLlm().getTimeoutSeconds());
+        int outputLimit = maxOutputTokens == null
+                ? properties.getLlm().getMaxOutputTokens()
+                : maxOutputTokens;
         CompletableFuture<ChatResponse> future = CompletableFuture.supplyAsync(() -> {
             if (responseFormat == null) {
                 return chatModel.chat(messages);
@@ -193,7 +226,7 @@ public class LlmGateway {
                     .messages(messages)
                     .parameters(ChatRequestParameters.builder()
                             .responseFormat(responseFormat)
-                            .maxOutputTokens(properties.getLlm().getMaxOutputTokens())
+                            .maxOutputTokens(outputLimit)
                             .build())
                     .build());
         }, llmExecutor);
@@ -248,7 +281,7 @@ public class LlmGateway {
 
     private boolean isCircuitOpen() {
         try {
-            return Boolean.TRUE.equals(redisTemplate.hasKey(CB_OPEN_KEY));
+            return redissonClient.getBucket(CB_OPEN_KEY, StringCodec.INSTANCE).isExists();
         } catch (Exception e) {
             log.warn("[llm] circuit breaker redis unavailable, fail-open: {}", e.getMessage());
             return false;
@@ -259,7 +292,7 @@ public class LlmGateway {
     private void onSuccess() {
         metrics.setCircuitOpen(false);
         try {
-            redisTemplate.delete(CB_FAILURES_KEY);
+            redissonClient.getBucket(CB_FAILURES_KEY, StringCodec.INSTANCE).delete();
         } catch (Exception ignored) {
             // fail-open：Redis 异常不影响主流程
         }
@@ -272,11 +305,11 @@ public class LlmGateway {
      */
     private void onFailure() {
         try {
-            Long failures = redisTemplate.opsForValue().increment(CB_FAILURES_KEY);
-            if (failures != null && failures >= properties.getLlm().getCircuitBreaker().getFailureThreshold()) {
-                redisTemplate.opsForValue().set(CB_OPEN_KEY, "1",
-                        Duration.ofSeconds(properties.getLlm().getCircuitBreaker().getCooldownSeconds()));
-                redisTemplate.delete(CB_FAILURES_KEY);
+            long failures = redissonClient.getAtomicLong(CB_FAILURES_KEY).incrementAndGet();
+            if (failures >= properties.getLlm().getCircuitBreaker().getFailureThreshold()) {
+                redissonClient.getBucket(CB_OPEN_KEY, StringCodec.INSTANCE).set("1",
+                        properties.getLlm().getCircuitBreaker().getCooldownSeconds(), TimeUnit.SECONDS);
+                redissonClient.getBucket(CB_FAILURES_KEY, StringCodec.INSTANCE).delete();
                 metrics.setCircuitOpen(true);
                 log.warn("[llm] circuit breaker OPEN, cooldown {}s",
                         properties.getLlm().getCircuitBreaker().getCooldownSeconds());

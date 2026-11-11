@@ -198,3 +198,26 @@ CREATE TABLE IF NOT EXISTS ai_prompt_config (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 简历优化记录表（一次优化请求一行：底稿 + 改稿 + 变更清单 + diff）
+-- 底稿/改稿存全文：用户回看改动与 diff 重算都需要原文；按 user_id 做数据隔离
+CREATE TABLE IF NOT EXISTS ai_resume_revision (
+    id           BIGSERIAL PRIMARY KEY,
+    revision_id  VARCHAR(64)  NOT NULL UNIQUE,           -- 业务记录 ID（同时作为图 threadId）
+    user_id      VARCHAR(64)  NOT NULL,                  -- 所属用户
+    resume_title VARCHAR(200),                           -- 简历标题（展示用）
+    mode         VARCHAR(20)  NOT NULL,                  -- TARGETED / FREE
+    target_json  TEXT,                                   -- 目标岗位/选定章节/提示词快照
+    original_md  TEXT         NOT NULL,                  -- 简历原文
+    revised_md   TEXT,                                   -- 修改后的整份简历
+    changes_json TEXT,                                   -- 变更点清单
+    diff_json    TEXT,                                   -- 行级 diff
+    status       VARCHAR(16)  NOT NULL DEFAULT 'RUNNING',-- RUNNING / DONE / ERROR / SAVED
+    model        VARCHAR(100),                           -- 实际使用的模型名
+    token_usage  INTEGER,                                -- 生成消耗 token 总数
+    error        TEXT,                                   -- 失败原因（成功时为空）
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_resume_revision_user ON ai_resume_revision (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_resume_revision_status ON ai_resume_revision (status, created_at DESC);

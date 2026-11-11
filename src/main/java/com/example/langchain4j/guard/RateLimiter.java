@@ -5,15 +5,16 @@ import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.config.AgentProperties;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.redisson.api.RScript;
+import org.redisson.api.RedissonClient;
+import org.redisson.client.codec.StringCodec;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.List;
 
 /**
- * 固定窗口限流器（Redis 原子计数实现）。
+ * 固定窗口限流器（Redisson RScript 原子计数实现）。
  * <ul>
  *   <li>INCR + 首次 EXPIRE 通过 Lua 脚本保证原子性，避免窗口边界竞态；</li>
  *   <li>Redis 故障时 fail-open（放行），可用性优先，可配置关闭；</li>
@@ -33,16 +34,14 @@ public class RateLimiter {
             "if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end " +
             "return c";
 
-    private final StringRedisTemplate redisTemplate;
+    private final RedissonClient redissonClient;
     private final AgentProperties properties;
     private final AgentMetrics metrics;
-    private final DefaultRedisScript<Long> incrScript;
 
-    public RateLimiter(StringRedisTemplate redisTemplate, AgentProperties properties, AgentMetrics metrics) {
-        this.redisTemplate = redisTemplate;
+    public RateLimiter(RedissonClient redissonClient, AgentProperties properties, AgentMetrics metrics) {
+        this.redissonClient = redissonClient;
         this.properties = properties;
         this.metrics = metrics;
-        this.incrScript = new DefaultRedisScript<>(INCR_SCRIPT, Long.class);
     }
 
     /**
@@ -57,8 +56,10 @@ public class RateLimiter {
         }
         String key = KEY_PREFIX + sanitize(dimension);
         try {
-            Long count = redisTemplate.execute(incrScript, List.of(key),
-                    String.valueOf(WINDOW.getSeconds()));
+            // EVAL 原子执行：KEYS[1]=计数键，ARGV[1]=窗口秒数（Codec 在 getScript 处已指定）
+            Long count = redissonClient.getScript(StringCodec.INSTANCE).eval(
+                    RScript.Mode.READ_WRITE, INCR_SCRIPT, RScript.ReturnType.INTEGER,
+                    List.<Object>of(key), String.valueOf(WINDOW.getSeconds()));
             boolean allowed = count == null || count <= properties.getRateLimit().getPermitsPerMinute();
             if (!allowed) {
                 metrics.recordRateLimited();

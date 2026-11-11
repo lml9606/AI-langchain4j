@@ -1,6 +1,8 @@
 package com.example.langchain4j.config;
 
 import com.example.langchain4j.graph.AgentGraphBuilder;
+import com.example.langchain4j.graph.resume.ResumeOptimizeGraphBuilder;
+import com.example.langchain4j.graph.resume.ResumeOptimizeState;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.graph.state.WorkflowStateSerializer;
 import lombok.extern.slf4j.Slf4j;
@@ -52,5 +54,18 @@ public class GraphConfig {
     public CompiledGraph<WorkflowState> agentGraph(AgentGraphBuilder builder,
                                                    BaseCheckpointSaver checkpointSaver) {
         return builder.build(checkpointSaver);
+    }
+
+    /**
+     * 简历优化独立子图。
+     * <p>
+     * checkpoint 使用 MemorySaver：这是一次请求内跑完的单次工作流，
+     * 真正需要持久化的是最终改稿（ai_resume_revision 表），不是图执行中间态。
+     * 不共用上面的 PostgresSaver —— 它绑定的是 WorkflowStateSerializer，
+     * 直接拿来序列化 ResumeOptimizeState 会写错类型。
+     */
+    @Bean("resumeOptimizeGraph")
+    public CompiledGraph<ResumeOptimizeState> resumeOptimizeGraph(ResumeOptimizeGraphBuilder builder) {
+        return builder.build(new MemorySaver());
     }
 }

@@ -202,14 +202,10 @@
             <version>${mybatis-starter.version}</version>
         </dependency>
 
-        <!-- Redis 客户端（Lettuce，Boot 自动装配 StringRedisTemplate）：
-             用途：限流计数 / LLM 熔断计数 / 轻量缓存（均为 fail-open 策略） -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-redis</artifactId>
-        </dependency>
-        <!-- Redisson 分布式锁：RLock + Watchdog 看门狗自动续期（默认租约 30s），
-             根治手写 SETNX 固定 TTL 的“锁先于任务过期”竞态；用于会话级图执行串行化 -->
+        <!-- Redisson 统一 Redis 客户端（替代 Lettuce）：
+             1. 分布式锁 RLock + Watchdog 自动续期（默认租约 30s），根治 SETNX 固定 TTL 的“锁先于任务过期”竞态；
+             2. 限流计数（RScript）/ LLM 熔断计数（RAtomicLong）/ 轻量缓存（RBucket）统一走同一客户端。
+             starter 已排除 lettuce-core/jedis 并传递 spring-data-redis，避免双连接池与双套故障语义 -->
         <dependency>
             <groupId>org.redisson</groupId>
             <artifactId>redisson-spring-boot-starter</artifactId>

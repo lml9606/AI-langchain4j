@@ -21,6 +21,7 @@ import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.GraphInput;
 import org.bsc.langgraph4j.RunnableConfig;
 import org.bsc.langgraph4j.state.StateSnapshot;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
@@ -66,7 +67,7 @@ public class AgentService {
     private final AgentMetrics metrics;
     private final PromptTemplateService promptTemplateService;
 
-    public AgentService(CompiledGraph<WorkflowState> agentGraph,
+    public AgentService(@Qualifier("agentGraph") CompiledGraph<WorkflowState> agentGraph,
                         RateLimiter rateLimiter,
                         SessionLock sessionLock,
                         ConversationService conversationService,

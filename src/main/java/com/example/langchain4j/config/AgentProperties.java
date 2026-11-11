@@ -36,6 +36,9 @@ public class AgentProperties {
     /** 限流配置 */
     private RateLimit rateLimit = new RateLimit();
 
+    /** 会话锁配置 */
+    private Lock lock = new Lock();
+
     /** 校验重试上限（图内重试环次数） */
     private int maxValidateRetries = 3;
 
@@ -47,6 +50,9 @@ public class AgentProperties {
 
     /** 多轮上下文（短期记忆）配置 */
     private History history = new History();
+
+    /** 简历优化工作流配置 */
+    private Resume resume = new Resume();
 
     /** 单次图执行整体超时（秒）；超时即中止本轮：取消后台任务并返回降级应答，一问一答照常闭环，用户可直接重发 */
     private int executionTimeoutSeconds = 240;
@@ -77,6 +83,34 @@ public class AgentProperties {
         private int summaryMaxMessagesPerRun = 40;
         /** 段摘要最大字符数（超长截断，防止摘要本身膨胀） */
         private int summaryMaxLength = 4000;
+    }
+
+    /**
+     * 简历优化配置：输入上限、输出预算、目标岗位数量与校验重试上限。
+     * <p>
+     * 输出预算必须独立于 {@link Llm#getMaxOutputTokens()}：后者 1024 只适合短 JSON 节点，
+     * 整份简历改稿通常需要数千 token，共用一个值会稳定截断。
+     */
+    @Data
+    public static class Resume {
+        /** 简历原文最大字符数，超出截尾并在提示词中明示 */
+        private int maxInputChars = 20_000;
+        /** 首次生成的输出 token 上限 */
+        private int maxOutputTokens = 8_192;
+        /** 输出被截断时的重试 token 上限 */
+        private int retryMaxOutputTokens = 12_288;
+        /** 定向优化单次最多参与的目标岗位数（超过 representativeCount 时走聚合画像） */
+        private int maxTargetJobs = 10;
+        /** 单个岗位 JD 参与提示词的最大字符数 */
+        private int maxTargetJdChars = 1_200;
+        /** 岗位数超过该值时走聚合画像 + 代表 JD 策略 */
+        private int representativeCount = 5;
+        /** 校验失败后的图内重试上限 */
+        private int maxRetries = 2;
+        /** 变更点清单最大条数 */
+        private int maxChanges = 20;
+        /** 单次简历优化整体超时（秒） */
+        private int timeoutSeconds = 180;
     }
 
     @Data
@@ -155,5 +189,16 @@ public class AgentProperties {
         private boolean enabled = true;
         private int permitsPerMinute = 60;
         private boolean failOpen = true;
+    }
+
+    /**
+     * 会话锁配置（显式租约，不使用 Watchdog 续期）。
+     * 锁最迟在租约到期后自动释放，保证异常路径漏解锁时有界自愈；
+     * 代价是不自动续期，租约必须大于最长图执行耗时。
+     */
+    @Data
+    public static class Lock {
+        /** 锁租约（秒）：必须大于 executionTimeoutSeconds 与 resume.timeoutSeconds，否则任务未结束锁先过期 */
+        private int leaseSeconds = 300;
     }
 }

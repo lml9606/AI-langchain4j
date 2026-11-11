@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.ResumeRevisionMapper">
+
+    <resultMap id="ResumeRevisionMap" type="com.example.langchain4j.repository.entity.ResumeRevision">
+        <id property="id" column="id"/>
+        <result property="revisionId" column="revision_id"/>
+        <result property="userId" column="user_id"/>
+        <result property="resumeTitle" column="resume_title"/>
+        <result property="mode" column="mode"/>
+        <result property="targetJson" column="target_json"/>
+        <result property="originalMd" column="original_md"/>
+        <result property="revisedMd" column="revised_md"/>
+        <result property="changesJson" column="changes_json"/>
+        <result property="diffJson" column="diff_json"/>
+        <result property="status" column="status"/>
+        <result property="model" column="model"/>
+        <result property="tokenUsage" column="token_usage"/>
+        <result property="error" column="error"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.ResumeRevision"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_resume_revision
+            (revision_id, user_id, resume_title, mode, target_json, original_md,
+             status, model, created_at, updated_at)
+        VALUES
+            (#{revisionId}, #{userId}, #{resumeTitle}, #{mode}, #{targetJson}, #{originalMd},
+             #{status}, #{model}, now(), now())
+    </insert>
+
+    <select id="selectByRevisionId" resultMap="ResumeRevisionMap">
+        SELECT id, revision_id, user_id, resume_title, mode, target_json, original_md,
+               revised_md, changes_json, diff_json, status, model, token_usage, error,
+               created_at, updated_at
+        FROM ai_resume_revision
+        WHERE revision_id = #{revisionId}
+    </select>
+
+    <select id="selectByUser" resultMap="ResumeRevisionMap">
+        SELECT id, revision_id, user_id, resume_title, mode, target_json, original_md,
+               revised_md, changes_json, diff_json, status, model, token_usage, error,
+               created_at, updated_at
+        FROM ai_resume_revision
+        WHERE user_id = #{userId}
+        ORDER BY id DESC
+        LIMIT #{limit}
+    </select>
+
+    <update id="markDone">
+        UPDATE ai_resume_revision
+        SET revised_md  = #{revisedMd},
+            changes_json = #{changesJson},
+            diff_json    = #{diffJson},
+            model        = #{model},
+            token_usage  = #{tokenUsage,jdbcType=INTEGER},
+            status       = 'DONE',
+            error        = NULL,
+            updated_at   = now()
+        WHERE revision_id = #{revisionId}
+    </update>
+
+    <update id="markError">
+        UPDATE ai_resume_revision
+        SET status     = 'ERROR',
+            error      = #{error},
+            updated_at = now()
+        WHERE revision_id = #{revisionId}
+    </update>
+
+    <update id="markSaved">
+        UPDATE ai_resume_revision
+        SET status     = 'SAVED',
+            updated_at = now()
+        WHERE revision_id = #{revisionId}
+    </update>
+</mapper>
