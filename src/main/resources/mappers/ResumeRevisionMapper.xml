@@ -7,6 +7,7 @@
         <id property="id" column="id"/>
         <result property="revisionId" column="revision_id"/>
         <result property="userId" column="user_id"/>
+        <result property="conversationId" column="conversation_id"/>
         <result property="resumeTitle" column="resume_title"/>
         <result property="mode" column="mode"/>
         <result property="targetJson" column="target_json"/>
@@ -25,15 +26,15 @@
     <insert id="insert" parameterType="com.example.langchain4j.repository.entity.ResumeRevision"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_resume_revision
-            (revision_id, user_id, resume_title, mode, target_json, original_md,
+            (revision_id, user_id, conversation_id, resume_title, mode, target_json, original_md,
              status, model, created_at, updated_at)
         VALUES
-            (#{revisionId}, #{userId}, #{resumeTitle}, #{mode}, #{targetJson}, #{originalMd},
+            (#{revisionId}, #{userId}, #{conversationId}, #{resumeTitle}, #{mode}, #{targetJson}, #{originalMd},
              #{status}, #{model}, now(), now())
     </insert>
 
     <select id="selectByRevisionId" resultMap="ResumeRevisionMap">
-        SELECT id, revision_id, user_id, resume_title, mode, target_json, original_md,
+        SELECT id, revision_id, user_id, conversation_id, resume_title, mode, target_json, original_md,
                revised_md, changes_json, diff_json, status, model, token_usage, error,
                created_at, updated_at
         FROM ai_resume_revision
@@ -41,13 +42,24 @@
     </select>
 
     <select id="selectByUser" resultMap="ResumeRevisionMap">
-        SELECT id, revision_id, user_id, resume_title, mode, target_json, original_md,
+        SELECT id, revision_id, user_id, conversation_id, resume_title, mode, target_json, original_md,
                revised_md, changes_json, diff_json, status, model, token_usage, error,
                created_at, updated_at
         FROM ai_resume_revision
         WHERE user_id = #{userId}
         ORDER BY id DESC
         LIMIT #{limit}
+    </select>
+
+    <select id="selectRunningByUser" resultMap="ResumeRevisionMap">
+        SELECT id, revision_id, user_id, conversation_id, resume_title, mode, target_json, original_md,
+               revised_md, changes_json, diff_json, status, model, token_usage, error,
+               created_at, updated_at
+        FROM ai_resume_revision
+        WHERE user_id = #{userId}
+          AND status = 'RUNNING'
+        ORDER BY id DESC
+        LIMIT 1
     </select>
 
     <update id="markDone">

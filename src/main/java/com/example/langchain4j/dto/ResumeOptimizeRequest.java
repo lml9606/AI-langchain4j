@@ -27,6 +27,10 @@ public class ResumeOptimizeRequest {
     @NotBlank(message = "优化模式不能为空")
     private String mode;
 
+    /** 触发会话 ID（可空）：非空时优化锁会话（同会话串行）；对话内触发的记录由此回写完成通知 */
+    @Size(max = 64, message = "会话 ID 不能超过 64 字")
+    private String conversationId;
+
     /** 模型名；为空使用 agent.llm.default-model */
     private String model;
 

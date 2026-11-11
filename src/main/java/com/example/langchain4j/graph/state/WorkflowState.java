@@ -64,6 +64,10 @@ public class WorkflowState extends AgentState {
     public static final String TOKEN_USAGE = "tokenUsage";
     /** 流程完成标记（FinalizeNode 写入 true，透出到响应） */
     public static final String DONE = "done";
+    /** 当前用户 ID（服务层入图时注入；resume_task 等需要数据归属的节点使用） */
+    public static final String USER_ID = "userId";
+    /** 当前会话 ID（服务层入图时注入；resume_task 触发简历优化后回写完成通知用） */
+    public static final String CONVERSATION_ID = "conversationId";
 
     // ---- 旧版平铺字段 key：仅用于升级前 checkpoint 的迁移与兼容读取，新数据一律写入嵌套子对象 ----
     private static final String LEGACY_VALIDATED = "validated";
@@ -365,6 +369,16 @@ public class WorkflowState extends AgentState {
         // 步骤1：取出原始值（缺省 false）
         // 步骤2：统一转为字符串后解析布尔，防御类型漂移
         return Boolean.parseBoolean(String.valueOf(value(DONE).orElse(false)));
+    }
+
+    /** 当前用户 ID（服务层入图时注入）；缺省空串 */
+    public String userId() {
+        return value(USER_ID, "");
+    }
+
+    /** 当前会话 ID（服务层入图时注入）；缺省空串 */
+    public String conversationId() {
+        return value(CONVERSATION_ID, "");
     }
 
     // ---- 嵌套子对象取值防御工具（与访问器同哲学：容忍 checkpoint 反序列化后的类型漂移） ----

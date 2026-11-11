@@ -24,11 +24,12 @@ public class IntentNode implements NodeAction<WorkflowState> {
 
     public static final String INTENT_CODE_GENERATE = "code_generate";
     public static final String INTENT_KNOWLEDGE_QA = "knowledge_qa";
+    public static final String INTENT_RESUME_OPTIMIZE = "resume_optimize";
     public static final String INTENT_REJECT = "reject";
     public static final String INTENT_DEFAULT = INTENT_KNOWLEDGE_QA;
 
     private static final Set<String> VALID_INTENTS =
-            Set.of(INTENT_CODE_GENERATE, INTENT_KNOWLEDGE_QA, INTENT_REJECT);
+            Set.of(INTENT_CODE_GENERATE, INTENT_KNOWLEDGE_QA, INTENT_RESUME_OPTIMIZE, INTENT_REJECT);
 
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;

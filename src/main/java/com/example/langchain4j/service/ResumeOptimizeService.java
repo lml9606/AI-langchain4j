@@ -21,8 +21,11 @@ import com.example.langchain4j.guard.RateLimiter;
 import com.example.langchain4j.guard.SessionLock;
 import com.example.langchain4j.llm.ModelRegistry;
 import com.example.langchain4j.repository.entity.GraphExecution;
+import com.example.langchain4j.repository.entity.Message;
 import com.example.langchain4j.repository.entity.ResumeRevision;
+import com.example.langchain4j.repository.entity.UserResume;
 import com.example.langchain4j.repository.mapper.ResumeRevisionMapper;
+import com.example.langchain4j.repository.mapper.UserResumeMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.CompiledGraph;
@@ -45,15 +48,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * 简历优化服务：限流 → 校验 → 建草稿 → 图执行（带整体超时）→ 落结果/错误。
- * <p>
- * 图本身是无状态的，并发与重复提交控制在这里：
+ * 简历优化服务：两条触发路径，共用一个执行体。
  * <ul>
- *   <li>{@link RateLimiter} 按用户限流；</li>
- *   <li>{@link SessionLock} 按用户串行，避免同一用户并发跑多份简历打爆 LLM 配额；</li>
- *   <li>图执行放 agentExecutor 并整体超时，超时取消后台任务并落 ERROR；</li>
- *   <li>失败只返回明确错误，不返回半份简历。</li>
+ *   <li>独立接口（{@link #optimize}）：同步等结果，锁会话优先（请求带 conversationId）、
+ *       用户级兜底，防止同一会话/同一用户并发跑多份简历；落草稿前与对话触发共用触发短锁查重；</li>
+ *   <li>对话触发（{@link #triggerAsync}）：由问答图 resume_task 节点调用，落 RUNNING 草稿后
+ *       提交后台异步执行，触发轮照常闭环；长任务不持会话锁，防重靠 RUNNING 状态 + 触发短锁。</li>
  * </ul>
+ * 后台任务完成后向触发会话回写一条 assistant 通知（conversationId 非空时）。
+ * <p>
+ * 失败只返回明确错误，不返回半份简历。
  */
 @Slf4j
 @Service
@@ -61,6 +65,11 @@ public class ResumeOptimizeService {
 
     private static final int MAX_LIST_LIMIT = 100;
     private static final int MAX_ERROR_CHARS = 1_000;
+    /** 对话触发（FREE 模式）的默认优化提示词 */
+    private static final String DEFAULT_CHAT_PROMPT =
+            "整体优化简历：修正措辞与结构、突出亮点、保持事实不变。";
+    /** 防重短锁前缀：两条触发路径（对话 triggerAsync / 同步 optimize）共用，只锁「查重 + 落 RUNNING 草稿」这一小段（毫秒级），长任务执行不持锁 */
+    private static final String TRIGGER_LOCK_PREFIX = "resume-trigger:";
 
     private final CompiledGraph<ResumeOptimizeState> resumeOptimizeGraph;
     private final RateLimiter rateLimiter;
@@ -70,6 +79,8 @@ public class ResumeOptimizeService {
     private final AgentMetrics metrics;
     private final AuditService auditService;
     private final ResumeRevisionMapper resumeRevisionMapper;
+    private final UserResumeMapper userResumeMapper;
+    private final ConversationService conversationService;
     private final ThreadPoolTaskExecutor agentExecutor;
 
     public ResumeOptimizeService(@Qualifier("resumeOptimizeGraph") CompiledGraph<ResumeOptimizeState> resumeOptimizeGraph,
@@ -80,6 +91,8 @@ public class ResumeOptimizeService {
                                  AgentMetrics metrics,
                                  AuditService auditService,
                                  ResumeRevisionMapper resumeRevisionMapper,
+                                 UserResumeMapper userResumeMapper,
+                                 ConversationService conversationService,
                                  @Qualifier("agentExecutor") ThreadPoolTaskExecutor agentExecutor) {
         this.resumeOptimizeGraph = resumeOptimizeGraph;
         this.rateLimiter = rateLimiter;
@@ -89,11 +102,20 @@ public class ResumeOptimizeService {
         this.metrics = metrics;
         this.auditService = auditService;
         this.resumeRevisionMapper = resumeRevisionMapper;
+        this.userResumeMapper = userResumeMapper;
+        this.conversationService = conversationService;
         this.agentExecutor = agentExecutor;
     }
 
+    // ---- 独立接口：同步优化 ----
+
     /**
-     * 执行一次简历优化。
+     * 执行一次简历优化（同步等待结果）。
+     * <p>
+     * 锁粒度：请求携带 conversationId 时锁会话（与对话触发同一 key 空间，同会话串行）；
+     * 未携带时退化为用户级锁兜底（独立页面直传简历的场景，防止并发打爆 LLM 配额）。
+     * 落草稿前与对话触发（triggerAsync）共用触发短锁查重：已有 RUNNING 时直接拒绝，
+     * 阻断两条路径并发双跑、双倍消耗 LLM 配额。
      *
      * @param request 请求参数
      * @return 改稿 + 变更清单 + diff
@@ -125,20 +147,29 @@ public class ResumeOptimizeService {
             validateSelectedSections(request.getResumeText(), request.getSelectedSections());
         }
 
-        String revisionId = "rv_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        String revisionId = newRevisionId();
         String title = resolveTitle(request.getResumeTitle());
         String targetJson = buildTargetJson(mode, jobs, request.getSelectedSections(), prompt);
 
         ResumeRevision draft = new ResumeRevision();
         draft.setRevisionId(revisionId);
         draft.setUserId(userId);
+        draft.setConversationId(request.getConversationId());
         draft.setResumeTitle(title);
         draft.setMode(mode.name());
         draft.setTargetJson(targetJson);
         draft.setOriginalMd(request.getResumeText());
         draft.setStatus(ResumeRevision.STATUS_RUNNING);
         draft.setModel(model);
-        resumeRevisionMapper.insert(draft);
+        // 防重与对话触发（triggerAsync）共用同一把短锁 + 同一查重语义：
+        // 「查重 + 落 RUNNING 草稿」原子执行，两条路径并发时最多只有一份任务进入执行
+        sessionLock.executeWithLock(TRIGGER_LOCK_PREFIX + userId, () -> {
+            if (resumeRevisionMapper.selectRunningByUser(userId) != null) {
+                throw new BizException(ErrorCode.TOO_MANY_REQUESTS, "简历优化进行中，请稍后再试");
+            }
+            resumeRevisionMapper.insert(draft);
+            return null;
+        });
 
         long start = System.currentTimeMillis();
         String auditInput = auditInput(mode, jobs.size(),
@@ -147,8 +178,10 @@ public class ResumeOptimizeService {
         List<ResumeTargetJob> finalJobs = jobs;
         String finalPrompt = prompt;
         try {
-            ResumeOptimizeState state = sessionLock.executeWithLock("resume:" + userId,
-                    () -> invokeGraph(revisionId, request, mode, finalJobs, finalPrompt, model));
+            ResumeOptimizeState state = sessionLock.executeWithLock(
+                    lockKey(request.getConversationId(), userId),
+                    () -> invokeGraph(revisionId, request.getResumeText(),
+                            request.getSelectedSections(), mode, finalJobs, finalPrompt, model));
             metrics.recordGraphDuration(System.currentTimeMillis() - start);
 
             if (state.fallback() || state.revisedMd() == null || state.revisedMd().isBlank()) {
@@ -179,6 +212,136 @@ public class ResumeOptimizeService {
                     "简历优化失败：" + rootMessage(e));
         }
     }
+
+    // ---- 对话触发：异步执行 ----
+
+    /**
+     * 对话内触发简历优化（resume_task 节点调用）：查档案 → 防重 → 落草稿 → 提交后台任务。
+     * <p>
+     * 返回给用户的提示语由节点直接作为本轮回答（不调 LLM，不进入简历图）。
+     * 后台任务不持会话锁：长任务执行期间用户照常对话；防重靠 RUNNING 状态 + 触发短锁，
+     * 同一用户同时只允许一份在跑。
+     *
+     * @param userId         当前用户
+     * @param conversationId 触发会话（可空：空则完成后不回写通知）
+     * @param model          本轮对话解析出的模型名
+     * @return 提示语（已触发 / 档案缺失引导 / 已有任务进行中 / 系统繁忙）
+     */
+    public String triggerAsync(String userId, String conversationId, String model) {
+        UserResume profile = userResumeMapper.selectByUserId(userId);
+        if (profile == null || profile.getContent() == null || profile.getContent().isBlank()) {
+            return "还没有找到你的简历。请先在简历优化页面上传简历，再对我说「帮我优化简历」。";
+        }
+        // 触发短锁：只包「查重 + 落草稿 + 提交」这一段，防同用户多会话并发触发双份任务
+        return sessionLock.executeWithLock(TRIGGER_LOCK_PREFIX + userId, () -> {
+            ResumeRevision running = resumeRevisionMapper.selectRunningByUser(userId);
+            if (running != null) {
+                return "你的简历优化正在进行中，完成后我会通知你。";
+            }
+            String revisionId = newRevisionId();
+            String title = resolveTitle(profile.getTitle());
+            String targetJson = buildTargetJson(
+                    ResumeOptimizeMode.FREE, List.of(), List.of(), DEFAULT_CHAT_PROMPT);
+
+            ResumeRevision draft = new ResumeRevision();
+            draft.setRevisionId(revisionId);
+            draft.setUserId(userId);
+            draft.setConversationId(conversationId);
+            draft.setResumeTitle(title);
+            draft.setMode(ResumeOptimizeMode.FREE.name());
+            draft.setTargetJson(targetJson);
+            draft.setOriginalMd(profile.getContent());
+            draft.setStatus(ResumeRevision.STATUS_RUNNING);
+            draft.setModel(model);
+            resumeRevisionMapper.insert(draft);
+
+            try {
+                agentExecutor.execute(() -> executeAndNotify(
+                        revisionId, conversationId, profile.getContent(), title, model));
+            } catch (RejectedExecutionException e) {
+                // 线程池满：落 ERROR 并如实告知，用户可稍后重试（不持锁重试）
+                markErrorQuietly(revisionId, "系统繁忙，请稍后重试");
+                log.warn("[resume-optimize] trigger rejected, revisionId={}", revisionId);
+                return "系统繁忙，简历优化未能启动，请稍后重试。";
+            }
+            log.info("[resume-optimize] triggered from chat, revisionId={}, conversationId={}",
+                    revisionId, conversationId);
+            return "已开始优化你的简历（" + title + "），完成后我会通知你。";
+        });
+    }
+
+    /**
+     * 后台执行体（agentExecutor 线程，不持锁）：跑图 → 落结果 → 会话通知。
+     * 与独立接口共用一个执行语义：失败只记 ERROR，不返回半份简历。
+     * <p>
+     * 图在当前线程直接执行（已在 agentExecutor 上，不再向同池 submit）：
+     * 若再走「submit + future.get」会在池满时与图任务互相等待形成准死锁；
+     * 后台任务无 HTTP 线程等待，整体超时由 LLM 网关层与图内重试上限兜底。
+     */
+    private void executeAndNotify(String revisionId, String conversationId,
+                                  String resumeText, String title, String model) {
+        long start = System.currentTimeMillis();
+        try {
+            ResumeOptimizeState state = invokeGraphDirect(revisionId, resumeText, null,
+                    ResumeOptimizeMode.FREE, List.<ResumeTargetJob>of(), DEFAULT_CHAT_PROMPT, model);
+            if (state.fallback() || state.revisedMd() == null || state.revisedMd().isBlank()) {
+                String error = state.error() == null || state.error().isBlank()
+                        ? "简历优化未产出有效改稿" : state.error();
+                markErrorQuietly(revisionId, error);
+                notifyCompletion(conversationId, model, null,
+                        "简历优化未完成：" + error + "。请稍后在简历优化页面重试。");
+                return;
+            }
+            String changesJson = JsonUtil.toJson(state.changes());
+            String diffJson = JsonUtil.toJson(state.diff());
+            resumeRevisionMapper.markDone(revisionId, state.revisedMd(), changesJson, diffJson,
+                    model, state.tokenUsage());
+            auditService.audit(revisionId, "resume_workflow", GraphExecution.STATUS_SUCCESS,
+                    "mode=FREE, inputChars=" + resumeText.length(),
+                    "revisedChars=" + state.revisedMd().length(),
+                    null, System.currentTimeMillis() - start);
+            notifyCompletion(conversationId, model, state.tokenUsage(),
+                    "简历优化已完成（" + title + "）。可以在简历优化记录中查看改稿与变更对比，确认后可保存。");
+        } catch (Exception e) {
+            markErrorQuietly(revisionId, e.getMessage());
+            log.error("[resume-optimize] async failed, revisionId={}", revisionId, e);
+            notifyCompletion(conversationId, model, null,
+                    "简历优化未完成，请稍后在简历优化页面重试。");
+        }
+    }
+
+    /** 完成后向触发会话回写一条 assistant 通知（conversationId 为空或落库失败时静默跳过，不阻断） */
+    private void notifyCompletion(String conversationId, String model, Integer tokenUsage, String content) {
+        if (conversationId == null || conversationId.isBlank()) {
+            return;
+        }
+        try {
+            conversationService.saveMessage(
+                    conversationId, Message.ROLE_ASSISTANT, content, model, tokenUsage);
+        } catch (Exception e) {
+            log.warn("[resume-optimize] notify failed, conversationId={}: {}", conversationId, e.getMessage());
+        }
+    }
+
+    // ---- 简历档案 ----
+
+    /** 上传/更新简历档案（每用户仅一份，覆盖式） */
+    public void saveProfile(String title, String content) {
+        String userId = UserContext.require();
+        UserResume resume = new UserResume();
+        resume.setUserId(userId);
+        resume.setTitle(resolveTitle(title));
+        resume.setContent(content.trim());
+        userResumeMapper.upsert(resume);
+        log.info("[resume-profile] saved, userId={}, chars={}", userId, content.trim().length());
+    }
+
+    /** 查询当前用户简历档案（无档案返回 null） */
+    public UserResume getProfile() {
+        return userResumeMapper.selectByUserId(UserContext.require());
+    }
+
+    // ---- 查询与保存标记 ----
 
     /** 查询优化详情（校验归属） */
     public ResumeOptimizeResponse getRevision(String revisionId) {
@@ -215,25 +378,24 @@ public class ResumeOptimizeService {
         return ResumePromptPresets.all();
     }
 
-    private ResumeOptimizeState invokeGraph(String revisionId, ResumeOptimizeRequest request,
+    // ---- 内部实现 ----
+
+    /**
+     * 图执行（同步路径）：提交专用线程池 + 整体超时中止 + 异常转换为业务错误码。
+     * 与问答图 {@link AgentService#invokeGraph} 同一套执行样板：超时取消后 cancel 返回 false
+     * 说明任务恰在超时点完成，取回结果不浪费本轮执行。
+     */
+    private ResumeOptimizeState invokeGraph(String revisionId, String resumeText,
+                                            List<String> selectedSections,
                                             ResumeOptimizeMode mode, List<ResumeTargetJob> jobs,
                                             String prompt, String model) {
-        Map<String, Object> inputs = new HashMap<>();
-        inputs.put(ResumeOptimizeState.RESUME_RAW, request.getResumeText());
-        inputs.put(ResumeOptimizeState.MODE, mode.name());
-        inputs.put(ResumeOptimizeState.TARGET_JOBS,
-                jobs.stream().map(ResumeTargetJob::toMap).toList());
-        inputs.put(ResumeOptimizeState.SELECTED_SECTIONS,
-                request.getSelectedSections() == null ? List.of() : request.getSelectedSections());
-        inputs.put(ResumeOptimizeState.OPTIMIZATION_PROMPT, prompt);
-        inputs.put(ResumeOptimizeState.MODEL, model);
-
         RunnableConfig config = RunnableConfig.builder().threadId(revisionId).build();
         int timeoutSeconds = Math.max(10, properties.getResume().getTimeoutSeconds());
         Future<ResumeOptimizeState> future;
         try {
             future = agentExecutor.getThreadPoolExecutor().submit(
-                    () -> resumeOptimizeGraph.invoke(inputs, config).orElse(null));
+                    () -> resumeOptimizeGraph.invoke(buildInputs(revisionId, resumeText,
+                            selectedSections, mode, jobs, prompt, model), config).orElse(null));
         } catch (RejectedExecutionException e) {
             throw new BizException(ErrorCode.TOO_MANY_REQUESTS, "系统繁忙，请稍后重试");
         }
@@ -270,6 +432,51 @@ public class ResumeOptimizeService {
             throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED,
                     "简历优化失败：" + rootMessage(cause));
         }
+    }
+
+    /**
+     * 图执行（后台异步路径）：当前线程直接执行，不做整体超时包装。
+     * 调用方（executeAndNotify）已在 agentExecutor 线程上，再向同池提交会在池满时
+     * 与图任务互相等待形成准死锁；超时保护由 LLM 网关（单次 60s）与图内重试上限兜底。
+     */
+    private ResumeOptimizeState invokeGraphDirect(String revisionId, String resumeText,
+                                                  List<String> selectedSections,
+                                                  ResumeOptimizeMode mode, List<ResumeTargetJob> jobs,
+                                                  String prompt, String model) {
+        RunnableConfig config = RunnableConfig.builder().threadId(revisionId).build();
+        ResumeOptimizeState state = resumeOptimizeGraph.invoke(buildInputs(revisionId, resumeText,
+                selectedSections, mode, jobs, prompt, model), config).orElse(null);
+        if (state == null) {
+            throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行未返回结果");
+        }
+        return state;
+    }
+
+    /** 图输入装配：两条执行路径共用，避免字段重复漂移 */
+    private Map<String, Object> buildInputs(String revisionId, String resumeText,
+                                            List<String> selectedSections,
+                                            ResumeOptimizeMode mode, List<ResumeTargetJob> jobs,
+                                            String prompt, String model) {
+        Map<String, Object> inputs = new HashMap<>();
+        inputs.put(ResumeOptimizeState.RESUME_RAW, resumeText);
+        inputs.put(ResumeOptimizeState.MODE, mode.name());
+        inputs.put(ResumeOptimizeState.TARGET_JOBS,
+                jobs.stream().map(ResumeTargetJob::toMap).toList());
+        inputs.put(ResumeOptimizeState.SELECTED_SECTIONS,
+                selectedSections == null ? List.of() : selectedSections);
+        inputs.put(ResumeOptimizeState.OPTIMIZATION_PROMPT, prompt);
+        inputs.put(ResumeOptimizeState.MODEL, model);
+        return inputs;
+    }
+
+    /** 锁 key：会话优先（与对话触发同一 key 空间，同会话串行）；无会话时用户级兜底（防配额打爆） */
+    private String lockKey(String conversationId, String userId) {
+        return conversationId == null || conversationId.isBlank()
+                ? "resume:" + userId : conversationId;
+    }
+
+    private String newRevisionId() {
+        return "rv_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
     }
 
     private List<ResumeTargetJob> validateTargets(List<ResumeTargetJobDto> targets) {

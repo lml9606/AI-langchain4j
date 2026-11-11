@@ -221,3 +221,15 @@ CREATE TABLE IF NOT EXISTS ai_resume_revision (
 );
 CREATE INDEX IF NOT EXISTS idx_resume_revision_user ON ai_resume_revision (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_resume_revision_status ON ai_resume_revision (status, created_at DESC);
+-- 已存在表补列（幂等）：触发本次优化的会话 ID（对话内触发时回写完成通知；独立接口触发为空）
+ALTER TABLE ai_resume_revision ADD COLUMN IF NOT EXISTS conversation_id VARCHAR(64);
+
+-- 用户简历档案表（每用户仅一份：对话内触发优化时取该档案作为简历原文，不把 2 万字原文塞进对话消息表）
+CREATE TABLE IF NOT EXISTS ai_user_resume (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    VARCHAR(64) NOT NULL UNIQUE,           -- 所属用户（唯一：每用户仅一份，覆盖式 upsert）
+    title      VARCHAR(200),                          -- 简历标题（展示用）
+    content    TEXT        NOT NULL,                  -- 简历原文（Markdown/纯文本）
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

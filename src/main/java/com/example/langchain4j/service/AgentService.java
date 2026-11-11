@@ -123,7 +123,7 @@ public class AgentService {
         //    否则上一轮释放锁后、下一轮先读到历史时，上一轮回答尚未落库，
         //    会造成乱序（userA → userB → assistantA）与上下文丢失。
         WorkflowState state = sessionLock.executeWithLock(conversationId, () -> {
-            WorkflowState result = prepareAndInvoke(conversationId, query, model);
+            WorkflowState result = prepareAndInvoke(conversationId, userId, query, model);
             // 助手消息持久化（结果已生成，落库失败降级不阻断响应）；
             // 超时路径在 invokeGraph 内返回降级应答，这里同样落库，保证一问一答闭环
             try {
@@ -172,7 +172,7 @@ public class AgentService {
             PreparedTurn turn = prepareTurn(conversationId, query, model);
             RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
             Map<String, Object> inputs = buildInputs(query, turn.rewrite().rewritten(),
-                    turn.history(), turn.summary(), model);
+                    turn.history(), turn.summary(), model, userId, conversationId);
             var nodeOutputs = agentGraph.stream(inputs, config);
             return () -> new AuditingEventIterator(conversationId, nodeOutputs.iterator(), lock, auditService);
         } catch (Exception e) {
@@ -278,13 +278,15 @@ public class AgentService {
      * 锁内准备并执行图（同步路径）：保存用户消息 → 双视图装配 → 改写 → 图执行。
      *
      * @param conversationId 会话 ID（threadId）
+     * @param userId         当前用户 ID（resume_task 等需要数据归属的节点使用）
      * @param query          原始用户输入
      * @param model          本轮模型名（已解析）
      * @return 图执行最终状态
      */
-    private WorkflowState prepareAndInvoke(String conversationId, String query, String model) {
+    private WorkflowState prepareAndInvoke(String conversationId, String userId,
+                                           String query, String model) {
         PreparedTurn turn = prepareTurn(conversationId, query, model);
-        return invokeGraph(conversationId, query, turn.rewrite().rewritten(),
+        return invokeGraph(conversationId, userId, query, turn.rewrite().rewritten(),
                 turn.history(), turn.summary(), model);
     }
 
@@ -350,13 +352,16 @@ public class AgentService {
      * @return 图输入键值对（key 为 WorkflowState 字段名常量）
      */
     private Map<String, Object> buildInputs(String query, String rewritten,
-                                            List<Map<String, String>> history, String summary, String model) {
+                                            List<Map<String, String>> history, String summary, String model,
+                                            String userId, String conversationId) {
         return Map.of(
                 WorkflowState.QUERY, query,
                 WorkflowState.MODEL, model,
                 WorkflowState.REWRITTEN_QUERY, rewritten == null ? "" : rewritten,
                 WorkflowState.HISTORY, history == null ? List.of() : history,
-                WorkflowState.SUMMARY, summary == null ? "" : summary);
+                WorkflowState.SUMMARY, summary == null ? "" : summary,
+                WorkflowState.USER_ID, userId,
+                WorkflowState.CONVERSATION_ID, conversationId);
     }
 
     /**
@@ -367,6 +372,7 @@ public class AgentService {
      * 超时点完成，直接取回结果，不浪费本轮执行。
      *
      * @param conversationId 会话 ID（threadId，checkpoint 隔离维度）
+     * @param userId         当前用户 ID（入图注入）
      * @param query          原始用户输入（审计用）
      * @param rewritten      改写后的自包含句（图内实际使用）
      * @param history        生成视图（当前话题段内原文，role/content 键值对）
@@ -374,11 +380,12 @@ public class AgentService {
      * @param model          本轮模型名（已解析）
      * @return 图执行最终状态；超时返回降级 WorkflowState（fallback=true）
      */
-    private WorkflowState invokeGraph(String conversationId, String query, String rewritten,
+    private WorkflowState invokeGraph(String conversationId, String userId, String query, String rewritten,
                                       List<Map<String, String>> history, String summary, String model) {
         long start = System.currentTimeMillis();
         RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
-        Map<String, Object> inputs = buildInputs(query, rewritten, history, summary, model);
+        Map<String, Object> inputs = buildInputs(query, rewritten, history, summary, model,
+                userId, conversationId);
         long timeoutSeconds = Math.max(10, properties.getExecutionTimeoutSeconds());
         // 图执行放入专用线程池，HTTP 线程只等待结果。
         // 超时即中止：future.cancel(true) 会中断工作线程（尽力而为，Java 无法强制杀死线程），

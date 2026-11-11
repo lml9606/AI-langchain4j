@@ -33,6 +33,8 @@ public class Router {
     public static final String TO_FINALIZE = "to_finalize";
     /** 检索无结果（换问法补查仍空/代码生成查空）→ 转人工节点 */
     public static final String TO_HANDOFF = "to_handoff";
+    /** intent 为简历优化 → 简历任务触发节点（落草稿 + 提交后台异步执行，对话轮照常闭环） */
+    public static final String TO_RESUME_TASK = "to_resume_task";
 
     private final AgentProperties properties;
 
@@ -52,7 +54,7 @@ public class Router {
         };
     }
 
-    /** 意图节点后：知识问答 → 问题分解（拆并列复合问题）；代码生成 → 直接检索（无需分解）；reject/异常 → 兜底 */
+    /** 意图节点后：知识问答 → 问题分解（拆并列复合问题）；代码生成 → 直接检索（无需分解）；简历优化 → 触发节点；reject/异常 → 兜底 */
     public EdgeAction<WorkflowState> afterIntent() {
         return state -> {
             // 步骤1：error 非空（理论不常见，意图节点已降级）→ 兜底
@@ -63,11 +65,15 @@ public class Router {
             if (IntentNode.INTENT_CODE_GENERATE.equals(state.intent())) {
                 return TO_RETRIEVAL;
             }
-            // 步骤3：知识问答意图 → 问题分解节点（拆并列复合问题，单问题原样放行）
+            // 步骤3：简历优化意图 → 触发节点（查档案 + 落草稿 + 提交后台异步执行，不进入检索/生成链路）
+            if (IntentNode.INTENT_RESUME_OPTIMIZE.equals(state.intent())) {
+                return TO_RESUME_TASK;
+            }
+            // 步骤4：知识问答意图 → 问题分解节点（拆并列复合问题，单问题原样放行）
             if (IntentNode.INTENT_KNOWLEDGE_QA.equals(state.intent())) {
                 return TO_DECOMPOSE;
             }
-            // 步骤4：reject（非法内容）或未知意图 → 兜底拒绝回答
+            // 步骤5：reject（非法内容）或未知意图 → 兜底拒绝回答
             return TO_FALLBACK;
         };
     }

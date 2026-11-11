@@ -19,6 +19,9 @@ public interface ResumeRevisionMapper {
     List<ResumeRevision> selectByUser(@Param("userId") String userId,
                                       @Param("limit") int limit);
 
+    /** 查该用户进行中的优化（RUNNING 防重：对话触发时同一用户只允许一份在跑） */
+    ResumeRevision selectRunningByUser(@Param("userId") String userId);
+
     /** 生成成功：写回改稿/变更/diff，状态置 DONE，清空 error */
     int markDone(@Param("revisionId") String revisionId,
                  @Param("revisedMd") String revisedMd,

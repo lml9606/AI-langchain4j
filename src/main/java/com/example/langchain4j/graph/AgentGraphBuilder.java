@@ -11,6 +11,7 @@ import com.example.langchain4j.graph.nodes.HandoffNode;
 import com.example.langchain4j.graph.nodes.HopCheckNode;
 import com.example.langchain4j.graph.nodes.IntentNode;
 import com.example.langchain4j.graph.nodes.RetrievalNode;
+import com.example.langchain4j.graph.nodes.ResumeTaskNode;
 import com.example.langchain4j.graph.nodes.ValidateNode;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.graph.state.WorkflowStateSerializer;
@@ -58,6 +59,7 @@ public class AgentGraphBuilder {
     public static final String NODE_VALIDATE = "validate";
     public static final String NODE_FALLBACK = "fallback";
     public static final String NODE_HANDOFF = "handoff";
+    public static final String NODE_RESUME_TASK = "resume_task";
     public static final String NODE_FINALIZE = "finalize";
 
     private final StateSerializer<WorkflowState> stateSerializer;
@@ -71,6 +73,7 @@ public class AgentGraphBuilder {
     private final ValidateNode validateNode;
     private final FallbackNode fallbackNode;
     private final HandoffNode handoffNode;
+    private final ResumeTaskNode resumeTaskNode;
     private final FinalizeNode finalizeNode;
     private final AgentProperties properties;
 
@@ -85,6 +88,7 @@ public class AgentGraphBuilder {
                              ValidateNode validateNode,
                              FallbackNode fallbackNode,
                              HandoffNode handoffNode,
+                             ResumeTaskNode resumeTaskNode,
                              FinalizeNode finalizeNode,
                              AgentProperties properties) {
         this.stateSerializer = stateSerializer;
@@ -98,6 +102,7 @@ public class AgentGraphBuilder {
         this.validateNode = validateNode;
         this.fallbackNode = fallbackNode;
         this.handoffNode = handoffNode;
+        this.resumeTaskNode = resumeTaskNode;
         this.finalizeNode = finalizeNode;
         this.properties = properties;
     }
@@ -131,6 +136,8 @@ public class AgentGraphBuilder {
             graph.addNode(NODE_FALLBACK, node_async(fallbackNode));
             // handoff 转人工：检索无结果时的出口，返回固定提示，不进入 LLM 生成
             graph.addNode(NODE_HANDOFF, node_async(handoffNode));
+            // resume_task 简历优化触发：查档案 + 落草稿 + 提交后台异步执行，返回提示语（不调 LLM）
+            graph.addNode(NODE_RESUME_TASK, node_async(resumeTaskNode));
             // finalize 收尾：结果兜底组装（防空输出）+ 标记流程完成（持久化由 service 层负责）
             graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
 
@@ -147,7 +154,10 @@ public class AgentGraphBuilder {
             graph.addConditionalEdges(NODE_INTENT, edge_async(router.afterIntent()),
                     Map.of(Router.TO_DECOMPOSE, NODE_DECOMPOSE,
                             Router.TO_RETRIEVAL, NODE_RETRIEVAL,
+                            Router.TO_RESUME_TASK, NODE_RESUME_TASK,
                             Router.TO_FALLBACK, NODE_FALLBACK));
+            // resume_task 直连 finalize：触发结果提示语汇入收尾（一轮对话照常闭环）
+            graph.addEdge(NODE_RESUME_TASK, NODE_FINALIZE);
             // decompose 直连 retrieval：分解完成（含降级单查询）无条件进入检索
             graph.addEdge(NODE_DECOMPOSE, NODE_RETRIEVAL);
             // retrieval 检索路由：knowledge_qa → hop_check 多跳判断（首轮空上下文也进，换问法补查）；

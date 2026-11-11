@@ -23,6 +23,8 @@ public class ResumeRevision {
     private String revisionId;
     /** 所属用户（数据隔离维度） */
     private String userId;
+    /** 触发本次优化的会话 ID（对话内触发时非空，用于完成后回写通知消息；独立接口触发为空） */
+    private String conversationId;
     /** 简历标题（展示用） */
     private String resumeTitle;
     /** 优化模式：TARGETED / FREE */

@@ -3,8 +3,10 @@ package com.example.langchain4j.controller;
 import com.example.langchain4j.common.response.ApiResponse;
 import com.example.langchain4j.dto.ResumeOptimizeRequest;
 import com.example.langchain4j.dto.ResumeOptimizeResponse;
+import com.example.langchain4j.dto.ResumeProfileRequest;
 import com.example.langchain4j.dto.ResumeRevisionSummary;
 import com.example.langchain4j.graph.resume.model.ResumePromptPresets;
+import com.example.langchain4j.repository.entity.UserResume;
 import com.example.langchain4j.service.ResumeOptimizeService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -19,7 +21,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 简历优化接入层：同步优化 / 历史详情 / 历史列表 / 保存标记 / 预设提示词。
+ * 简历优化接入层：同步优化 / 简历档案 / 历史详情 / 历史列表 / 保存标记 / 预设提示词。
  * <p>
  * 所有接口都在 /api/** 下，由 JwtAuthFilter 统一认证；数据归属校验在 Service 层。
  */
@@ -31,6 +33,19 @@ public class ResumeOptimizeController {
 
     public ResumeOptimizeController(ResumeOptimizeService resumeOptimizeService) {
         this.resumeOptimizeService = resumeOptimizeService;
+    }
+
+    /** 上传/更新简历档案（每用户仅一份，覆盖式；对话内触发优化时取该档案作为原文） */
+    @PostMapping("/profile")
+    public ApiResponse<Void> saveProfile(@Valid @RequestBody ResumeProfileRequest request) {
+        resumeOptimizeService.saveProfile(request.getTitle(), request.getContent());
+        return ApiResponse.success();
+    }
+
+    /** 查询当前用户简历档案（未上传返回 null） */
+    @GetMapping("/profile")
+    public ApiResponse<UserResume> profile() {
+        return ApiResponse.success(resumeOptimizeService.getProfile());
     }
 
     /** 执行一次简历优化（定向或自由） */
