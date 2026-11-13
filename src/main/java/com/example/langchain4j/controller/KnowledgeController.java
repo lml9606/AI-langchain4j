@@ -4,7 +4,6 @@ import com.example.langchain4j.common.response.ApiResponse;
 import com.example.langchain4j.dto.KnowledgeBatchImportRequest;
 import com.example.langchain4j.dto.KnowledgeBatchImportResponse;
 import com.example.langchain4j.dto.KnowledgeHealthResponse;
-import com.example.langchain4j.dto.KnowledgeImportRequest;
 import com.example.langchain4j.dto.KnowledgeSearchResponse;
 import com.example.langchain4j.dto.KnowledgeUpdateRequest;
 import com.example.langchain4j.service.KnowledgeService;
@@ -21,11 +20,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.Map;
-
 /**
- * 知识接入层：导入（嵌入 + 落库）、语义检索与知识治理
- * （批量导入/更新/删除/健康度；更新删除仅限本人私有块，公共库由运营侧维护）。
+ * 知识接入层：父子分块导入（批量）、语义检索与知识治理
+ * （更新/删除/健康度；更新删除仅限本人私有块，公共库由运营侧维护）。
  */
 @Validated
 @RestController
@@ -38,13 +35,6 @@ public class KnowledgeController {
         this.knowledgeService = knowledgeService;
     }
 
-    /** 知识导入：单条文本嵌入后写入 pgvector */
-    @PostMapping("/import")
-    public ApiResponse<Map<String, Object>> importKnowledge(@Valid @RequestBody KnowledgeImportRequest request) {
-        long id = knowledgeService.importChunk(request);
-        return ApiResponse.success(Map.of("id", id));
-    }
-
     /** 语义检索：query 嵌入后余弦相似度检索 topK */
     @GetMapping("/search")
     public ApiResponse<KnowledgeSearchResponse> search(
@@ -54,7 +44,7 @@ public class KnowledgeController {
     }
 
     /**
-     * 批量导入：多篇文档逐篇分块嵌入落库（分块参数逐篇可配），
+     * 批量导入：多篇文档逐篇父子分块落库（父块整章不嵌入 + 子块嵌入；子块参数逐篇可配），
      * 单篇失败不中断整批，返回逐条结果供重试失败项。
      */
     @PostMapping("/batch")

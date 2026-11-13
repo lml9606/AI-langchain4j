@@ -112,6 +112,12 @@ ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS user_id VARCHAR(64);
 CREATE INDEX IF NOT EXISTS idx_knowledge_user ON ai_knowledge_chunk (user_id);
 -- 已存在表补列（幂等）：知识块更新时间（知识治理更新闭环审计）
 ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+-- 已存在表补列（幂等）：父子分块结构（文档导入：父块存整章上下文不嵌入，子块嵌入供检索）
+ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS parent_id BIGINT;
+ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS chunk_type VARCHAR(8) NOT NULL DEFAULT 'CHILD';
+ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS title VARCHAR(256);
+-- 父子关联索引：命中子块后按 parent_id 取兄弟块/父块（滑窗装配与父块内容重建）
+CREATE INDEX IF NOT EXISTS idx_knowledge_parent ON ai_knowledge_chunk (parent_id);
 -- HNSW 向量索引（余弦距离；写入量大的场景可考虑先写后建索引）
 CREATE INDEX IF NOT EXISTS idx_knowledge_embedding
     ON ai_knowledge_chunk USING hnsw (embedding vector_cosine_ops);

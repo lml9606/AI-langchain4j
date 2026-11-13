@@ -10,27 +10,35 @@
                 typeHandler="com.example.langchain4j.repository.typehandler.VectorTypeHandler"/>
         <result property="metadata" column="metadata"/>
         <result property="userId" column="user_id"/>
+        <result property="parentId" column="parent_id"/>
+        <result property="chunkType" column="chunk_type"/>
+        <result property="title" column="title"/>
         <result property="createdAt" column="created_at"/>
         <result property="updatedAt" column="updated_at"/>
     </resultMap>
 
     <insert id="insert" parameterType="com.example.langchain4j.repository.entity.KnowledgeChunk"
             useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO ai_knowledge_chunk (content, embedding, metadata, user_id)
+        INSERT INTO ai_knowledge_chunk (content, embedding, metadata, user_id, parent_id, chunk_type, title)
         VALUES (
             #{content},
             #{embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
             CAST(#{metadata} AS jsonb),
-            #{userId}
+            #{userId},
+            #{parentId},
+            COALESCE(#{chunkType}, 'CHILD'),
+            #{title}
         )
     </insert>
 
     <select id="searchSimilar" resultMap="KnowledgeChunkMap">
-        SELECT id, content, embedding, metadata::text AS metadata, user_id, created_at
+        SELECT id, content, embedding, metadata::text AS metadata, user_id,
+               parent_id, chunk_type, title, created_at
         FROM ai_knowledge_chunk
         WHERE embedding IS NOT NULL
+          AND chunk_type = 'CHILD'
           AND (1 - (embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler})) &gt;= #{minScore}
-          AND (user_id IS NULL OR user_id = #{userId})
+          AND (user_id = #{userId} OR (NOT #{privateOnly} AND user_id IS NULL))
         ORDER BY embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}
         LIMIT #{topK}
     </select>
@@ -39,13 +47,16 @@
       词面检索（混合检索的词面通道）：pg_trgm word_similarity 按三元组相似度降序取 topK。
       注意：WHERE 中直接用 word_similarity 函数无法走 GIN 索引（索引加速需 set_config 会话阈值 + <% 操作符），
       小规模知识表全表扫描可接受；数据量大时改用操作符写法。
-      用户隔离：user_id IS NULL（公共库）或等于当前用户；#{userId} 为 null 时仅可见公共库（匿名默认）。
+      用户隔离：user_id IS NULL（公共库）或等于当前用户；#{userId} 为 null 时仅可见公共库（匿名默认）；
+      #{privateOnly}=true 时仅检索本人库（visibility=private）。
     -->
     <select id="searchLexical" resultMap="KnowledgeChunkMap">
-        SELECT id, content, embedding, metadata::text AS metadata, user_id, created_at
+        SELECT id, content, embedding, metadata::text AS metadata, user_id,
+               parent_id, chunk_type, title, created_at
         FROM ai_knowledge_chunk
         WHERE word_similarity(content, #{query}) &gt;= #{minScore}
-          AND (user_id IS NULL OR user_id = #{userId})
+          AND chunk_type = 'CHILD'
+          AND (user_id = #{userId} OR (NOT #{privateOnly} AND user_id IS NULL))
         ORDER BY word_similarity(content, #{query}) DESC
         LIMIT #{topK}
     </select>
@@ -59,24 +70,60 @@
       文档导入时把分块后的全部知识块一次落库，减少 DB 往返。
     -->
     <insert id="insertBatch">
-        INSERT INTO ai_knowledge_chunk (content, embedding, metadata, user_id)
+        INSERT INTO ai_knowledge_chunk (content, embedding, metadata, user_id, parent_id, chunk_type, title)
         VALUES
         <foreach collection="chunks" item="chunk" separator=",">
             (
                 #{chunk.content},
                 #{chunk.embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
                 CAST(#{chunk.metadata} AS jsonb),
-                #{chunk.userId}
+                #{chunk.userId},
+                #{chunk.parentId},
+                COALESCE(#{chunk.chunkType}, 'CHILD'),
+                #{chunk.title}
             )
         </foreach>
     </insert>
 
     <!-- 按 ID + 用户查询（可见范围 = 公共库 + 本人私有库），服务层据此做归属校验 -->
     <select id="selectById" resultMap="KnowledgeChunkMap">
-        SELECT id, content, embedding, metadata::text AS metadata, user_id, created_at, updated_at
+        SELECT id, content, embedding, metadata::text AS metadata, user_id,
+               parent_id, chunk_type, title, created_at, updated_at
         FROM ai_knowledge_chunk
         WHERE id = #{id}
           AND (user_id IS NULL OR user_id = #{userId})
+    </select>
+
+    <!-- 按父块 ID 取父块：子块命中后拿整章父块上下文装配（父块不嵌入，仅按 ID 直取） -->
+    <select id="selectParentById" resultMap="KnowledgeChunkMap">
+        SELECT id, content, embedding, metadata::text AS metadata, user_id,
+               parent_id, chunk_type, title, created_at, updated_at
+        FROM ai_knowledge_chunk
+        WHERE id = #{parentId}
+          AND chunk_type = 'PARENT'
+          AND (user_id IS NULL OR user_id = #{userId})
+    </select>
+
+    <!-- 同标题父块组：长章节被拆成多父块时整组取出（按 id 升序保持章节顺序） -->
+    <select id="selectParentsByTitle" resultMap="KnowledgeChunkMap">
+        SELECT id, content, embedding, metadata::text AS metadata, user_id,
+               parent_id, chunk_type, title, created_at, updated_at
+        FROM ai_knowledge_chunk
+        WHERE title = #{title}
+          AND chunk_type = 'PARENT'
+          AND (user_id IS NULL OR user_id = #{userId})
+        ORDER BY id
+    </select>
+
+    <!-- 同父块兄弟子块：滑窗装配围绕命中子块补相邻上下文（按 id 升序保持文档顺序） -->
+    <select id="selectChildrenByParentId" resultMap="KnowledgeChunkMap">
+        SELECT id, content, embedding, metadata::text AS metadata, user_id,
+               parent_id, chunk_type, title, created_at, updated_at
+        FROM ai_knowledge_chunk
+        WHERE parent_id = #{parentId}
+          AND chunk_type = 'CHILD'
+          AND (user_id IS NULL OR user_id = #{userId})
+        ORDER BY id
     </select>
 
     <!-- 更新内容 + 重嵌向量：SQL 层按 user_id 过滤（双保险防 TOCTOU 越权），公共库块无法命中 -->
@@ -98,7 +145,8 @@
     </delete>
 
     <!--
-      健康度聚合：一次 SQL 完成全部统计（无向量块 = 嵌入失败残留应重嵌，空内容 = 脏数据应清理）。
+      健康度聚合：一次 SQL 完成全部统计（无向量块 = 嵌入失败残留应重嵌，空内容 = 脏数据应清理）；
+      父块按设计不嵌入，no_embedding 统计排除 PARENT 块避免误报。
       范围 = 当前用户可见（公共库 + 本人私有库），支撑个人知识库健康观测。
     -->
     <select id="healthStats" resultType="com.example.langchain4j.repository.mapper.KnowledgeChunkMapper$HealthStats">
@@ -106,7 +154,7 @@
                count(*) FILTER (WHERE user_id IS NOT NULL)                          AS private_chunks,
                count(*) FILTER (WHERE user_id IS NULL)                              AS public_chunks,
                count(*) FILTER (WHERE content IS NULL OR length(trim(content)) = 0) AS empty_content,
-               count(*) FILTER (WHERE embedding IS NULL)                            AS no_embedding,
+               count(*) FILTER (WHERE embedding IS NULL AND chunk_type = 'CHILD')  AS no_embedding,
                COALESCE(AVG(length(content)), 0)                                    AS avg_content_length,
                MAX(created_at)                                                      AS last_imported_at
         FROM ai_knowledge_chunk

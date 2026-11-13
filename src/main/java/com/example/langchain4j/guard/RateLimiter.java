@@ -7,7 +7,6 @@ import com.example.langchain4j.config.AgentProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
-import org.redisson.client.codec.StringCodec;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -56,8 +55,8 @@ public class RateLimiter {
         }
         String key = KEY_PREFIX + sanitize(dimension);
         try {
-            // EVAL 原子执行：KEYS[1]=计数键，ARGV[1]=窗口秒数（Codec 在 getScript 处已指定）
-            Long count = redissonClient.getScript(StringCodec.INSTANCE).eval(
+            // EVAL 原子执行：KEYS[1]=计数键，ARGV[1]=窗口秒数（Codec 由全局配置 StringCodec 兜底）
+            Long count = redissonClient.getScript().eval(
                     RScript.Mode.READ_WRITE, INCR_SCRIPT, RScript.ReturnType.INTEGER,
                     List.<Object>of(key), String.valueOf(WINDOW.getSeconds()));
             boolean allowed = count == null || count <= properties.getRateLimit().getPermitsPerMinute();

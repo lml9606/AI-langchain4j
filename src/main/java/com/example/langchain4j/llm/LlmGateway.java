@@ -17,7 +17,6 @@ import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.output.FinishReason;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RedissonClient;
-import org.redisson.client.codec.StringCodec;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
@@ -281,7 +280,7 @@ public class LlmGateway {
 
     private boolean isCircuitOpen() {
         try {
-            return redissonClient.getBucket(CB_OPEN_KEY, StringCodec.INSTANCE).isExists();
+            return redissonClient.getBucket(CB_OPEN_KEY).isExists();
         } catch (Exception e) {
             log.warn("[llm] circuit breaker redis unavailable, fail-open: {}", e.getMessage());
             return false;
@@ -292,7 +291,7 @@ public class LlmGateway {
     private void onSuccess() {
         metrics.setCircuitOpen(false);
         try {
-            redissonClient.getBucket(CB_FAILURES_KEY, StringCodec.INSTANCE).delete();
+            redissonClient.getBucket(CB_FAILURES_KEY).delete();
         } catch (Exception ignored) {
             // fail-open：Redis 异常不影响主流程
         }
@@ -307,9 +306,9 @@ public class LlmGateway {
         try {
             long failures = redissonClient.getAtomicLong(CB_FAILURES_KEY).incrementAndGet();
             if (failures >= properties.getLlm().getCircuitBreaker().getFailureThreshold()) {
-                redissonClient.getBucket(CB_OPEN_KEY, StringCodec.INSTANCE).set("1",
+                redissonClient.getBucket(CB_OPEN_KEY).set("1",
                         properties.getLlm().getCircuitBreaker().getCooldownSeconds(), TimeUnit.SECONDS);
-                redissonClient.getBucket(CB_FAILURES_KEY, StringCodec.INSTANCE).delete();
+                redissonClient.getBucket(CB_FAILURES_KEY).delete();
                 metrics.setCircuitOpen(true);
                 log.warn("[llm] circuit breaker OPEN, cooldown {}s",
                         properties.getLlm().getCircuitBreaker().getCooldownSeconds());

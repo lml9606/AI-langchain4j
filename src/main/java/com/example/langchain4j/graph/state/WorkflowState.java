@@ -68,6 +68,10 @@ public class WorkflowState extends AgentState {
     public static final String USER_ID = "userId";
     /** 当前会话 ID（服务层入图时注入；resume_task 触发简历优化后回写完成通知用） */
     public static final String CONVERSATION_ID = "conversationId";
+    /** 回答模式（服务层归一后入图：auto/deep；deep 放宽多跳上限与检索候选数） */
+    public static final String ANSWER_MODE = "answerMode";
+    /** 检索可见范围（服务层归一后入图：all/private；private 仅检索本人库） */
+    public static final String VISIBILITY = "visibility";
 
     // ---- 旧版平铺字段 key：仅用于升级前 checkpoint 的迁移与兼容读取，新数据一律写入嵌套子对象 ----
     private static final String LEGACY_VALIDATED = "validated";
@@ -379,6 +383,18 @@ public class WorkflowState extends AgentState {
     /** 当前会话 ID（服务层入图时注入）；缺省空串 */
     public String conversationId() {
         return value(CONVERSATION_ID, "");
+    }
+
+    /** 回答模式：服务层归一后注入，非法值不会出现在图内；缺省 auto（旧 checkpoint 兼容） */
+    public String answerMode() {
+        String mode = value(ANSWER_MODE, "auto");
+        return "deep".equalsIgnoreCase(mode) ? "deep" : "auto";
+    }
+
+    /** 检索可见范围：服务层归一后注入；缺省 all（旧 checkpoint 兼容） */
+    public String visibility() {
+        String scope = value(VISIBILITY, "all");
+        return "private".equalsIgnoreCase(scope) ? "private" : "all";
     }
 
     // ---- 嵌套子对象取值防御工具（与访问器同哲学：容忍 checkpoint 反序列化后的类型漂移） ----

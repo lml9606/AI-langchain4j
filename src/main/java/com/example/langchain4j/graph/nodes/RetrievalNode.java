@@ -34,6 +34,10 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
 
     /** 上下文总长度上限：多跳追加时防上下文膨胀撑爆生成窗口 */
     private static final int MAX_CONTEXT_LENGTH = 16000;
+    /** 检索候选数：auto 模式默认 */
+    private static final int AUTO_TOP_K = 3;
+    /** 检索候选数：deep 模式放宽（更全召回，配合多跳上限翻倍） */
+    private static final int DEEP_TOP_K = 6;
 
     private final VectorSearchService vectorSearchService;
     private final LlmGateway llmGateway;
@@ -132,11 +136,11 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
         if (subQueries.isEmpty()) {
             subQueries = List.of(state.effectiveQuery());
         }
-        // 步骤2：每个子问题独立召回，按子问题分组标注
+        // 步骤2：每个子问题独立召回，父子装配父块整章上下文，按子问题分组标注
         StringBuilder sb = new StringBuilder();
         int index = 1;
         for (String subQuery : subQueries) {
-            String part = vectorSearchService.buildContext(vectorSearchService.search(subQuery));
+            String part = vectorSearchService.searchContext(subQuery, topK(state), privateOnly(state));
             if (part.isBlank()) {
                 continue;
             }
@@ -152,8 +156,7 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
      * 总长设上限，防多跳上下文膨胀。
      */
     private String appendHop(WorkflowState state) {
-        String part = vectorSearchService.buildContext(
-                vectorSearchService.search(state.hop().pendingQuery()));
+        String part = vectorSearchService.searchContext(state.hop().pendingQuery(), topK(state), privateOnly(state));
         // 步骤1：本跳无新结果 → 保持原上下文（多跳判断会再次评估，超限后进生成）
         if (part.isBlank()) {
             return state.context();
@@ -166,7 +169,17 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
     /** 纠错重查：根据质检失败原因让 LLM 改写 query 再检索，替换原上下文（原上下文已证与回答矛盾） */
     private String requery(WorkflowState state) {
         String searchQuery = resolveSearchQuery(state);
-        return vectorSearchService.buildContext(vectorSearchService.search(searchQuery));
+        return vectorSearchService.searchContext(searchQuery, topK(state), privateOnly(state));
+    }
+
+    /** 本轮检索候选数：deep 模式放宽（更全召回，适合复杂问题），auto 模式用默认值 */
+    private int topK(WorkflowState state) {
+        return "deep".equals(state.answerMode()) ? DEEP_TOP_K : AUTO_TOP_K;
+    }
+
+    /** 本轮检索可见范围：visibility=private 仅检索本人库，否则公共库 + 本人库 */
+    private boolean privateOnly(WorkflowState state) {
+        return "private".equals(state.visibility());
     }
 
     /**

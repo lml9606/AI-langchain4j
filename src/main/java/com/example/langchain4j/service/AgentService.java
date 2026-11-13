@@ -51,6 +51,10 @@ public class AgentService {
 
     /** 生成视图候选集上限：段内最近消息取这么多条参与 token 预算装配 */
     private static final int GENERATION_CANDIDATE_LIMIT = 40;
+    /** 回答模式：深度链路（多跳上限与检索候选数放宽） */
+    private static final String ANSWER_MODE_DEEP = "deep";
+    /** 检索可见范围：仅本人知识库 */
+    private static final String VISIBILITY_PRIVATE = "private";
 
     private final CompiledGraph<WorkflowState> agentGraph;
     private final RateLimiter rateLimiter;
@@ -115,6 +119,9 @@ public class AgentService {
         String query = normalizeQuery(request.getQuery());
         // 3. 解析本轮模型（前端指定优先，空则默认；未知模型抛 400 快速失败）
         String model = modelRegistry.resolve(request.getModel());
+        // 3.5 回答模式与检索可见范围归一（白名单外回默认；入图前收敛，图内不再校验）
+        String answerMode = normalizeAnswerMode(request.getAnswerMode());
+        String visibility = normalizeVisibility(request.getVisibility());
         // 4. 会话初始化（失败抛 DB_UNAVAILABLE，快速失败）
         String conversationId = conversationService.ensureConversation(
                 userId, request.getConversationId(), query);
@@ -123,7 +130,8 @@ public class AgentService {
         //    否则上一轮释放锁后、下一轮先读到历史时，上一轮回答尚未落库，
         //    会造成乱序（userA → userB → assistantA）与上下文丢失。
         WorkflowState state = sessionLock.executeWithLock(conversationId, () -> {
-            WorkflowState result = prepareAndInvoke(conversationId, userId, query, model);
+            WorkflowState result = prepareAndInvoke(conversationId, userId, query, model,
+                    answerMode, visibility);
             // 助手消息持久化（结果已生成，落库失败降级不阻断响应）；
             // 超时路径在 invokeGraph 内返回降级应答，这里同样落库，保证一问一答闭环
             try {
@@ -162,6 +170,8 @@ public class AgentService {
         // 输入规整（与同步版同一语义：堵“全是控制字符”的漏网输入，全链路用清洗后的 query）
         String query = normalizeQuery(request.getQuery());
         String model = modelRegistry.resolve(request.getModel());
+        String answerMode = normalizeAnswerMode(request.getAnswerMode());
+        String visibility = normalizeVisibility(request.getVisibility());
         String conversationId = conversationService.ensureConversation(
                 userId, request.getConversationId(), query);
 
@@ -172,7 +182,7 @@ public class AgentService {
             PreparedTurn turn = prepareTurn(conversationId, query, model);
             RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
             Map<String, Object> inputs = buildInputs(query, turn.rewrite().rewritten(),
-                    turn.history(), turn.summary(), model, userId, conversationId);
+                    turn.history(), turn.summary(), model, userId, conversationId, answerMode, visibility);
             var nodeOutputs = agentGraph.stream(inputs, config);
             return () -> new AuditingEventIterator(conversationId, nodeOutputs.iterator(), lock, auditService);
         } catch (Exception e) {
@@ -284,10 +294,10 @@ public class AgentService {
      * @return 图执行最终状态
      */
     private WorkflowState prepareAndInvoke(String conversationId, String userId,
-                                           String query, String model) {
+                                           String query, String model, String answerMode, String visibility) {
         PreparedTurn turn = prepareTurn(conversationId, query, model);
         return invokeGraph(conversationId, userId, query, turn.rewrite().rewritten(),
-                turn.history(), turn.summary(), model);
+                turn.history(), turn.summary(), model, answerMode, visibility);
     }
 
     /**
@@ -353,7 +363,8 @@ public class AgentService {
      */
     private Map<String, Object> buildInputs(String query, String rewritten,
                                             List<Map<String, String>> history, String summary, String model,
-                                            String userId, String conversationId) {
+                                            String userId, String conversationId,
+                                            String answerMode, String visibility) {
         return Map.of(
                 WorkflowState.QUERY, query,
                 WorkflowState.MODEL, model,
@@ -361,7 +372,9 @@ public class AgentService {
                 WorkflowState.HISTORY, history == null ? List.of() : history,
                 WorkflowState.SUMMARY, summary == null ? "" : summary,
                 WorkflowState.USER_ID, userId,
-                WorkflowState.CONVERSATION_ID, conversationId);
+                WorkflowState.CONVERSATION_ID, conversationId,
+                WorkflowState.ANSWER_MODE, answerMode,
+                WorkflowState.VISIBILITY, visibility);
     }
 
     /**
@@ -381,11 +394,12 @@ public class AgentService {
      * @return 图执行最终状态；超时返回降级 WorkflowState（fallback=true）
      */
     private WorkflowState invokeGraph(String conversationId, String userId, String query, String rewritten,
-                                      List<Map<String, String>> history, String summary, String model) {
+                                      List<Map<String, String>> history, String summary, String model,
+                                      String answerMode, String visibility) {
         long start = System.currentTimeMillis();
         RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
         Map<String, Object> inputs = buildInputs(query, rewritten, history, summary, model,
-                userId, conversationId);
+                userId, conversationId, answerMode, visibility);
         long timeoutSeconds = Math.max(10, properties.getExecutionTimeoutSeconds());
         // 图执行放入专用线程池，HTTP 线程只等待结果。
         // 超时即中止：future.cancel(true) 会中断工作线程（尽力而为，Java 无法强制杀死线程），
@@ -465,6 +479,22 @@ public class AgentService {
             auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query, null, rootMessage(cause), null);
             throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行失败: " + rootMessage(cause));
         }
+    }
+
+    /**
+     * 回答模式归一：白名单 auto/deep，非法值（含 null）回默认 auto。
+     * 入图前收敛，图内节点直接消费不再校验。
+     */
+    private String normalizeAnswerMode(String answerMode) {
+        return ANSWER_MODE_DEEP.equalsIgnoreCase(answerMode) ? ANSWER_MODE_DEEP : "auto";
+    }
+
+    /**
+     * 检索可见范围归一：白名单 all/private，非法值（含 null）回默认 all。
+     * 入图前收敛，图内节点直接消费不再校验。
+     */
+    private String normalizeVisibility(String visibility) {
+        return VISIBILITY_PRIVATE.equalsIgnoreCase(visibility) ? VISIBILITY_PRIVATE : "all";
     }
 
     /** 取异常链最深处的 message（业务原因通常在最底层），避免向上只看到包装信息 */

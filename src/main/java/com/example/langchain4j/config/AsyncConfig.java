@@ -80,6 +80,31 @@ public class AsyncConfig {
     }
 
     /**
+     * 知识导入线程池：批量导入逐篇并行执行专用，与图执行/LLM/摘要池隔离。
+     * <p>
+     * 隔离原因：导入任务含切分 + 逐块嵌入（本地 Ollama）+ 批量落库，单篇可耗时数秒到数十秒，
+     * 若与图执行共用池会挤占对话链路；独立池后批量导入只受自身队列约束。
+     * 拒绝策略：队列满抛异常转业务错误（用户可重试），不静默丢弃。
+     */
+    @Bean("knowledgeImportExecutor")
+    public ThreadPoolTaskExecutor knowledgeImportExecutor(AgentProperties properties, MeterRegistry registry) {
+        AgentProperties.KnowledgeImport exec = properties.getKnowledgeImport();
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(exec.getCorePoolSize());
+        executor.setMaxPoolSize(exec.getMaxPoolSize());
+        executor.setQueueCapacity(exec.getQueueCapacity());
+        executor.setKeepAliveSeconds(exec.getKeepAliveSeconds());
+        executor.setThreadNamePrefix("knowledge-import-");
+        executor.setTaskDecorator(contextTaskDecorator());
+        executor.setRejectedExecutionHandler(abortPolicy("knowledge import executor overloaded, queue full"));
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(30);
+        executor.initialize();
+        registerExecutorMetrics("knowledgeImport", executor, registry);
+        return executor;
+    }
+
+    /**
      * 上下文传递装饰器：HTTP 线程的 traceId（MDC）与登录身份（UserContext）随任务带入工作线程。
      * 身份透传的必要性：图执行线程池内的知识检索按当前用户做数据隔离，
      * 不透传时图内检索会退化为“匿名仅见公共库”。

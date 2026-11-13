@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
-import org.redisson.client.codec.StringCodec;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -13,7 +12,7 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 轻量缓存封装（Redisson RBucket + JSON，StringCodec 存纯字符串）。
+ * 轻量缓存封装（Redisson RBucket + JSON，全局 StringCodec 存纯字符串）。
  * <ul>
  *   <li>所有操作 fail-open：Redis 故障时读返回空、写静默降级，不阻断主流程；</li>
  *   <li>反序列化失败视为缓存未命中（回源重建），避免脏缓存污染业务。</li>
@@ -84,8 +83,8 @@ public class CacheService {
         }
     }
 
-    /** 统一通过 StringCodec 取桶：写入纯字符串，保证与历史数据/运维工具可读兼容 */
+    /** 取桶：全局 Codec 已统一 StringCodec（RedisConfig），写入纯字符串，保证与历史数据/运维工具可读兼容 */
     private RBucket<String> bucket(String key) {
-        return redissonClient.getBucket(key, StringCodec.INSTANCE);
+        return redissonClient.getBucket(key);
     }
 }

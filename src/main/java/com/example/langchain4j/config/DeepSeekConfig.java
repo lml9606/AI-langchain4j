@@ -15,6 +15,7 @@ import org.springframework.context.annotation.Configuration;
  *   <li>手动装配而非引入 open-ai starter：starter 会自动装配 ChatModel/EmbeddingModel 等一批 Bean，
  *       与 dashscope starter 的同类 Bean 产生歧义注入；手动装配只多一个 deepseekModelDefinition；</li>
  *   <li>以 ModelDefinition 形式注册进 ModelRegistry，与千问一起支持按模型名路由；</li>
+ *   <li>temperature 统一 0.3：客服知识问答低温求稳，与千问（application.properties）保持一致；</li>
  *   <li>apiKey 为空时 Bean 照常创建，首次调用才报错（与 dashscope starter 行为一致，
  *       由 LlmGateway 重试/熔断兜底）。</li>
  * </ul>
@@ -32,6 +33,7 @@ public class DeepSeekConfig {
                 .apiKey(cfg.getApiKey())
                 .baseUrl(cfg.getBaseUrl())
                 .modelName(cfg.getModelName())
+                .temperature(0.3)
                 .build();
         return new ModelDefinition(cfg.getModelName(), model);
     }

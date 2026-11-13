@@ -67,6 +67,10 @@ public class HopCheckNode implements NodeAction<WorkflowState> {
             return updates;
         }
         int maxHops = Math.max(1, properties.getMaxHops());
+        // deep 回答模式：多跳上限翻倍（复杂问题允许更多轮补查，换取更完整证据链）
+        if ("deep".equals(state.answerMode())) {
+            maxHops *= 2;
+        }
         // 步骤2：不足但已达多跳上限 → 标记上下文不完整，带已有资料进生成
         //        （已有部分资料可答，生成端声明边界；不转人工——与「首轮检索就空」场景区分）
         if (state.hop().count() >= maxHops) {

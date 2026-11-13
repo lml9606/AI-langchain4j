@@ -33,6 +33,12 @@ public class AgentProperties {
     /** 知识治理配置（分块/批量导入） */
     private Knowledge knowledge = new Knowledge();
 
+    /** 知识导入线程池配置 */
+    private KnowledgeImport knowledgeImport = new KnowledgeImport();
+
+    /** 检索配置（父子装配上下文预算） */
+    private Retrieval retrieval = new Retrieval();
+
     /** 限流配置 */
     private RateLimit rateLimit = new RateLimit();
 
@@ -165,23 +171,50 @@ public class AgentProperties {
     }
 
     /**
-     * 知识治理配置：分块参数可配（长文档导入时按 chunkSize 切分、chunkOverlap 保留跨块语义），
-     * 批量导入文档数上限防一次请求打爆嵌入服务。
+     * 知识治理配置：父子分块参数可配（长文档导入时先按标题/章节切父块整章上下文，
+     * 父块内再按段落切子块嵌入），批量导入文档数上限防一次请求打爆嵌入服务。
      */
     @Data
     public static class Knowledge {
-        /** 分块大小（字符）：长文档按此切分后逐块嵌入，单块语义聚焦检索更精准 */
-        private int chunkSize = 800;
-        /** 相邻分块重叠字符数：保留跨块边界的句间语义 */
+        /** 父块大小（字符）：按标题/章节切分的整章上下文，不嵌入；检索命中子块后取父块装配 */
+        private int parentChunkSize = 2000;
+        /** 子块大小（字符）：父块内按段落切分的最小检索单元，嵌入进向量库供检索 */
+        private int chunkSize = 400;
+        /** 相邻子块重叠字符数：保留跨块边界的句间语义 */
         private int chunkOverlap = 80;
         /** 批量导入单次请求最大文档数（超限拒绝，防嵌入服务被打爆） */
         private int batchMaxDocuments = 20;
+        /** 单篇文档/知识块最大字符数（入口 token 拦截：超限拒绝导入，防超大内容打爆嵌入服务与检索预算） */
+        private int maxDocumentChars = 50_000;
+    }
+
+    /**
+     * 知识导入线程池配置：批量导入逐篇并行执行（切分 + 嵌入 + 落库都是耗时操作），
+     * 与图执行/LLM 线程池隔离，避免批量导入抢占对话链路资源。
+     */
+    @Data
+    public static class KnowledgeImport {
+        private int corePoolSize = 2;
+        private int maxPoolSize = 4;
+        private int queueCapacity = 100;
+        private int keepAliveSeconds = 60;
+        /** 单篇导入等待上限（秒）：嵌入慢/队列积压时超时即取消该篇，避免 HTTP 线程无限挂起 */
+        private int timeoutSeconds = 120;
     }
 
     @Data
     public static class CircuitBreaker {
         private int failureThreshold = 5;
         private int cooldownSeconds = 60;
+    }
+
+    /**
+     * 检索配置：父子分块装配时，多命中父块组拼接的总长上限（超出截断，防上下文膨胀撑爆生成窗口）。
+     */
+    @Data
+    public static class Retrieval {
+        /** 父子装配上下文预算（字符）：命中子块 → 父块整章（同 title 组拼接）的总长上限 */
+        private int contextBudget = 2400;
     }
 
     @Data

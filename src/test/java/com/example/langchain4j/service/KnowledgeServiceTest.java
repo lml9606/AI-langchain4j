@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.List;
 
@@ -30,12 +31,15 @@ class KnowledgeServiceTest {
     private VectorSearchService vectorSearchService;
     @Mock
     private AgentProperties properties;
+    @Mock
+    private ThreadPoolTaskExecutor importExecutor;
 
     private KnowledgeService service;
 
     @BeforeEach
     void setUp() {
-        service = new KnowledgeService(knowledgeChunkMapper, embeddingService, vectorSearchService, properties);
+        service = new KnowledgeService(knowledgeChunkMapper, embeddingService, vectorSearchService,
+                properties, importExecutor);
     }
 
     @Test
@@ -78,5 +82,67 @@ class KnowledgeServiceTest {
         List<String> pieces = service.split("AAAA \n\n BBBB", 4, 0);
 
         assertThat(pieces).allMatch(p -> !p.isEmpty());
+    }
+
+    @Test
+    @DisplayName("父子分块：标题行开新节，节首行即标题")
+    void splitParentsByTitleLines() {
+        String content = "## 1.1 退款条件\n正文A段落。\n\n正文B段落。\n## 1.2 退款流程\n正文C段落。";
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
+
+        assertThat(sections).hasSize(2);
+        assertThat(sections.get(0).title()).isEqualTo("## 1.1 退款条件");
+        assertThat(sections.get(0).body()).contains("正文A段落");
+        assertThat(sections.get(1).title()).isEqualTo("## 1.2 退款流程");
+        assertThat(sections.get(1).body()).contains("正文C段落");
+    }
+
+    @Test
+    @DisplayName("父子分块：数字编号与中文章节行同样识别为标题")
+    void splitParentsByNumberedTitleLines() {
+        String content = "1.1 退款条件\n正文A。\n第2章 退款流程\n正文B。";
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
+
+        assertThat(sections).hasSize(2);
+        assertThat(sections.get(0).title()).isEqualTo("1.1 退款条件");
+        assertThat(sections.get(1).title()).isEqualTo("第2章 退款流程");
+    }
+
+    @Test
+    @DisplayName("父子分块：无标题行时单一节，首行作兜底标题")
+    void splitParentsWithoutTitle() {
+        String content = "退款政策说明\n这是正文第一段。\n\n这是正文第二段。";
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
+
+        assertThat(sections).hasSize(1);
+        assertThat(sections.get(0).title()).isEqualTo("退款政策说明");
+        assertThat(sections.get(0).body()).isEqualTo(content);
+    }
+
+    @Test
+    @DisplayName("父子分块：长章节超父块大小续切为同 title 多父块")
+    void splitParentsLongSectionSameTitle() {
+        String content = "## 退款规则\n" + "很长的正文。".repeat(300);
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content, 500);
+
+        assertThat(sections.size()).isGreaterThan(1);
+        assertThat(sections).allMatch(s -> s.title().equals("## 退款规则"));
+    }
+
+    @Test
+    @DisplayName("父子分块：首个标题前的正文（前言）用兜底标题单独成节")
+    void splitParentsPreambleBeforeFirstTitle() {
+        String content = "文档前言\n这是导语段落。\n## 1.1 正文标题\n正文章节内容。";
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
+
+        assertThat(sections).hasSize(2);
+        assertThat(sections.get(0).title()).isEqualTo("文档前言");
+        assertThat(sections.get(0).body()).contains("导语段落");
+        assertThat(sections.get(1).title()).isEqualTo("## 1.1 正文标题");
     }
 }

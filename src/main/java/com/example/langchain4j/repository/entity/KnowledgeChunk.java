@@ -19,6 +19,12 @@ public class KnowledgeChunk {
     private String metadata;
     /** 所属用户（NULL = 公共库对所有用户可见；非 NULL 仅本用户可见/可查） */
     private String userId;
+    /** 父块 ID（NULL = 孤儿子块/存量数据；文档导入时子块指向所属父块） */
+    private Long parentId;
+    /** 块类型：PARENT（父块，整章上下文，不嵌入）/ CHILD（子块，嵌入供检索） */
+    private String chunkType;
+    /** 紧凑标题（标题行 > 首行 > 前 100 字；预算紧张时替代全文拼装） */
+    private String title;
     /** 创建时间 */
     private OffsetDateTime createdAt;
     /** 更新时间（知识治理更新闭环，可空 = 从未更新） */

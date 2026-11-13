@@ -12,7 +12,6 @@ import com.example.langchain4j.llm.ModelRegistry;
 import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.EvalCase;
 import com.example.langchain4j.repository.entity.EvalResult;
-import com.example.langchain4j.repository.entity.KnowledgeChunk;
 import com.example.langchain4j.repository.mapper.EvalCaseMapper;
 import com.example.langchain4j.repository.mapper.EvalResultMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -135,9 +134,8 @@ public class EvalService {
     // ---- 单用例评测 ---- //
 
     private void evaluateOne(String runId, EvalCase evalCase, String model) {
-        // 步骤1：检索（与线上同一链路；评测知识范围为调用者可见：公共库 + 本人库）
-        List<KnowledgeChunk> chunks = vectorSearchService.search(evalCase.getQuestion(), EVAL_TOP_K);
-        String context = vectorSearchService.buildContext(chunks);
+        // 步骤1：检索（与线上同一链路：命中子块父子装配父块整章；评测知识范围为调用者可见：公共库 + 本人库）
+        String context = vectorSearchService.searchContext(evalCase.getQuestion(), EVAL_TOP_K);
         // 步骤2：召回打分（期望关键词在检索上下文中的命中比例；无关键词跳过）
         BigDecimal recall = recallScore(evalCase.getKeywords(), context);
         // 步骤3：基于检索上下文生成答案（与线上生成同一套“只用资料”约束）
