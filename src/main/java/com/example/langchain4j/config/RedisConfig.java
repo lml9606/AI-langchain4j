@@ -23,10 +23,21 @@ public class RedisConfig {
     /**
      * 覆盖 Redisson 默认的二进制 Codec：业务侧只存字符串（计数/标记/JSON），
      * StringCodec 保证可读，且 Lua 脚本的 KEYS/ARGV 不会被打包成二进制导致 INCR 失败。
+     * <p>
+     * 附带空串密码归一：`spring.data.redis.password` 空串（未配环境变量时的 `${REDIS_PASSWORD:}` 占位符
+     * 或 properties 里显式空值）非 null，Redisson 对非 null 密码一律发 AUTH 命令，
+     * 本机/生产 Redis 未设 requirepass 时返回 "ERR Client sent AUTH, but no password is set" 导致连接失败；
+     * 归一为 null 后 Redisson 跳过 AUTH。
      */
     @Bean
     public RedissonAutoConfigurationCustomizer redissonCodecCustomizer() {
-        return config -> config.setCodec(StringCodec.INSTANCE);
+        return config -> {
+            config.setCodec(StringCodec.INSTANCE);
+            String password = config.useSingleServer().getPassword();
+            if (password != null && password.isBlank()) {
+                config.useSingleServer().setPassword(null);
+            }
+        };
     }
 
     @Bean
