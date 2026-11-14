@@ -7,7 +7,6 @@ import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.ChatRequest;
 import com.example.langchain4j.dto.ChatResponse;
-import com.example.langchain4j.graph.GraphEvent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.guard.RateLimiter;
 import com.example.langchain4j.guard.SessionLock;
@@ -51,6 +50,8 @@ public class AgentService {
 
     /** 生成视图候选集上限：段内最近消息取这么多条参与 token 预算装配 */
     private static final int GENERATION_CANDIDATE_LIMIT = 40;
+    /** 检索上下文快照截断上限（改写视图 itemMaxLength=800，存 1200 留余量） */
+    private static final int CONTEXT_SNAPSHOT_MAX = 1200;
     /** 回答模式：深度链路（多跳上限与检索候选数放宽） */
     private static final String ANSWER_MODE_DEEP = "deep";
     /** 检索可见范围：仅本人知识库 */
@@ -134,9 +135,10 @@ public class AgentService {
                     answerMode, visibility);
             // 助手消息持久化（结果已生成，落库失败降级不阻断响应）；
             // 超时路径在 invokeGraph 内返回降级应答，这里同样落库，保证一问一答闭环
+            // context 快照：改写视图锚定检索资料原文而非生成答案，防追问指代带偏
             try {
                 conversationService.saveMessage(conversationId, Message.ROLE_ASSISTANT,
-                        result.result(), model, result.tokenUsage());
+                        result.result(), model, result.tokenUsage(), snapshotContext(result.context()));
             } catch (Exception e) {
                 log.warn("[agent] save assistant message failed, degrade: {}", e.getMessage());
             }
@@ -151,53 +153,6 @@ public class AgentService {
         }
         return ChatResponse.of(conversationId, state.result(), state.fallback(),
                 state.tokenUsage(), System.currentTimeMillis() - start, state.done(), state.rootCause());
-    }
-
-    /**
-     * 流式对话：返回图执行事件流（含节点级审计），由 controller 转 SSE。
-     * <p>
-     * 与同步版的两点差异：
-     * <ul>
-     *   <li>agentGraph.stream 返回懒迭代器：真正开始拉取节点输出、执行图，
-     *       时机在 controller 异步线程消费迭代器时，而不是本方法内；</li>
-     *   <li>锁的生命周期跨整个流消费过程：迭代器耗尽（hasNext=false）才释放锁；
-     *       若客户端断连导致迭代器未被消费完，锁由 Redisson Watchdog 在持锁线程消亡后兜底释放。</li>
-     * </ul>
-     */
-    public Iterable<GraphEvent> stream(ChatRequest request) {
-        String userId = UserContext.require();
-        rateLimiter.checkAcquire(userId);
-        // 输入规整（与同步版同一语义：堵“全是控制字符”的漏网输入，全链路用清洗后的 query）
-        String query = normalizeQuery(request.getQuery());
-        String model = modelRegistry.resolve(request.getModel());
-        String answerMode = normalizeAnswerMode(request.getAnswerMode());
-        String visibility = normalizeVisibility(request.getVisibility());
-        String conversationId = conversationService.ensureConversation(
-                userId, request.getConversationId(), query);
-
-        // 手动加锁：锁跨"消息落库 + 改写 + 流消费"全过程，消费结束才释放
-        AutoCloseable lock = sessionLock.lock(conversationId);
-        try {
-            // 锁内准备：用户消息持久化 + 改写 + 话题段归属 + 生成视图 + 摘要触发（与同步版同一流程）
-            PreparedTurn turn = prepareTurn(conversationId, query, model);
-            RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
-            Map<String, Object> inputs = buildInputs(query, turn.rewrite().rewritten(),
-                    turn.history(), turn.summary(), model, userId, conversationId, answerMode, visibility);
-            var nodeOutputs = agentGraph.stream(inputs, config);
-            return () -> new AuditingEventIterator(conversationId, nodeOutputs.iterator(), lock, auditService);
-        } catch (Exception e) {
-            // 准备阶段任何异常：立即释放锁，避免锁泄漏（此前只能靠 Watchdog 兜底）
-            try {
-                lock.close();
-            } catch (Exception closeEx) {
-                log.warn("[agent] stream lock release failed: {}", closeEx.getMessage());
-            }
-            // 保留原异常类型（BizException 需原样抛给全局异常处理）
-            if (e instanceof RuntimeException runtimeException) {
-                throw runtimeException;
-            }
-            throw new IllegalStateException("stream prepare failed", e);
-        }
     }
 
     /**
@@ -229,7 +184,7 @@ public class AgentService {
                 state.ifPresent(s -> {
                     try {
                         conversationService.saveMessage(conversationId, Message.ROLE_ASSISTANT,
-                                s.result(), s.model(), s.tokenUsage());
+                                s.result(), s.model(), s.tokenUsage(), snapshotContext(s.context()));
                     } catch (Exception e) {
                         log.warn("[agent] resume save assistant message failed, degrade: {}", e.getMessage());
                     }
@@ -265,6 +220,18 @@ public class AgentService {
     }
 
     // ---- 内部实现 ----
+
+    /**
+     * 检索上下文快照截断：写入 assistant 消息 context 列（改写视图锚定用）。
+     * 空上下文（检索失败/超时降级轮）返回 null → 改写视图退回生成答案，行为与旧版一致。
+     */
+    private String snapshotContext(String context) {
+        if (context == null || context.isBlank()) {
+            return null;
+        }
+        return context.length() > CONTEXT_SNAPSHOT_MAX
+                ? context.substring(0, CONTEXT_SNAPSHOT_MAX) : context;
+    }
 
     /**
      * 入口输入规整：剔除控制字符 + 去首尾空白，清洗后为空抛 400。

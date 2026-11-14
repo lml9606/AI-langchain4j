@@ -79,12 +79,25 @@ public class ConversationService {
     @Transactional(rollbackFor = Exception.class)
     public Message saveMessage(String conversationId, String role, String content,
                                String model, Integer tokenUsage) {
+        return saveMessage(conversationId, role, content, model, tokenUsage, null);
+    }
+
+    /**
+     * 持久化一条消息（含检索上下文快照）。
+     *
+     * @param context 检索上下文快照（仅 assistant 消息：本轮的检索资料原文截断；
+     *                user 消息传 null。改写视图锚定资料原文而非生成答案，防追问带偏）
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public Message saveMessage(String conversationId, String role, String content,
+                               String model, Integer tokenUsage, String context) {
         Message message = new Message();
         message.setConversationId(conversationId);
         message.setRole(role);
         message.setContent(content == null ? "" : content);
         message.setModel(model);
         message.setTokenUsage(tokenUsage);
+        message.setContext(context);
         if (Message.ROLE_ASSISTANT.equals(role)) {
             message.setSegmentId(messageMapper.selectLatestUserSegmentId(conversationId));
         }
@@ -139,9 +152,14 @@ public class ConversationService {
             if (m == null || m.getContent() == null) {
                 continue;
             }
+            // assistant 消息若有检索上下文快照，用资料原文替代生成答案（指代消解锚定事实，
+            // 防上轮答案偏差带偏改写）；快照为空（存量数据/超时降级轮）退回生成答案，行为与旧版一致
+            String content = Message.ROLE_ASSISTANT.equals(m.getRole())
+                    && m.getContext() != null && !m.getContext().isBlank()
+                    ? m.getContext() : m.getContent();
             history.add(Map.of(
                     "role", m.getRole() == null ? "" : m.getRole(),
-                    "content", truncate(m.getContent(), itemMaxLength)));
+                    "content", truncate(content, itemMaxLength)));
         }
         return history;
     }

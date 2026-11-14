@@ -46,6 +46,9 @@ CREATE INDEX IF NOT EXISTS idx_message_conversation ON ai_message (conversation_
 CREATE INDEX IF NOT EXISTS idx_message_segment ON ai_message (conversation_id, segment_id, id);
 -- 已存在表补列（幂等）
 ALTER TABLE ai_message ADD COLUMN IF NOT EXISTS segment_id INTEGER;
+-- 已存在表补列（幂等）：assistant 消息的检索上下文快照（截断存储），
+-- 改写视图锚定资料原文用（追问指代消解不锚定可能带偏的生成答案）；user 消息为空
+ALTER TABLE ai_message ADD COLUMN IF NOT EXISTS context TEXT;
 
 -- 会话段摘要表（话题段索引：不存对话内容，只记段的 topic/摘要/起点/摘要进度，
 -- 消息内容全在 ai_message，靠消息的 segment_id 与段号关联）

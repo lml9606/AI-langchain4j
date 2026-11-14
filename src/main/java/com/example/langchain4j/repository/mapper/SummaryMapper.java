@@ -1,10 +1,12 @@
 package com.example.langchain4j.repository.mapper;
 
 import com.example.langchain4j.repository.entity.ConversationSummary;
+import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 
 import java.util.List;
 
+@Mapper
 public interface SummaryMapper {
 
     int insert(ConversationSummary summary);

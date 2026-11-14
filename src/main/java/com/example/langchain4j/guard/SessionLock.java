@@ -62,20 +62,6 @@ public class SessionLock {
     }
 
     /**
-     * 手动加锁（供流式场景跨迭代持锁）：
-     * 调用方在 close() 时释放锁；若异常中断未 close，锁在租约到期后自动释放。
-     */
-    public AutoCloseable lock(String lockKey) {
-        RLock lock = redissonClient.getLock(KEY_PREFIX + sanitize(lockKey));
-        boolean locked = tryAcquire(lock);
-        if (!locked) {
-            log.warn("[session-lock] lock conflict, key={}", lock.getName());
-            throw new BizException(ErrorCode.AGENT_SESSION_LOCKED);
-        }
-        return () -> releaseQuietly(lock);
-    }
-
-    /**
      * 立即尝试加锁（不等待）：成功返回 true；锁冲突返回 false；Redis 故障 fail-open 返回 true。
      * <p>
      * tryLock(0, leaseSeconds, SECONDS) 的两个行为：

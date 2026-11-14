@@ -11,17 +11,18 @@
         <result property="model" column="model"/>
         <result property="tokenUsage" column="token_usage"/>
         <result property="segmentId" column="segment_id"/>
+        <result property="context" column="context"/>
         <result property="createdAt" column="created_at"/>
     </resultMap>
 
     <insert id="insert" parameterType="com.example.langchain4j.repository.entity.Message"
             useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO ai_message (conversation_id, role, content, model, token_usage, segment_id)
-        VALUES (#{conversationId}, #{role}, #{content}, #{model}, #{tokenUsage}, #{segmentId})
+        INSERT INTO ai_message (conversation_id, role, content, model, token_usage, segment_id, context)
+        VALUES (#{conversationId}, #{role}, #{content}, #{model}, #{tokenUsage}, #{segmentId}, #{context})
     </insert>
 
     <select id="selectByConversationId" resultMap="MessageMap">
-        SELECT id, conversation_id, role, content, model, token_usage, segment_id, created_at
+        SELECT id, conversation_id, role, content, model, token_usage, segment_id, context, created_at
         FROM ai_message
         WHERE conversation_id = #{conversationId}
         ORDER BY id ASC
@@ -30,7 +31,7 @@
 
     <!-- 改写视图专用：跨话题取最近 limit 条（指代消解用，不进生成） -->
     <select id="selectRecentByConversationId" resultMap="MessageMap">
-        SELECT id, conversation_id, role, content, model, token_usage, segment_id, created_at
+        SELECT id, conversation_id, role, content, model, token_usage, segment_id, context, created_at
         FROM (
             SELECT * FROM ai_message
             WHERE conversation_id = #{conversationId}
@@ -42,7 +43,7 @@
 
     <!-- 生成视图专用：按段号取当前话题段最近 limit 条（其他话题不带） -->
     <select id="selectRecentBySegment" resultMap="MessageMap">
-        SELECT id, conversation_id, role, content, model, token_usage, segment_id, created_at
+        SELECT id, conversation_id, role, content, model, token_usage, segment_id, context, created_at
         FROM (
             SELECT * FROM ai_message
             WHERE conversation_id = #{conversationId} AND segment_id = #{segmentId}
@@ -53,7 +54,7 @@
     </select>
 
     <select id="selectUncovered" resultMap="MessageMap">
-        SELECT id, conversation_id, role, content, model, token_usage, segment_id, created_at
+        SELECT id, conversation_id, role, content, model, token_usage, segment_id, context, created_at
         FROM ai_message
         WHERE conversation_id = #{conversationId}
           AND segment_id = #{segmentId}
