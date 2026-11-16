@@ -34,13 +34,22 @@ public class PromptConfigController {
         this.promptTemplateService = promptTemplateService;
     }
 
-    /** 全部 key 配置概览（含生效文本、版本；version=0 表示未覆盖、用代码默认值） */
+    /**
+     * 全部 key 配置概览。
+     *
+     * @return 配置列表（含生效文本与版本；version=0 表示未覆盖、用代码默认值）
+     */
     @GetMapping
     public ApiResponse<List<PromptConfig>> list() {
         return ApiResponse.success(promptTemplateService.listAll());
     }
 
-    /** 保存/覆盖提示词（热生效；仅管理员） */
+    /**
+     * 保存/覆盖提示词（热生效；仅管理员，RoleInterceptor 校验）。
+     *
+     * @param request 保存请求（key 对应 PromptTemplates 常量名 + 生效文本）
+     * @return 保存后的配置（version 每次保存递增，落 ai_prompt_config）
+     */
     @RequireRole(UserRole.ADMIN)
     @PostMapping
     public ApiResponse<PromptConfig> save(@Valid @RequestBody PromptSaveRequest request) {
@@ -48,7 +57,12 @@ public class PromptConfigController {
                 request.key(), request.text(), UserContext.require()));
     }
 
-    /** 删除覆盖 → 回退代码默认值（仅管理员） */
+    /**
+     * 删除覆盖 → 回退代码默认值（仅管理员，RoleInterceptor 校验）。
+     *
+     * @param key 提示词 key（对应 PromptTemplates 常量名）
+     * @return 统一响应（无数据）
+     */
     @RequireRole(UserRole.ADMIN)
     @DeleteMapping("/{key}")
     public ApiResponse<Void> delete(@PathVariable String key) {

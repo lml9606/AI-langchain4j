@@ -34,7 +34,12 @@ public class FeedbackController {
         this.conversationService = conversationService;
     }
 
-    /** 提交反馈（会话归属校验：只能反馈自己的会话） */
+    /**
+     * 提交反馈（点赞/点踩 + 补充说明，运营闭环信号入口）。
+     *
+     * @param request 反馈请求（conversationId 需归属当前用户，否则 404/403；rating：UP/DOWN）
+     * @return 统一响应包裹的新反馈 id
+     */
     @PostMapping
     public ApiResponse<Map<String, Object>> submit(@Valid @RequestBody FeedbackRequest request) {
         String userId = UserContext.require();
@@ -42,7 +47,12 @@ public class FeedbackController {
         return ApiResponse.success(Map.of("id", feedbackService.submit(request, userId)));
     }
 
-    /** 会话反馈列表 */
+    /**
+     * 会话反馈列表。
+     *
+     * @param conversationId 会话 ID；归属校验：404 不存在 / 403 他人会话
+     * @return 该会话的反馈列表
+     */
     @GetMapping("/conversation/{id}")
     public ApiResponse<List<Feedback>> listByConversation(@PathVariable("id") String conversationId) {
         String userId = UserContext.require();
@@ -50,7 +60,12 @@ public class FeedbackController {
         return ApiResponse.success(feedbackService.listByConversation(conversationId));
     }
 
-    /** 点踩按天统计（近 N 天趋势，运营视角） */
+    /**
+     * 点踩按天统计（近 N 天趋势，运营视角）。
+     *
+     * @param days 统计天数（默认 7）
+     * @return 按天点踩统计列表
+     */
     @GetMapping("/down-stats")
     public ApiResponse<List<FeedbackMapper.DownStat>> downStats(@RequestParam(defaultValue = "7") int days) {
         return ApiResponse.success(feedbackService.downStats(days));

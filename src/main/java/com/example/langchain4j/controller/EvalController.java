@@ -36,19 +36,34 @@ public class EvalController {
         this.evalService = evalService;
     }
 
-    /** 新增评测用例 */
+    /**
+     * 新增评测用例。
+     *
+     * @param request 用例内容（问题 / 期望关键词 / 参考答案；enabled 控制是否参与评测）
+     * @return 统一响应包裹的新用例 id
+     */
     @PostMapping("/cases")
     public ApiResponse<Map<String, Object>> addCase(@Valid @RequestBody EvalCaseRequest request) {
         return ApiResponse.success(Map.of("id", evalService.addCase(request)));
     }
 
-    /** 列出全部用例 */
+    /**
+     * 列出全部评测用例。
+     *
+     * @return 统一响应包裹的用例列表（含 enabled 状态）
+     */
     @GetMapping("/cases")
     public ApiResponse<List<EvalCase>> listCases() {
         return ApiResponse.success(evalService.listCases());
     }
 
-    /** 启用/停用用例（仅管理员） */
+    /**
+     * 启用/停用评测用例（仅管理员；RoleInterceptor 校验，普通用户 403）。
+     *
+     * @param id      用例 id
+     * @param enabled true = 参与评测 / false = 停用
+     * @return 统一响应（无数据）
+     */
     @RequireRole(UserRole.ADMIN)
     @PostMapping("/cases/{id}/enabled")
     public ApiResponse<Void> setEnabled(@PathVariable long id, @RequestParam boolean enabled) {
@@ -56,13 +71,22 @@ public class EvalController {
         return ApiResponse.success();
     }
 
-    /** 执行评测（同步，返回本批报告） */
+    /**
+     * 执行评测（同步，用例逐条走完整检索 + LLM 链路，返回本批报告）。
+     *
+     * @return 本批评测报告（召回率 / 忠实度聚合；每个用例一行落 ai_eval_result）
+     */
     @PostMapping("/run")
     public ApiResponse<EvalReportResponse> run() {
         return ApiResponse.success(evalService.runEval());
     }
 
-    /** 查询报告：默认最近一批；指定 runId 查历史批次 */
+    /**
+     * 查询评测报告：默认最近一批；指定 runId 查历史批次。
+     *
+     * @param runId 批次号（空 = 最近一批）
+     * @return 指定批次的评测报告
+     */
     @GetMapping("/report")
     public ApiResponse<EvalReportResponse> report(
             @RequestParam(required = false) String runId) {

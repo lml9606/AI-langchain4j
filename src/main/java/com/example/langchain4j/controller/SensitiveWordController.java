@@ -36,13 +36,22 @@ public class SensitiveWordController {
         this.outputGuardService = outputGuardService;
     }
 
-    /** 全量词表 */
+    /**
+     * 全量敏感词表。
+     *
+     * @return 词表列表（含启用状态）
+     */
     @GetMapping
     public ApiResponse<List<SensitiveWord>> list() {
         return ApiResponse.success(outputGuardService.listAll());
     }
 
-    /** 新增敏感词（非法参数统一转业务错误码） */
+    /**
+     * 新增敏感词（改后热更新输出审核缓存）。
+     *
+     * @param body 含 word 字段（空/重复时转 BAD_REQUEST 业务码）
+     * @return 统一响应包裹的新词 id
+     */
     @PostMapping
     public ApiResponse<Map<String, Object>> add(@RequestBody Map<String, String> body) {
         try {
@@ -53,7 +62,13 @@ public class SensitiveWordController {
         }
     }
 
-    /** 启用/停用 */
+    /**
+     * 启用/停用敏感词（改后热更新输出审核缓存）。
+     *
+     * @param id      敏感词 id
+     * @param enabled true = 启用 / false = 停用
+     * @return 统一响应（无数据）
+     */
     @PostMapping("/{id}/enabled")
     public ApiResponse<Void> setEnabled(@PathVariable long id, @RequestParam boolean enabled) {
         try {
@@ -64,7 +79,12 @@ public class SensitiveWordController {
         return ApiResponse.success();
     }
 
-    /** 删除敏感词 */
+    /**
+     * 删除敏感词（改后热更新输出审核缓存）。
+     *
+     * @param id 敏感词 id
+     * @return 统一响应（无数据）
+     */
     @DeleteMapping("/{id}")
     public ApiResponse<Void> delete(@PathVariable long id) {
         outputGuardService.delete(id);

@@ -35,7 +35,13 @@ public class KnowledgeController {
         this.knowledgeService = knowledgeService;
     }
 
-    /** 语义检索：query 嵌入后余弦相似度检索 topK */
+    /**
+     * 语义检索：query 嵌入后余弦相似度检索 topK。
+     *
+     * @param query 检索词（必填非空；混合检索双通道：向量 + 词面）
+     * @param topK  返回条数（默认 3）
+     * @return 检索结果（含相似度得分与命中内容）
+     */
     @GetMapping("/search")
     public ApiResponse<KnowledgeSearchResponse> search(
             @RequestParam @NotBlank(message = "query 不能为空") String query,
@@ -44,8 +50,12 @@ public class KnowledgeController {
     }
 
     /**
-     * 批量导入：多篇文档逐篇父子分块落库（父块整章不嵌入 + 子块嵌入；子块参数逐篇可配），
-     * 单篇失败不中断整批，返回逐条结果供重试失败项。
+     * 批量导入：多篇文档逐篇父子分块落库（父块整章不嵌入 + 子块嵌入；子块参数逐篇可配）。
+     * <p>
+     * 特殊条件：单篇失败不中断整批。
+     *
+     * @param request 批量导入请求（文档列表 + 分块参数）
+     * @return 逐篇导入结果，供重试失败项
      */
     @PostMapping("/batch")
     public ApiResponse<KnowledgeBatchImportResponse> batchImport(
@@ -53,7 +63,15 @@ public class KnowledgeController {
         return ApiResponse.success(knowledgeService.batchImport(request));
     }
 
-    /** 更新知识块：内容变更后重嵌向量（仅本人私有块；公共库块 403） */
+    /**
+     * 更新知识块：内容变更后重嵌向量。
+     * <p>
+     * 特殊条件：仅限本人私有块，公共库块 403。
+     *
+     * @param id      知识块 id
+     * @param request 新内容（更新后重新嵌入）
+     * @return 统一响应（无数据）
+     */
     @PutMapping("/{id}")
     public ApiResponse<Void> update(@PathVariable long id,
                                     @Valid @RequestBody KnowledgeUpdateRequest request) {
@@ -61,14 +79,25 @@ public class KnowledgeController {
         return ApiResponse.success();
     }
 
-    /** 删除知识块（仅本人私有块；公共库块 403） */
+    /**
+     * 删除知识块。
+     * <p>
+     * 特殊条件：仅限本人私有块，公共库块 403。
+     *
+     * @param id 知识块 id
+     * @return 统一响应（无数据）
+     */
     @DeleteMapping("/{id}")
     public ApiResponse<Void> delete(@PathVariable long id) {
         knowledgeService.deleteChunk(id);
         return ApiResponse.success();
     }
 
-    /** 知识库健康度：可见范围（公共库 + 本人私有库）聚合统计，异常块驱动治理 */
+    /**
+     * 知识库健康度：可见范围（公共库 + 本人私有库）聚合统计。
+     *
+     * @return 健康度聚合结果（异常块驱动知识治理）
+     */
     @GetMapping("/health")
     public ApiResponse<KnowledgeHealthResponse> health() {
         return ApiResponse.success(knowledgeService.health());

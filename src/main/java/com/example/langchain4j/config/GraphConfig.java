@@ -19,15 +19,33 @@ import java.sql.SQLException;
 /**
  * 图与 Checkpoint 装配。
  * <ul>
- *   <li>优先 PostgresSaver（checkpoint 三表自动创建，服务重启后可断点恢复）；</li>
+ *   <li>优先 PostgresSaver（框架自建 lg4jthread / lg4jcheckpoint 两张表，服务重启后可断点恢复）；</li>
  *   <li>Postgres 不可用时按配置降级 MemorySaver（本地无 DB 也能起服务，仅丢失断点恢复能力）；</li>
  *   <li>memoryFallback=false 时 DB 不可用直接启动失败（fail-fast，生产建议）。</li>
  * </ul>
+ * <p>
+ * 注意：lg4j 两张表的表名与结构由 langgraph4j-postgres-saver 框架硬编码（每次启动
+ * createTables(true) 重跑 DDL），不可改表名、不可合并，业务扩展一律走视图或自有审计表。
  */
 @Slf4j
 @Configuration
 public class GraphConfig {
 
+    /**
+     * 主图 Checkpoint Saver（对话工作流的节点快照持久化）。
+     * <ul>
+     *   <li>正常：PostgresSaver，快照落 lg4jcheckpoint 表（JSONB），重启后可断点恢复；</li>
+     *   <li>降级：DB 不可用且 checkpoint.memory-fallback=true 时返回 MemorySaver，
+     *       仅丢失持久化与断点恢复能力，服务可用；</li>
+     *   <li>fail-fast：DB 不可用且 memory-fallback=false 时抛出异常阻断启动。</li>
+     * </ul>
+     *
+     * @param dataSource      数据源（PostgreSQL，ai_agent 库）
+     * @param stateSerializer WorkflowState 序列化器（Jackson 实现，checkpoint JSONB 落库/读取用）
+     * @param properties      应用配置（读取 checkpoint.memory-fallback 降级开关）
+     * @return 主图使用的 Checkpoint Saver（PostgresSaver，或降级后的 MemorySaver）
+     * @throws IllegalStateException DB 不可用且 memory-fallback=false 时抛出（fail-fast）
+     */
     @Bean
     public BaseCheckpointSaver checkpointSaver(DataSource dataSource,
                                                WorkflowStateSerializer stateSerializer,
@@ -50,6 +68,14 @@ public class GraphConfig {
         }
     }
 
+    /**
+     * 主工作流图（对话 Agent）。
+     *
+     * @param builder         图装配器（节点 + 边 + 条件路由，见 AgentGraphBuilder）
+     * @param checkpointSaver 节点快照持久化器（见 {@link #checkpointSaver}）；
+     *                        调用方以 RunnableConfig.threadId(会话 ID) 执行，实现会话级隔离
+     * @return 编译后的主图；AgentService 持 config 调用 invoke，支持断点续跑
+     */
     @Bean
     public CompiledGraph<WorkflowState> agentGraph(AgentGraphBuilder builder,
                                                    BaseCheckpointSaver checkpointSaver) {
@@ -63,6 +89,9 @@ public class GraphConfig {
      * 真正需要持久化的是最终改稿（ai_resume_revision 表），不是图执行中间态。
      * 不共用上面的 PostgresSaver —— 它绑定的是 WorkflowStateSerializer，
      * 直接拿来序列化 ResumeOptimizeState 会写错类型。
+     *
+     * @param builder 简历优化子图装配器（节点 + 边）
+     * @return 编译后的简历优化子图（内存快照，不落库）
      */
     @Bean("resumeOptimizeGraph")
     public CompiledGraph<ResumeOptimizeState> resumeOptimizeGraph(ResumeOptimizeGraphBuilder builder) {

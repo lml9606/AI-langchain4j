@@ -17,7 +17,7 @@ import javax.sql.DataSource;
  * <ul>
  *   <li>后台执行，不阻塞启动流程；</li>
  *   <li>PG 不可达时仅告警（DDL 幂等，可在 DB 恢复后重启补建）；</li>
- *   <li>checkpoint 三表由 PostgresSaver 自行建表，与此解耦。</li>
+ *   <li>checkpoint 两表（lg4jthread / lg4jcheckpoint）由 PostgresSaver 自行建表，与此解耦。</li>
  * </ul>
  */
 @Slf4j

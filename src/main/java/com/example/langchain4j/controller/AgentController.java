@@ -37,13 +37,26 @@ public class AgentController {
         this.conversationService = conversationService;
     }
 
-    /** 同步对话（invoke 全图，返回最终结果） */
+    /**
+     * 同步对话：invoke 主图全流程，返回最终结果（非流式）。
+     *
+     * @param request 对话请求：query 必填；conversationId 空 = 新会话（响应返回新 32 位会话 ID，
+     *                续聊需回传该 ID）；model 按名路由（ModelRegistry，见 agent.deepseek.model-names）
+     * @return 统一响应包裹的对话结果（conversationId / answer / 模型与降级标记等）
+     */
     @PostMapping("/chat")
     public ApiResponse<ChatResponse> chat(@Valid @RequestBody ChatRequest request) {
         return ApiResponse.success(agentService.chat(request));
     }
 
-    /** 断点恢复：从最近 checkpoint 继续执行（POST 便于扩展恢复参数） */
+    /**
+     * 断点恢复：从该会话最近 checkpoint 继续执行（POST 便于扩展恢复参数）。
+     * <p>
+     * 特殊条件：会话无待恢复任务（最后一轮已闭环或无可用 checkpoint）时返回 404 业务码。
+     *
+     * @param request 恢复请求（conversationId 即图 threadId；归属校验：404 不存在 / 403 他人会话）
+     * @return 恢复执行后的图状态 data；无待恢复任务返回 404 错误码
+     */
     @PostMapping("/resume")
     public ApiResponse<Map<String, Object>> resume(@Valid @RequestBody ResumeRequest request) {
         requireOwnership(request.conversationId());
@@ -53,7 +66,12 @@ public class AgentController {
                         "无待恢复的任务：该会话最后一轮已闭环或没有可用的 checkpoint"));
     }
 
-    /** 查询 checkpoint 执行状态 */
+    /**
+     * 查询 checkpoint 执行状态（节点级快照信息）。
+     *
+     * @param threadId 图线程 ID（= 会话 ID）；归属校验：404 不存在 / 403 他人会话
+     * @return 最新 checkpoint 的状态 data；无记录返回 404 错误码
+     */
     @GetMapping("/state/{threadId}")
     public ApiResponse<Map<String, Object>> state(@PathVariable String threadId) {
         requireOwnership(threadId);
@@ -62,7 +80,13 @@ public class AgentController {
                 .orElse(ApiResponse.error(ErrorCode.NOT_FOUND, "无 checkpoint 记录"));
     }
 
-    /** 会话历史消息（默认 50 条，上限 200） */
+    /**
+     * 会话历史消息列表（全量事实源 ai_message，按时间顺序）。
+     *
+     * @param conversationId 会话 ID；归属校验：404 不存在 / 403 他人会话
+     * @param limit          返回条数（默认 50，上限 200）
+     * @return 会话消息列表（role / content / model / tokenUsage / createdAt）
+     */
     @GetMapping("/conversation/{id}/messages")
     public ApiResponse<List<MessageDto>> messages(@PathVariable("id") String conversationId,
                                                   @RequestParam(defaultValue = "50") int limit) {

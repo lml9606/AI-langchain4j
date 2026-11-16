@@ -38,13 +38,24 @@ public class TicketController {
         this.conversationService = conversationService;
     }
 
-    /** 我的工单 */
+    /**
+     * 我的工单列表。
+     *
+     * @param limit 返回条数（默认 50）
+     * @return 当前用户的工单列表
+     */
     @GetMapping
     public ApiResponse<List<Ticket>> myTickets(@RequestParam(defaultValue = "50") int limit) {
         return ApiResponse.success(ticketService.myTickets(UserContext.require(), limit));
     }
 
-    /** 运营视角：按状态列工单（status 空 = 全部；OPEN 看未结；仅管理员） */
+    /**
+     * 运营视角：按状态列工单（仅管理员，RoleInterceptor 校验）。
+     *
+     * @param status 工单状态（空 = 全部；OPEN 看未结）
+     * @param limit  返回条数（默认 50）
+     * @return 工单列表
+     */
     @RequireRole(UserRole.ADMIN)
     @GetMapping("/list")
     public ApiResponse<List<Ticket>> list(@RequestParam(required = false) String status,
@@ -52,7 +63,12 @@ public class TicketController {
         return ApiResponse.success(ticketService.listByStatus(status, limit));
     }
 
-    /** 手动建单（流式路径或前端触发；会话归属校验） */
+    /**
+     * 手动建单（流式路径或前端触发）。
+     *
+     * @param request 建单请求（conversationId 需归属当前用户，否则 404/403；rootCause 可空）
+     * @return 新建的工单
+     */
     @PostMapping
     public ApiResponse<Ticket> create(@Valid @RequestBody TicketRequest request) {
         String userId = UserContext.require();
@@ -61,7 +77,13 @@ public class TicketController {
                 userId, request.conversationId(), request.question(), request.rootCause()));
     }
 
-    /** 运营回复：写入回复与处理人并置为 RESOLVED（仅管理员） */
+    /**
+     * 运营回复：写入回复与处理人并置为 RESOLVED（仅管理员，RoleInterceptor 校验）。
+     *
+     * @param id      工单 id
+     * @param request 回复请求（reply + assignee）
+     * @return 统一响应（无数据）
+     */
     @RequireRole(UserRole.ADMIN)
     @PostMapping("/{id}/reply")
     public ApiResponse<Void> reply(@PathVariable long id, @Valid @RequestBody TicketReplyRequest request) {
@@ -69,7 +91,12 @@ public class TicketController {
         return ApiResponse.success();
     }
 
-    /** 关单（用户确认解决） */
+    /**
+     * 关单（用户确认解决）。
+     *
+     * @param id 工单 id
+     * @return 统一响应（无数据）
+     */
     @PostMapping("/{id}/close")
     public ApiResponse<Void> close(@PathVariable long id) {
         ticketService.close(id);

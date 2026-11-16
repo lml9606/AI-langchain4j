@@ -27,13 +27,25 @@ public class AuthController {
         this.authService = authService;
     }
 
-    /** 注册：创建用户并直接签发 Token（注册即登录） */
+    /**
+     * 注册：创建用户并直接签发 Token（注册即登录）。
+     * <p>
+     * 特殊条件：用户名已存在时返回业务错误码（防枚举，与不存在账号登录错误同文案）。
+     *
+     * @param request 注册请求（用户名全局唯一；密码以 BCrypt 哈希落库，明文不存储）
+     * @return 统一响应包裹的登录结果（token / 用户信息）
+     */
     @PostMapping("/register")
     public ApiResponse<LoginResponse> register(@Valid @RequestBody RegisterRequest request) {
         return ApiResponse.success(authService.register(request));
     }
 
-    /** 登录：校验密码并签发 Token */
+    /**
+     * 登录：校验密码（BCrypt 比对）并签发 Token。
+     *
+     * @param request 登录请求（用户名 + 明文密码，仅内存比对）
+     * @return 统一响应包裹的登录结果（token / 用户信息）；凭证错误返回 401 业务码
+     */
     @PostMapping("/login")
     public ApiResponse<LoginResponse> login(@Valid @RequestBody LoginRequest request) {
         return ApiResponse.success(authService.login(request));
