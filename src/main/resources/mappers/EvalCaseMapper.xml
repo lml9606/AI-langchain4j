@@ -5,28 +5,36 @@
 
     <resultMap id="EvalCaseMap" type="com.example.langchain4j.repository.entity.EvalCase">
         <id property="id" column="id"/>
+        <result property="scenario" column="scenario"/>
         <result property="question" column="question"/>
         <result property="keywords" column="keywords"/>
         <result property="expectedAnswer" column="expected_answer"/>
+        <result property="expectedTools" column="expected_tools"/>
+        <result property="expectedArgs" column="expected_args"/>
+        <result property="expectClarify" column="expect_clarify"/>
         <result property="enabled" column="enabled"/>
         <result property="createdAt" column="created_at"/>
     </resultMap>
 
     <insert id="insert" parameterType="com.example.langchain4j.repository.entity.EvalCase"
             useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO ai_eval_case (question, keywords, expected_answer, enabled)
-        VALUES (#{question}, #{keywords}, #{expectedAnswer}, COALESCE(#{enabled}, TRUE))
+        INSERT INTO ai_eval_case (scenario, question, keywords, expected_answer,
+                                  expected_tools, expected_args, expect_clarify, enabled)
+        VALUES (COALESCE(#{scenario}, 'knowledge_qa'), #{question}, #{keywords}, #{expectedAnswer},
+                #{expectedTools}, #{expectedArgs}, #{expectClarify}, COALESCE(#{enabled}, TRUE))
     </insert>
 
     <select id="selectEnabled" resultMap="EvalCaseMap">
-        SELECT id, question, keywords, expected_answer, enabled, created_at
+        SELECT id, scenario, question, keywords, expected_answer, expected_tools,
+               expected_args, expect_clarify, enabled, created_at
         FROM ai_eval_case
         WHERE enabled = TRUE
         ORDER BY id
     </select>
 
     <select id="selectAll" resultMap="EvalCaseMap">
-        SELECT id, question, keywords, expected_answer, enabled, created_at
+        SELECT id, scenario, question, keywords, expected_answer, expected_tools,
+               expected_args, expect_clarify, enabled, created_at
         FROM ai_eval_case
         ORDER BY id
     </select>

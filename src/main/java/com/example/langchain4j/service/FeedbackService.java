@@ -2,7 +2,7 @@ package com.example.langchain4j.service;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
-import com.example.langchain4j.dto.FeedbackRequest;
+import com.example.langchain4j.dto.request.FeedbackRequest;
 import com.example.langchain4j.repository.entity.Feedback;
 import com.example.langchain4j.repository.mapper.FeedbackMapper;
 import lombok.extern.slf4j.Slf4j;

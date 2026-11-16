@@ -3,10 +3,11 @@ package com.example.langchain4j.controller;
 import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.response.ApiResponse;
-import com.example.langchain4j.dto.ChatRequest;
-import com.example.langchain4j.dto.ChatResponse;
-import com.example.langchain4j.dto.MessageDto;
-import com.example.langchain4j.dto.ResumeRequest;
+import com.example.langchain4j.dto.request.ChatRequest;
+import com.example.langchain4j.dto.request.ConfirmRequest;
+import com.example.langchain4j.dto.request.ResumeRequest;
+import com.example.langchain4j.dto.response.ChatResponse;
+import com.example.langchain4j.dto.response.MessageDto;
 import com.example.langchain4j.service.AgentService;
 import com.example.langchain4j.service.ConversationService;
 import jakarta.validation.Valid;
@@ -47,6 +48,15 @@ public class AgentController {
     @PostMapping("/chat")
     public ApiResponse<ChatResponse> chat(@Valid @RequestBody ChatRequest request) {
         return ApiResponse.success(agentService.chat(request));
+    }
+
+    /**
+     * 确认写操作：consumes 上一轮 chat 返回的 confirmationId，approved=false 表示取消。
+     * 确认令牌一次性使用，过期或重复提交返回 404 业务码。
+     */
+    @PostMapping("/confirm")
+    public ApiResponse<ChatResponse> confirm(@Valid @RequestBody ConfirmRequest request) {
+        return ApiResponse.success(agentService.confirm(request));
     }
 
     /**

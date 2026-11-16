@@ -93,6 +93,23 @@ public class AgentMetrics {
                 .increment();
     }
 
+    /**
+     * 记录一次工具调用。
+     *
+     * @param tool    工具名（标签值，防高基数）
+     * @param success 是否成功
+     * @param costMs  耗时（毫秒）
+     */
+    public void recordToolCall(String tool, boolean success, long costMs) {
+        registry.counter("tool.calls.total",
+                        "tool", safeLabel(tool),
+                        "outcome", success ? "success" : "failure")
+                .increment();
+        registry.timer("tool.call.duration",
+                        "tool", safeLabel(tool))
+                .record(costMs, TimeUnit.MILLISECONDS);
+    }
+
     /** 更新熔断器状态（打开=1 / 关闭=0） */
     public void setCircuitOpen(boolean open) {
         circuitOpen.set(open ? 1 : 0);

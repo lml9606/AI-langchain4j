@@ -1,9 +1,9 @@
 package com.example.langchain4j.controller;
 
 import com.example.langchain4j.common.response.ApiResponse;
-import com.example.langchain4j.dto.LoginRequest;
-import com.example.langchain4j.dto.LoginResponse;
-import com.example.langchain4j.dto.RegisterRequest;
+import com.example.langchain4j.dto.request.LoginRequest;
+import com.example.langchain4j.dto.request.RegisterRequest;
+import com.example.langchain4j.dto.response.LoginResponse;
 import com.example.langchain4j.service.AuthService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.PostMapping;

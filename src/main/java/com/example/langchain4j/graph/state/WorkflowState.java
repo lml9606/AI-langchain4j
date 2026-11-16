@@ -72,6 +72,32 @@ public class WorkflowState extends AgentState {
     public static final String ANSWER_MODE = "answerMode";
     /** 检索可见范围（服务层归一后入图：all/private；private 仅检索本人库） */
     public static final String VISIBILITY = "visibility";
+    /** 任务实体槽位（TaskPlanNode 写入：orderId/queryName 等，缺失时为空值） */
+    public static final String TASK_ENTITIES = "taskEntities";
+    /** 任务缺失槽位（TaskPlanNode 写入：非空时本轮转为追问，不调用工具） */
+    public static final String TASK_MISSING = "taskMissing";
+    /** 任务执行计划（TaskPlanNode 写入：步骤列表，每步含 tool/args/purpose） */
+    public static final String TASK_PLAN = "taskPlan";
+    /** 工具调用轨迹（TaskExecuteNode 写入：tool/args/success/summary/errorCode/costMs） */
+    public static final String TASK_TRACE = "taskTrace";
+    /** 工具证据（TaskExecuteNode 写入：type/sourceId/title/snippet/score，供回答引用） */
+    public static final String TASK_EVIDENCE = "taskEvidence";
+    /** 本轮回答置信度（TaskAnswerNode 写入：0~1 启发式评分） */
+    public static final String TASK_CONFIDENCE = "taskConfidence";
+    /** 置信度说明（TaskAnswerNode 写入：证据条数/失败次数等可解释理由） */
+    public static final String TASK_CONFIDENCE_REASON = "taskConfidenceReason";
+    /** 追问标记（TaskPlanNode 缺参时写入 true，路由直接收尾，不执行工具） */
+    public static final String TASK_CLARIFY = "taskClarify";
+    /** 待确认写操作（TaskPlanNode 写入：tool/args/purpose/risk） */
+    public static final String TASK_PENDING_ACTION = "taskPendingAction";
+    /** 写操作待确认标记（TaskPlanNode 写入 true，路由转确认节点） */
+    public static final String TASK_CONFIRMATION_REQUIRED = "taskConfirmationRequired";
+    /** 确认令牌 ID（TaskConfirmNode 写入，响应透出给前端） */
+    public static final String TASK_CONFIRMATION_ID = "taskConfirmationId";
+    /** 本次执行是否已获用户确认（确认执行图入参；普通规划阶段必须为 false） */
+    public static final String TASK_APPROVED = "taskApproved";
+    /** 写工具幂等键（确认执行图入参，等于 confirmationId） */
+    public static final String TASK_IDEMPOTENCY_KEY = "taskIdempotencyKey";
 
     // ---- 旧版平铺字段 key：仅用于升级前 checkpoint 的迁移与兼容读取，新数据一律写入嵌套子对象 ----
     private static final String LEGACY_VALIDATED = "validated";
@@ -173,10 +199,27 @@ public class WorkflowState extends AgentState {
      * @return 归零增量（不可变 Map，调用方合并进自身更新）
      */
     public static Map<String, Object> perTurnReset() {
-        return Map.of(
-                RETRY_COUNT, 0,
-                HOP, Hop.of(0, "", false),
-                ROOT_CAUSE, "");
+        // 步骤1：Map.of 最多 10 组键值，任务链路字段已超过该上限，改用可变 Map 逐项写入
+        Map<String, Object> reset = new LinkedHashMap<>();
+        // 步骤2：原有跨轮计数字段归零
+        reset.put(RETRY_COUNT, 0);
+        reset.put(HOP, Hop.of(0, "", false));
+        reset.put(ROOT_CAUSE, "");
+        // 步骤3：任务链路字段归零（防止断点恢复重入时残留上一轮计划/证据）
+        reset.put(TASK_ENTITIES, Map.of());
+        reset.put(TASK_MISSING, List.of());
+        reset.put(TASK_PLAN, List.of());
+        reset.put(TASK_TRACE, List.of());
+        reset.put(TASK_EVIDENCE, List.of());
+        reset.put(TASK_CONFIDENCE, 0.0);
+        reset.put(TASK_CONFIDENCE_REASON, "");
+        reset.put(TASK_CLARIFY, false);
+        reset.put(TASK_PENDING_ACTION, Map.of());
+        reset.put(TASK_CONFIRMATION_REQUIRED, false);
+        reset.put(TASK_CONFIRMATION_ID, "");
+        reset.put(TASK_APPROVED, false);
+        reset.put(TASK_IDEMPOTENCY_KEY, "");
+        return reset;
     }
 
     // ---- 类型安全的访问器（带默认值，防御 null） ----
@@ -395,6 +438,123 @@ public class WorkflowState extends AgentState {
     public String visibility() {
         String scope = value(VISIBILITY, "all");
         return "private".equalsIgnoreCase(scope) ? "private" : "all";
+    }
+
+    /** 任务实体槽位：checkpoint 反序列化后可能为 Map，统一转成字符串键值对 */
+    public Map<String, String> taskEntities() {
+        Object v = value(TASK_ENTITIES).orElse(null);
+        if (!(v instanceof Map<?, ?> m)) {
+            return Map.of();
+        }
+        Map<String, String> result = new LinkedHashMap<>(m.size());
+        m.forEach((k, val) -> result.put(String.valueOf(k), strOf(val)));
+        return result;
+    }
+
+    /** 任务缺失槽位：只接受 List，逐项转字符串并过滤空白 */
+    public List<String> taskMissingSlots() {
+        return stringList(TASK_MISSING);
+    }
+
+    /** 任务执行计划：只接受 List<Map>，逐项转字符串键值对（保留嵌套 args 对象） */
+    public List<Map<String, Object>> taskPlan() {
+        return mapList(TASK_PLAN);
+    }
+
+    /** 工具调用轨迹（结构同计划步骤，额外含 success/summary/errorCode/costMs） */
+    public List<Map<String, Object>> taskTrace() {
+        return mapList(TASK_TRACE);
+    }
+
+    /** 工具证据（引用来源，供响应透出与报告统计） */
+    public List<Map<String, Object>> taskEvidence() {
+        return mapList(TASK_EVIDENCE);
+    }
+
+    /** 本轮是否因缺参转为追问 */
+    public boolean taskClarify() {
+        return Boolean.parseBoolean(String.valueOf(value(TASK_CLARIFY).orElse(false)));
+    }
+
+    /** 待确认写操作：只接受 Map，类型漂移时返回空 Map */
+    public Map<String, Object> taskPendingAction() {
+        Object v = value(TASK_PENDING_ACTION).orElse(null);
+        if (!(v instanceof Map<?, ?> m)) {
+            return Map.of();
+        }
+        Map<String, Object> result = new LinkedHashMap<>(m.size());
+        m.forEach((k, val) -> result.put(String.valueOf(k), val));
+        return result;
+    }
+
+    /** 是否需要用户确认写操作 */
+    public boolean taskConfirmationRequired() {
+        return Boolean.parseBoolean(String.valueOf(value(TASK_CONFIRMATION_REQUIRED).orElse(false)));
+    }
+
+    /** 确认令牌 ID；缺省空串 */
+    public String taskConfirmationId() {
+        return value(TASK_CONFIRMATION_ID, "");
+    }
+
+    /** 本次执行是否已获确认（确认执行图入参） */
+    public boolean taskApproved() {
+        return Boolean.parseBoolean(String.valueOf(value(TASK_APPROVED).orElse(false)));
+    }
+
+    /** 写工具幂等键；缺省空串 */
+    public String taskIdempotencyKey() {
+        return value(TASK_IDEMPOTENCY_KEY, "");
+    }
+
+    /** 本轮回答置信度（0~1）；缺省 0 */
+    public double taskConfidence() {
+        Object v = value(TASK_CONFIDENCE).orElse(null);
+        if (v instanceof Number number) {
+            return number.doubleValue();
+        }
+        try {
+            return Double.parseDouble(String.valueOf(v).trim());
+        } catch (NumberFormatException ignored) {
+            return 0.0;
+        }
+    }
+
+    /** 置信度说明；缺省空串 */
+    public String taskConfidenceReason() {
+        return value(TASK_CONFIDENCE_REASON, "");
+    }
+
+    /** 通用字符串列表读取：容忍 checkpoint 反序列化后的类型漂移 */
+    private List<String> stringList(String key) {
+        Object v = value(key).orElse(null);
+        if (!(v instanceof List<?> list)) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>(list.size());
+        for (Object item : list) {
+            if (item != null && !String.valueOf(item).isBlank()) {
+                result.add(String.valueOf(item));
+            }
+        }
+        return result;
+    }
+
+    /** 通用 Map 列表读取：只保留 Map 元素，键统一转字符串（嵌套值保持原样） */
+    private List<Map<String, Object>> mapList(String key) {
+        Object v = value(key).orElse(null);
+        if (!(v instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Map<String, Object>> result = new ArrayList<>(list.size());
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> m) {
+                Map<String, Object> entry = new LinkedHashMap<>(m.size());
+                m.forEach((k, val) -> entry.put(String.valueOf(k), val));
+                result.add(entry);
+            }
+        }
+        return result;
     }
 
     // ---- 嵌套子对象取值防御工具（与访问器同哲学：容忍 checkpoint 反序列化后的类型漂移） ----

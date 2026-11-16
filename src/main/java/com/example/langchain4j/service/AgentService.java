@@ -5,8 +5,10 @@ import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.config.AgentProperties;
-import com.example.langchain4j.dto.ChatRequest;
-import com.example.langchain4j.dto.ChatResponse;
+import com.example.langchain4j.dto.request.ChatRequest;
+import com.example.langchain4j.dto.request.ConfirmRequest;
+import com.example.langchain4j.dto.response.ChatResponse;
+import com.example.langchain4j.graph.qa.nodes.IntentNode;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.guard.RateLimiter;
 import com.example.langchain4j.guard.SessionLock;
@@ -15,6 +17,8 @@ import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.ConversationSummary;
 import com.example.langchain4j.repository.entity.GraphExecution;
 import com.example.langchain4j.repository.entity.Message;
+import com.example.langchain4j.service.model.RewriteResult;
+import com.example.langchain4j.tool.runtime.ConfirmationService;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.GraphInput;
@@ -25,6 +29,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
@@ -58,6 +63,7 @@ public class AgentService {
     private static final String VISIBILITY_PRIVATE = "private";
 
     private final CompiledGraph<WorkflowState> agentGraph;
+    private final CompiledGraph<WorkflowState> taskConfirmGraph;
     private final RateLimiter rateLimiter;
     private final SessionLock sessionLock;
     private final ConversationService conversationService;
@@ -71,8 +77,10 @@ public class AgentService {
     private final AgentProperties properties;
     private final AgentMetrics metrics;
     private final PromptTemplateService promptTemplateService;
+    private final ConfirmationService confirmationService;
 
     public AgentService(@Qualifier("agentGraph") CompiledGraph<WorkflowState> agentGraph,
+                        @Qualifier("taskConfirmGraph") CompiledGraph<WorkflowState> taskConfirmGraph,
                         RateLimiter rateLimiter,
                         SessionLock sessionLock,
                         ConversationService conversationService,
@@ -85,8 +93,10 @@ public class AgentService {
                         ThreadPoolTaskExecutor agentExecutor,
                         AgentProperties properties,
                         AgentMetrics metrics,
-                        PromptTemplateService promptTemplateService) {
+                        PromptTemplateService promptTemplateService,
+                        ConfirmationService confirmationService) {
         this.agentGraph = agentGraph;
+        this.taskConfirmGraph = taskConfirmGraph;
         this.rateLimiter = rateLimiter;
         this.sessionLock = sessionLock;
         this.conversationService = conversationService;
@@ -100,6 +110,7 @@ public class AgentService {
         this.properties = properties;
         this.metrics = metrics;
         this.promptTemplateService = promptTemplateService;
+        this.confirmationService = confirmationService;
     }
 
     /**
@@ -151,8 +162,107 @@ public class AgentService {
         if (state.handoff()) {
             ticketService.createIfAbsent(userId, conversationId, query, state.rootCause());
         }
-        return ChatResponse.of(conversationId, state.result(), state.fallback(),
-                state.tokenUsage(), System.currentTimeMillis() - start, state.done(), state.rootCause());
+        ChatResponse response = ChatResponse.of(conversationId, state.result(), state.fallback(),
+                state.tokenUsage(), System.currentTimeMillis() - start, state.done(), state.rootCause(),
+                citations(state), confidence(state), confidenceReason(state),
+                toolTrace(state), state.taskClarify());
+        response.setPendingAction(pendingAction(state));
+        return response;
+    }
+
+    /**
+     * 确认写操作：一次性消费 confirmationId，校验归属后执行已规划好的工具计划。
+     * <p>
+     * 令牌先删后执行，执行失败不自动重试写工具：写操作结果可能是未知态，
+     * 应让用户重新发起规划，而不是用同一个令牌重复落库。
+     */
+    public ChatResponse confirm(ConfirmRequest request) {
+        long start = System.currentTimeMillis();
+        metrics.recordAgentRequest();
+        String userId = UserContext.require();
+        rateLimiter.checkAcquire(userId);
+        ConfirmationService.PendingAction action = confirmationService
+                .consume(request.getConfirmationId(), userId)
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND,
+                        "确认请求不存在、已过期或已使用，请重新发起操作"));
+        conversationService.requireOwnership(action.conversationId(), userId);
+
+        // 拒绝路径：只记录一条取消消息，不触碰业务数据
+        if (!request.isApproved()) {
+            return sessionLock.executeWithLock(action.conversationId(), () -> {
+                String answer = "已取消该操作，未对业务数据做任何修改。";
+                conversationService.saveMessage(action.conversationId(), Message.ROLE_USER,
+                        "取消确认：" + action.summary(), action.model(), null);
+                conversationService.saveMessage(action.conversationId(), Message.ROLE_ASSISTANT,
+                        answer, action.model(), null);
+                auditService.audit(action.conversationId(), "tool-confirm",
+                        GraphExecution.STATUS_SUCCESS, action.confirmationId(), "REJECTED",
+                        null, System.currentTimeMillis() - start);
+                return ChatResponse.of(action.conversationId(), answer, false, null,
+                        System.currentTimeMillis() - start, true, "");
+            });
+        }
+
+        // 确认路径：会话锁内保存确认消息 → 执行图 → 保存回答，保持一问一答闭环
+        return sessionLock.executeWithLock(action.conversationId(), () -> {
+            String confirmQuery = "确认执行：" + action.summary();
+            conversationService.saveMessage(action.conversationId(), Message.ROLE_USER,
+                    confirmQuery, action.model(), null);
+            WorkflowState state;
+            try {
+                state = invokeTaskConfirmGraph(action, userId, confirmQuery);
+            } catch (Exception e) {
+                try {
+                    conversationService.saveMessage(action.conversationId(), Message.ROLE_ASSISTANT,
+                            "确认操作执行失败，请稍后重新发起。", action.model(), null);
+                } catch (Exception ignored) {
+                    // 落库失败不覆盖原始执行异常
+                }
+                throw e;
+            }
+            conversationService.saveMessage(action.conversationId(), Message.ROLE_ASSISTANT,
+                    state.result(), action.model(), state.tokenUsage(), snapshotContext(state.context()));
+            auditService.audit(action.conversationId(), "tool-confirm",
+                    GraphExecution.STATUS_SUCCESS, action.confirmationId(), "APPROVED",
+                    null, System.currentTimeMillis() - start);
+            if (state.fallback()) {
+                metrics.recordFallback();
+            }
+            return ChatResponse.of(action.conversationId(), state.result(), state.fallback(),
+                    state.tokenUsage(), System.currentTimeMillis() - start, state.done(), state.rootCause(),
+                    citations(state), confidence(state), confidenceReason(state),
+                    toolTrace(state), state.taskClarify());
+        });
+    }
+
+    /** 确认执行图入参：只带已确认计划与授权标记，不重新走 intent/task_plan */
+    private WorkflowState invokeTaskConfirmGraph(ConfirmationService.PendingAction action,
+                                                 String userId,
+                                                 String query) {
+        Map<String, Object> inputs = new LinkedHashMap<>();
+        inputs.put(WorkflowState.QUERY, query);
+        inputs.put(WorkflowState.MODEL, action.model());
+        inputs.put(WorkflowState.USER_ID, userId);
+        inputs.put(WorkflowState.CONVERSATION_ID, action.conversationId());
+        // 置信度透出依赖 intent=task；确认图不跑 IntentNode，这里显式补齐
+        inputs.put(WorkflowState.INTENT, IntentNode.INTENT_TASK);
+        inputs.put(WorkflowState.TASK_PLAN, action.plan());
+        inputs.put(WorkflowState.TASK_APPROVED, true);
+        inputs.put(WorkflowState.TASK_IDEMPOTENCY_KEY, action.confirmationId());
+        inputs.put(WorkflowState.TASK_PENDING_ACTION, Map.of());
+        inputs.put(WorkflowState.TASK_CONFIRMATION_REQUIRED, false);
+        RunnableConfig config = RunnableConfig.builder().threadId(action.conversationId()).build();
+        try {
+            return taskConfirmGraph.invoke(inputs, config)
+                    .orElseThrow(() -> new BizException(ErrorCode.AGENT_EXECUTION_FAILED,
+                            "确认执行未返回结果"));
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("[agent] confirm execution failed, conversation={}", action.conversationId(), e);
+            throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED,
+                    "确认执行失败: " + rootMessage(e));
+        }
     }
 
     /**
@@ -231,6 +341,78 @@ public class AgentService {
         }
         return context.length() > CONTEXT_SNAPSHOT_MAX
                 ? context.substring(0, CONTEXT_SNAPSHOT_MAX) : context;
+    }
+
+    /** 任务证据转响应引用：结构来源于 ToolEvidence，字段缺失时安全降级为空串 */
+    private List<ChatResponse.Citation> citations(WorkflowState state) {
+        return state.taskEvidence().stream()
+                .map(item -> new ChatResponse.Citation(
+                        textOf(item.get("type"), "TOOL"),
+                        textOf(item.get("sourceId"), ""),
+                        textOf(item.get("title"), ""),
+                        textOf(item.get("snippet"), ""),
+                        doubleOf(item.get("score"))))
+                .toList();
+    }
+
+    /** 工具轨迹转响应结构；args 保持 Map 形态透出，便于前端展示模型实际调用参数 */
+    private List<ChatResponse.ToolCallTrace> toolTrace(WorkflowState state) {
+        return state.taskTrace().stream()
+                .map(item -> new ChatResponse.ToolCallTrace(
+                        textOf(item.get("tool"), ""),
+                        mapOf(item.get("args")),
+                        textOf(item.get("purpose"), ""),
+                        Boolean.TRUE.equals(item.get("success")),
+                        textOf(item.get("summary"), ""),
+                        textOf(item.get("errorCode"), ""),
+                        longOf(item.get("costMs"))))
+                .toList();
+    }
+
+    /** 待确认动作转响应卡片；无待确认动作返回 null */
+    private ChatResponse.PendingAction pendingAction(WorkflowState state) {
+        Map<String, Object> pending = state.taskPendingAction();
+        if (pending.isEmpty()) {
+            return null;
+        }
+        String confirmationId = textOf(pending.get("confirmationId"), "");
+        if (confirmationId.isBlank()) {
+            return null;
+        }
+        return new ChatResponse.PendingAction(
+                confirmationId,
+                textOf(pending.get("tool"), ""),
+                mapOf(pending.get("args")),
+                textOf(pending.get("summary"), ""),
+                textOf(pending.get("risk"), ""),
+                longOf(pending.get("expiresAt")));
+    }
+
+    private String textOf(Object value, String defaultValue) {
+        return value == null ? defaultValue : String.valueOf(value);
+    }
+
+    private double doubleOf(Object value) {
+        return value instanceof Number number ? number.doubleValue() : 0.0;
+    }
+
+    private long longOf(Object value) {
+        return value instanceof Number number ? number.longValue() : 0L;
+    }
+
+    /** 置信度只对任务链路有意义；知识问答等既有链路返回 null，避免误读为低置信 */
+    private Double confidence(WorkflowState state) {
+        return IntentNode.INTENT_TASK.equals(state.intent()) ? state.taskConfidence() : null;
+    }
+
+    /** 置信度说明与 confidence 同步：非任务轮为空串 */
+    private String confidenceReason(WorkflowState state) {
+        return IntentNode.INTENT_TASK.equals(state.intent()) ? state.taskConfidenceReason() : "";
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> mapOf(Object value) {
+        return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
     }
 
     /**

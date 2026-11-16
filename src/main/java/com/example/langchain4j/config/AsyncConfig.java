@@ -105,6 +105,29 @@ public class AsyncConfig {
     }
 
     /**
+     * 工具执行线程池：隔离工具调用（HTTP/DB）与图执行线程。
+     * 工具超时由 ToolExecutor 控制，队列满抛异常转为结构化失败结果。
+     * bean 名带 Pool 后缀：toolExecutor 已被 {@code ToolExecutor} 业务类占用（@Service 默认 bean 名）。
+     */
+    @Bean("toolExecutorPool")
+    public ThreadPoolTaskExecutor toolExecutorPool(AgentProperties properties, MeterRegistry registry) {
+        AgentProperties.Tool.ExecutorConfig exec = properties.getTool().getExecutor();
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(exec.getCorePoolSize());
+        executor.setMaxPoolSize(exec.getMaxPoolSize());
+        executor.setQueueCapacity(exec.getQueueCapacity());
+        executor.setKeepAliveSeconds(exec.getKeepAliveSeconds());
+        executor.setThreadNamePrefix("tool-exec-");
+        executor.setTaskDecorator(contextTaskDecorator());
+        executor.setRejectedExecutionHandler(abortPolicy("tool executor overloaded, queue full"));
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(30);
+        executor.initialize();
+        registerExecutorMetrics("tool", executor, registry);
+        return executor;
+    }
+
+    /**
      * 上下文传递装饰器：HTTP 线程的 traceId（MDC）与登录身份（UserContext）随任务带入工作线程。
      * 身份透传的必要性：图执行线程池内的知识检索按当前用户做数据隔离，
      * 不透传时图内检索会退化为“匿名仅见公共库”。

@@ -2,7 +2,7 @@ package com.example.langchain4j.controller;
 
 import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.common.response.ApiResponse;
-import com.example.langchain4j.dto.FeedbackRequest;
+import com.example.langchain4j.dto.request.FeedbackRequest;
 import com.example.langchain4j.repository.entity.Feedback;
 import com.example.langchain4j.repository.mapper.FeedbackMapper;
 import com.example.langchain4j.service.ConversationService;

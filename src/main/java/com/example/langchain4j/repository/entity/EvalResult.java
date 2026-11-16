@@ -29,6 +29,12 @@ public class EvalResult {
     private BigDecimal recallScore;
     /** 忠实度 0~1（LLM 判分；判分失败为空） */
     private BigDecimal faithfulness;
+    /** 工具选择准确率 0~1（任务场景；非任务为空） */
+    private BigDecimal toolSelectionScore;
+    /** 工具参数匹配率 0~1（任务场景；非任务为空） */
+    private BigDecimal argsScore;
+    /** 任务是否成功（工具/参数/追问行为均符合预期；非任务为空） */
+    private Boolean taskSuccess;
     /** SUCCESS / FAILED */
     private String status;
     private String errorMsg;

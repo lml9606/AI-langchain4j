@@ -24,7 +24,11 @@ import java.util.Set;
 public class VectorSearchService {
 
     private static final int DEFAULT_TOP_K = 3;
-    /** 最小相似度阈值：pgvector 余弦距离越接近 1 越相似，低于 0.3 视为不相关直接丢弃 */
+    /**
+     * 稠密通道最小相似度阈值（1 - 余弦距离，越大越相似）：低于该值视为不相关直接丢弃。
+     * 0.85 是 BGE-M3 下的严格档位，优先保证客服问答精度；若评测发现召回不足，
+     * 应基于评测集下调（如 0.6~0.7），不要盲调。
+     */
     private static final double DEFAULT_MIN_SCORE = 0.85;
     /** 词面相似度下限：滤掉零重叠的纯噪声命中（中文短查询三元组弱匹配），低于 0.05 不进融合池 */
     private static final double LEXICAL_MIN_SCORE = 0.05;

@@ -12,6 +12,9 @@
         <result property="answer" column="answer"/>
         <result property="recallScore" column="recall_score"/>
         <result property="faithfulness" column="faithfulness"/>
+        <result property="toolSelectionScore" column="tool_selection_score"/>
+        <result property="argsScore" column="args_score"/>
+        <result property="taskSuccess" column="task_success"/>
         <result property="status" column="status"/>
         <result property="errorMsg" column="error_msg"/>
         <result property="createdAt" column="created_at"/>
@@ -20,14 +23,17 @@
     <insert id="insert" parameterType="com.example.langchain4j.repository.entity.EvalResult"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_eval_result (run_id, case_id, question, retrieved_ctx, answer,
-                                    recall_score, faithfulness, status, error_msg)
+                                    recall_score, faithfulness, tool_selection_score,
+                                    args_score, task_success, status, error_msg)
         VALUES (#{runId}, #{caseId}, #{question}, #{retrievedCtx}, #{answer},
-                #{recallScore}, #{faithfulness}, #{status}, #{errorMsg})
+                #{recallScore}, #{faithfulness}, #{toolSelectionScore},
+                #{argsScore}, #{taskSuccess}, #{status}, #{errorMsg})
     </insert>
 
     <select id="selectByRunId" resultMap="EvalResultMap">
         SELECT id, run_id, case_id, question, retrieved_ctx, answer,
-               recall_score, faithfulness, status, error_msg, created_at
+               recall_score, faithfulness, tool_selection_score, args_score,
+               task_success, status, error_msg, created_at
         FROM ai_eval_result
         WHERE run_id = #{runId}
         ORDER BY id

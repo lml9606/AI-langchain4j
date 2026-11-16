@@ -62,6 +62,9 @@ public class AgentProperties {
     /** 简历优化工作流配置 */
     private Resume resume = new Resume();
 
+    /** 工具运行时配置（只读工具 + HTTP/SQL Provider 的最小配置） */
+    private Tool tool = new Tool();
+
     /** 单次图执行整体超时（秒）；超时即中止本轮：取消后台任务并返回降级应答，一问一答照常闭环，用户可直接重发 */
     private int executionTimeoutSeconds = 240;
 
@@ -239,5 +242,51 @@ public class AgentProperties {
     public static class Lock {
         /** 锁租约（秒）：必须大于 executionTimeoutSeconds 与 resume.timeoutSeconds，否则任务未结束锁先过期 */
         private int leaseSeconds = 300;
+    }
+
+    /**
+     * 工具运行时配置：本版本只开放只读工具，写工具默认拒绝。
+     */
+    @Data
+    public static class Tool {
+        /** 全局只读开关：true 时任何 WRITE/DANGEROUS 工具都会被执行器拒绝 */
+        private boolean readOnly = true;
+        /** 写工具白名单：即使 readOnly=false，也只允许这里声明的写工具执行 */
+        private List<String> allowedWriteTools = List.of();
+        /** 工具默认超时（毫秒），工具定义未显式配置时使用 */
+        private int timeoutMs = 3000;
+        /** 单用户每分钟工具调用上限（Redis 固定窗口，多实例共享计数） */
+        private int maxCallsPerMinute = 20;
+        /** 单个任务最多执行计划步骤数（防模型输出超长计划导致成本失控） */
+        private int maxStepsPerTask = 3;
+        /** 工具执行线程池 */
+        private ExecutorConfig executor = new ExecutorConfig();
+        /** HTTP 只读工具配置 */
+        private Http http = new Http();
+        /** 写操作人工确认配置 */
+        private Confirmation confirmation = new Confirmation();
+
+        @Data
+        public static class ExecutorConfig {
+            private int corePoolSize = 4;
+            private int maxPoolSize = 8;
+            private int queueCapacity = 100;
+            private int keepAliveSeconds = 60;
+        }
+
+        @Data
+        public static class Http {
+            /** 工具目标服务地址；本地默认指向应用内的 mock 接口 */
+            private String baseUrl = "http://localhost:8081";
+            /** 允许访问的域名白名单，防 SSRF */
+            private List<String> allowedHosts = List.of("localhost", "127.0.0.1");
+            private int timeoutMs = 3000;
+        }
+
+        @Data
+        public static class Confirmation {
+            /** 确认令牌有效期（秒）：过期后必须重新规划，避免陈旧操作被执行 */
+            private int ttlSeconds = 300;
+        }
     }
 }

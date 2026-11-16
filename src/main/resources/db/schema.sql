@@ -133,12 +133,21 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_content_trgm
 -- 评测用例表（离线回归集：问题 + 期望关键词/参考答案；enabled 控制是否参与评测）
 CREATE TABLE IF NOT EXISTS ai_eval_case (
     id              BIGSERIAL PRIMARY KEY,
+    scenario        VARCHAR(32) NOT NULL DEFAULT 'knowledge_qa', -- 场景：knowledge_qa / task
     question        TEXT    NOT NULL,                   -- 评测问题
     keywords        TEXT,                               -- 期望关键词（JSON 数组字符串，召回评测命中判断）
     expected_answer TEXT,                               -- 参考答案（忠实度评测参考，可空）
+    expected_tools  TEXT,                               -- 期望工具（JSON 数组，任务场景工具选择评测）
+    expected_args   TEXT,                               -- 期望参数（JSON 对象：tool -> args，任务场景参数评测）
+    expect_clarify  BOOLEAN,                            -- 期望是否缺参追问（任务场景，可空表示不校验）
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 存量库迁移：评测用例补任务场景字段（幂等）
+ALTER TABLE ai_eval_case ADD COLUMN IF NOT EXISTS scenario VARCHAR(32) NOT NULL DEFAULT 'knowledge_qa';
+ALTER TABLE ai_eval_case ADD COLUMN IF NOT EXISTS expected_tools TEXT;
+ALTER TABLE ai_eval_case ADD COLUMN IF NOT EXISTS expected_args TEXT;
+ALTER TABLE ai_eval_case ADD COLUMN IF NOT EXISTS expect_clarify BOOLEAN;
 
 -- 评测结果表（runEval 每批一个 run_id，每用例一行；核心指标：召回率 + 忠实度）
 CREATE TABLE IF NOT EXISTS ai_eval_result (
@@ -150,10 +159,17 @@ CREATE TABLE IF NOT EXISTS ai_eval_result (
     answer         TEXT,                                -- 基于检索上下文生成的答案
     recall_score   NUMERIC(5,4),                        -- 召回率 0~1（期望关键词在检索上下文命中比例；无关键词为空）
     faithfulness   NUMERIC(5,4),                        -- 忠实度 0~1（LLM 判分；判分失败为空）
+    tool_selection_score NUMERIC(5,4),                  -- 工具选择准确率 0~1（任务场景；非任务为空）
+    args_score     NUMERIC(5,4),                        -- 工具参数匹配率 0~1（任务场景；非任务为空）
+    task_success   BOOLEAN,                             -- 任务是否成功（工具/参数/追问行为均符合预期）
     status         VARCHAR(16) NOT NULL,                -- SUCCESS / FAILED
     error_msg      TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 存量库迁移：评测结果补任务指标字段（幂等）
+ALTER TABLE ai_eval_result ADD COLUMN IF NOT EXISTS tool_selection_score NUMERIC(5,4);
+ALTER TABLE ai_eval_result ADD COLUMN IF NOT EXISTS args_score NUMERIC(5,4);
+ALTER TABLE ai_eval_result ADD COLUMN IF NOT EXISTS task_success BOOLEAN;
 CREATE INDEX IF NOT EXISTS idx_eval_result_run ON ai_eval_result (run_id, id);
 CREATE INDEX IF NOT EXISTS idx_eval_result_created ON ai_eval_result (created_at DESC);
 
@@ -242,3 +258,72 @@ CREATE TABLE IF NOT EXISTS ai_user_resume (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ============================================================
+-- 通用任务 Agent 演示数据（仅用于只读工具链路的本地演示）
+-- 账号说明：示例数据归属用户名 demo；注册 demo 后登录即可查询到以下订单/退款
+-- ============================================================
+CREATE TABLE IF NOT EXISTS ai_demo_order (
+    order_id       VARCHAR(64) PRIMARY KEY,
+    owner_user_id  VARCHAR(64) NOT NULL,                 -- 数据归属用户（与 JWT subject 一致）
+    status         VARCHAR(32) NOT NULL,                 -- PAID / SHIPPED / REFUND_FAILED 等
+    amount         NUMERIC(12,2) NOT NULL DEFAULT 0,
+    paid_at        TIMESTAMPTZ,
+    cancelled_at   TIMESTAMPTZ,                          -- 取消时间（写工具写入）
+    cancel_reason  TEXT,                                 -- 取消原因
+    cancel_request_id VARCHAR(64),                       -- 确认幂等键（同一确认只改一次）
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- 兼容已存在的旧表：CREATE TABLE IF NOT EXISTS 不会补列，这里显式补齐
+ALTER TABLE ai_demo_order ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
+ALTER TABLE ai_demo_order ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
+ALTER TABLE ai_demo_order ADD COLUMN IF NOT EXISTS cancel_request_id VARCHAR(64);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_demo_order_cancel_request
+    ON ai_demo_order (cancel_request_id) WHERE cancel_request_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_demo_order_owner ON ai_demo_order (owner_user_id, order_id);
+
+CREATE TABLE IF NOT EXISTS ai_demo_refund (
+    refund_id      VARCHAR(64) PRIMARY KEY,
+    order_id       VARCHAR(64) NOT NULL,
+    owner_user_id  VARCHAR(64) NOT NULL,
+    status         VARCHAR(32) NOT NULL,                 -- SUCCESS / FAILED / PROCESSING
+    fail_reason    TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_demo_refund_owner ON ai_demo_refund (owner_user_id, order_id);
+
+INSERT INTO ai_demo_order (order_id, owner_user_id, status, amount, paid_at)
+VALUES ('A1001', 'demo', 'PAID', 199.00, '2026-11-10 10:15:00+08'),
+       ('A1002', 'demo', 'REFUND_FAILED', 89.90, '2026-11-08 16:40:00+08'),
+       ('A1003', 'demo', 'SHIPPED', 328.00, '2026-11-12 09:05:00+08')
+ON CONFLICT (order_id) DO NOTHING;
+
+INSERT INTO ai_demo_refund (refund_id, order_id, owner_user_id, status, fail_reason)
+VALUES ('R2001', 'A1002', 'demo', 'FAILED', '原支付渠道已超过退款有效期'),
+       ('R2002', 'A1001', 'demo', 'SUCCESS', NULL)
+ON CONFLICT (refund_id) DO NOTHING;
+
+-- 任务场景评测用例（幂等：按 question 去重；工具与参数均来自演示数据）
+INSERT INTO ai_eval_case (scenario, question, expected_tools, expected_args, expect_clarify)
+SELECT 'task', '查一下订单 A1001 的状态', '["query_business_data"]',
+       '{"query_business_data":{"queryName":"order_status","orderId":"A1001"}}', FALSE
+WHERE NOT EXISTS (SELECT 1 FROM ai_eval_case WHERE question = '查一下订单 A1001 的状态');
+
+INSERT INTO ai_eval_case (scenario, question, expected_tools, expected_args, expect_clarify)
+SELECT 'task', '订单 A1002 退款为什么失败', '["query_business_data"]',
+       '{"query_business_data":{"queryName":"refund_record","orderId":"A1002"}}', FALSE
+WHERE NOT EXISTS (SELECT 1 FROM ai_eval_case WHERE question = '订单 A1002 退款为什么失败');
+
+INSERT INTO ai_eval_case (scenario, question, expected_tools, expected_args, expect_clarify)
+SELECT 'task', '帮我查一下订单状态', '[]', '{}', TRUE
+WHERE NOT EXISTS (SELECT 1 FROM ai_eval_case WHERE question = '帮我查一下订单状态');
+
+INSERT INTO ai_eval_case (scenario, question, expected_tools, expected_args, expect_clarify)
+SELECT 'task', '取消订单 A1001', '["cancel_order"]',
+       '{"cancel_order":{"orderId":"A1001"}}', FALSE
+WHERE NOT EXISTS (SELECT 1 FROM ai_eval_case WHERE question = '取消订单 A1001');
+
+INSERT INTO ai_eval_case (scenario, question, expected_tools, expected_args, expect_clarify)
+SELECT 'task', '通过接口查订单 A1003 的详情', '["query_order_api"]',
+       '{"query_order_api":{"orderId":"A1003"}}', FALSE
+WHERE NOT EXISTS (SELECT 1 FROM ai_eval_case WHERE question = '通过接口查订单 A1003 的详情');

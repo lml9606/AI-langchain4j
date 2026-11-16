@@ -2,6 +2,7 @@ package com.example.langchain4j.service;
 
 import com.example.langchain4j.repository.entity.ConversationSummary;
 import com.example.langchain4j.repository.mapper.SummaryMapper;
+import com.example.langchain4j.service.model.RewriteResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 

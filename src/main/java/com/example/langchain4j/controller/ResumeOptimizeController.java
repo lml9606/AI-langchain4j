@@ -1,10 +1,10 @@
 package com.example.langchain4j.controller;
 
 import com.example.langchain4j.common.response.ApiResponse;
-import com.example.langchain4j.dto.ResumeOptimizeRequest;
-import com.example.langchain4j.dto.ResumeOptimizeResponse;
-import com.example.langchain4j.dto.ResumeProfileRequest;
-import com.example.langchain4j.dto.ResumeRevisionSummary;
+import com.example.langchain4j.dto.request.ResumeOptimizeRequest;
+import com.example.langchain4j.dto.request.ResumeProfileRequest;
+import com.example.langchain4j.dto.response.ResumeOptimizeResponse;
+import com.example.langchain4j.dto.response.ResumeRevisionSummary;
 import com.example.langchain4j.graph.resume.model.ResumePromptPresets;
 import com.example.langchain4j.repository.entity.UserResume;
 import com.example.langchain4j.service.ResumeOptimizeService;

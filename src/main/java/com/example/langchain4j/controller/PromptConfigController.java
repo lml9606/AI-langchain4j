@@ -4,7 +4,7 @@ import com.example.langchain4j.common.auth.RequireRole;
 import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.common.auth.UserRole;
 import com.example.langchain4j.common.response.ApiResponse;
-import com.example.langchain4j.dto.PromptSaveRequest;
+import com.example.langchain4j.dto.request.PromptSaveRequest;
 import com.example.langchain4j.repository.entity.PromptConfig;
 import com.example.langchain4j.service.PromptTemplateService;
 import jakarta.validation.Valid;

@@ -11,13 +11,14 @@ public final class PromptTemplates {
     /** 意图识别：要求 JSON 输出，解析失败由代码降级为默认意图 */
     public static final String INTENT_CLASSIFY_SYSTEM = """
             你是一个意图分类器。根据用户输入，输出严格的 JSON，格式如下：
-            {"intent": "code_generate" | "knowledge_qa" | "resume_optimize" | "chitchat" | "reject", "reason": "简短理由"}
+            {"intent": "code_generate" | "knowledge_qa" | "task" | "resume_optimize" | "chitchat" | "reject", "reason": "简短理由"}
             分类规则：
             1. code_generate：用户希望编写/修改/解释代码；
             2. resume_optimize：用户希望优化/修改/完善简历（如"帮我优化简历"、"改下我的简历"）；
-            3. knowledge_qa：一般知识问答、概念解释、文档问题；
-            4. chitchat：打招呼、问候、致谢、告别等社交性闲聊（如"你好"、"谢谢你"、"再见"），不含具体业务诉求；
-            5. reject：包含违法、色情、暴力、人身攻击、明显与工作无关的内容。
+            3. task：需要调用工具查询业务数据才能回答，如查询某笔订单状态、退款记录、订单详情（含订单号/单号）；
+            4. knowledge_qa：一般知识问答、概念解释、制度流程等文档问题，不需要查询具体业务数据；
+            5. chitchat：打招呼、问候、致谢、告别等社交性闲聊（如"你好"、"谢谢你"、"再见"），不含具体业务诉求；
+            6. reject：包含违法、色情、暴力、人身攻击、明显与工作无关的内容。
             只输出 JSON，不要输出任何其他内容。
             """;
 
@@ -310,5 +311,43 @@ public final class PromptTemplates {
     public static final String RESUME_OPTIMIZE_STRICT_JSON_NOTE = """
 
             上一次输出不是合法 JSON。请严格只输出一个 JSON 对象，不要任何解释文字、引号或代码围栏。
+            """;
+
+    /**
+     * 通用任务规划：抽取实体槽位 + 判断缺失参数 + 生成可校验的工具调用计划。
+     * 只输出 JSON；工具名必须来自调用方给出的工具清单，禁止臆造。
+     */
+    public static final String TASK_PLAN_SYSTEM = """
+            你是任务规划器。根据用户请求和可用工具清单，输出严格 JSON，不要输出任何解释文字或代码围栏。
+
+            JSON 形状：
+            {"entities":{"orderId":"从用户输入抽取的订单号，没有则空串"},
+             "missing":["缺少的必填槽位名"],
+             "steps":[{"tool":"工具名","args":{"参数名":"参数值"},"purpose":"这一步要查什么"}]}
+
+            规则：
+            1. 只能使用工具清单中存在的工具名，禁止臆造工具；
+            2. 缺少查询必需参数（如 orderId）时，missing 填槽位名，steps 返回空数组；
+            3. 用户没有说清要查订单状态还是退款记录时，可用一个步骤同时查订单状态，必要时再查退款记录；
+            4. steps 最多 %d 步，参数值必须来自用户输入或已抽取实体，禁止编造订单号；
+            5. 用户问的是通用知识/制度流程而不是具体业务数据时，不要规划业务查询工具；
+            6. sideEffect=WRITE 的工具会先要求用户确认，不会直接执行；一次计划最多包含一个 WRITE 步骤。
+            只输出 JSON。
+            """;
+
+    /** 任务执行后的最终回答：只基于工具证据，不得编造；引用编号由系统追加 */
+    public static final String TASK_ANSWER_SYSTEM = """
+            你是业务助手。请只根据下面给出的工具执行结果回答用户问题。
+            要求：
+            1. 不得编造工具结果中没有的信息；结果为空时明确说明未查询到；
+            2. 先给结论，再给关键依据，简洁清楚，使用 Markdown；
+            3. 工具失败时说明失败原因并给出下一步建议，不要假装查询成功；
+            4. 不要在正文末尾自行编造参考来源，系统会统一追加证据清单。
+            """;
+
+    /** 缺参追问模板：%s = 中文槽位说明 */
+    public static final String TASK_CLARIFY_ANSWER = """
+            为了准确查询，还需要您补充：%s。
+            请补充后我再为您处理。
             """;
 }

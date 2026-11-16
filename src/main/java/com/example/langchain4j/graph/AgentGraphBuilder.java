@@ -1,18 +1,22 @@
 package com.example.langchain4j.graph;
 
 import com.example.langchain4j.config.AgentProperties;
-import com.example.langchain4j.graph.edges.Router;
-import com.example.langchain4j.graph.nodes.DecomposeNode;
-import com.example.langchain4j.graph.nodes.EntryNode;
-import com.example.langchain4j.graph.nodes.FallbackNode;
-import com.example.langchain4j.graph.nodes.FinalizeNode;
-import com.example.langchain4j.graph.nodes.GenerateNode;
-import com.example.langchain4j.graph.nodes.HandoffNode;
-import com.example.langchain4j.graph.nodes.HopCheckNode;
-import com.example.langchain4j.graph.nodes.IntentNode;
-import com.example.langchain4j.graph.nodes.RetrievalNode;
-import com.example.langchain4j.graph.nodes.ResumeTaskNode;
-import com.example.langchain4j.graph.nodes.ValidateNode;
+import com.example.langchain4j.graph.common.nodes.FinalizeNode;
+import com.example.langchain4j.graph.qa.edges.Router;
+import com.example.langchain4j.graph.qa.nodes.DecomposeNode;
+import com.example.langchain4j.graph.qa.nodes.EntryNode;
+import com.example.langchain4j.graph.qa.nodes.FallbackNode;
+import com.example.langchain4j.graph.qa.nodes.GenerateNode;
+import com.example.langchain4j.graph.qa.nodes.HandoffNode;
+import com.example.langchain4j.graph.qa.nodes.HopCheckNode;
+import com.example.langchain4j.graph.qa.nodes.IntentNode;
+import com.example.langchain4j.graph.qa.nodes.RetrievalNode;
+import com.example.langchain4j.graph.qa.nodes.ValidateNode;
+import com.example.langchain4j.graph.resume.nodes.ResumeTaskNode;
+import com.example.langchain4j.graph.task.nodes.TaskAnswerNode;
+import com.example.langchain4j.graph.task.nodes.TaskConfirmNode;
+import com.example.langchain4j.graph.task.nodes.TaskExecuteNode;
+import com.example.langchain4j.graph.task.nodes.TaskPlanNode;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.graph.state.WorkflowStateSerializer;
 import org.bsc.langgraph4j.CompileConfig;
@@ -38,6 +42,8 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
  *        （entry 校验失败 → 直接 fallback，跳过 intent，省一次 LLM 调用）
  *        （代码生成意图跳过 decompose/hopCheck，直接 retrieval → generate）
  *        （闲聊意图 chitchat 跳过 decompose/retrieval/hopCheck，直接 generate → validate）
+ *        （任务意图 task 走 task_plan → task_execute → task_answer → finalize，
+ *          缺参时 task_plan 直接产出追问并跳 finalize，不调用工具）
  *        （检索无结果：知识问答先经多跳换问法补查，仍空才转人工，不进入 LLM 生成）
  * <p>
  * 说明：
@@ -61,6 +67,10 @@ public class AgentGraphBuilder {
     public static final String NODE_FALLBACK = "fallback";
     public static final String NODE_HANDOFF = "handoff";
     public static final String NODE_RESUME_TASK = "resume_task";
+    public static final String NODE_TASK_PLAN = "task_plan";
+    public static final String NODE_TASK_CONFIRM = "task_confirm";
+    public static final String NODE_TASK_EXECUTE = "task_execute";
+    public static final String NODE_TASK_ANSWER = "task_answer";
     public static final String NODE_FINALIZE = "finalize";
 
     private final StateSerializer<WorkflowState> stateSerializer;
@@ -75,6 +85,10 @@ public class AgentGraphBuilder {
     private final FallbackNode fallbackNode;
     private final HandoffNode handoffNode;
     private final ResumeTaskNode resumeTaskNode;
+    private final TaskPlanNode taskPlanNode;
+    private final TaskConfirmNode taskConfirmNode;
+    private final TaskExecuteNode taskExecuteNode;
+    private final TaskAnswerNode taskAnswerNode;
     private final FinalizeNode finalizeNode;
     private final AgentProperties properties;
 
@@ -90,6 +104,10 @@ public class AgentGraphBuilder {
                              FallbackNode fallbackNode,
                              HandoffNode handoffNode,
                              ResumeTaskNode resumeTaskNode,
+                             TaskPlanNode taskPlanNode,
+                             TaskConfirmNode taskConfirmNode,
+                             TaskExecuteNode taskExecuteNode,
+                             TaskAnswerNode taskAnswerNode,
                              FinalizeNode finalizeNode,
                              AgentProperties properties) {
         this.stateSerializer = stateSerializer;
@@ -104,6 +122,10 @@ public class AgentGraphBuilder {
         this.fallbackNode = fallbackNode;
         this.handoffNode = handoffNode;
         this.resumeTaskNode = resumeTaskNode;
+        this.taskPlanNode = taskPlanNode;
+        this.taskConfirmNode = taskConfirmNode;
+        this.taskExecuteNode = taskExecuteNode;
+        this.taskAnswerNode = taskAnswerNode;
         this.finalizeNode = finalizeNode;
         this.properties = properties;
     }
@@ -139,6 +161,14 @@ public class AgentGraphBuilder {
             graph.addNode(NODE_HANDOFF, node_async(handoffNode));
             // resume_task 简历优化触发：查档案 + 落草稿 + 提交后台异步执行，返回提示语（不调 LLM）
             graph.addNode(NODE_RESUME_TASK, node_async(resumeTaskNode));
+            // task_plan 任务规划：实体抽取 + 缺参判断 + 生成工具调用计划（缺参时直接产出追问）
+            graph.addNode(NODE_TASK_PLAN, node_async(taskPlanNode));
+            // task_confirm 写操作确认：生成一次性令牌与确认话术，不执行工具
+            graph.addNode(NODE_TASK_CONFIRM, node_async(taskConfirmNode));
+            // task_execute 工具执行：按计划逐步调用工具，收集轨迹与证据
+            graph.addNode(NODE_TASK_EXECUTE, node_async(taskExecuteNode));
+            // task_answer 任务回答：基于证据生成答复 + 系统追加引用 + 可解释置信度
+            graph.addNode(NODE_TASK_ANSWER, node_async(taskAnswerNode));
             // finalize 收尾：结果兜底组装（防空输出）+ 标记流程完成（持久化由 service 层负责）
             graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
 
@@ -157,8 +187,23 @@ public class AgentGraphBuilder {
                     Map.of(Router.TO_DECOMPOSE, NODE_DECOMPOSE,
                             Router.TO_RETRIEVAL, NODE_RETRIEVAL,
                             Router.TO_RESUME_TASK, NODE_RESUME_TASK,
+                            Router.TO_TASK_PLAN, NODE_TASK_PLAN,
                             Router.TO_GENERATE, NODE_GENERATE,
                             Router.TO_FALLBACK, NODE_FALLBACK));
+            // task_plan 计划路由：缺参 → finalize 追问；失败 → fallback；写工具 → task_confirm；只读 → task_execute
+            graph.addConditionalEdges(NODE_TASK_PLAN, edge_async(router.afterTaskPlan()),
+                    Map.of(Router.TO_FINALIZE, NODE_FINALIZE,
+                            Router.TO_TASK_CONFIRM, NODE_TASK_CONFIRM,
+                            Router.TO_TASK_EXECUTE, NODE_TASK_EXECUTE,
+                            Router.TO_FALLBACK, NODE_FALLBACK));
+            // task_confirm 确认路由：令牌创建失败 → fallback；成功 → finalize 透出 pendingAction
+            graph.addConditionalEdges(NODE_TASK_CONFIRM, edge_async(router.afterTaskConfirm()),
+                    Map.of(Router.TO_FINALIZE, NODE_FINALIZE,
+                            Router.TO_FALLBACK, NODE_FALLBACK));
+            // task_execute 直连 task_answer：无论工具成功与否都由回答节点统一解释
+            graph.addEdge(NODE_TASK_EXECUTE, NODE_TASK_ANSWER);
+            // task_answer 直连 finalize：结果非空由 finalize 兜底保证
+            graph.addEdge(NODE_TASK_ANSWER, NODE_FINALIZE);
             // resume_task 直连 finalize：触发结果提示语汇入收尾（一轮对话照常闭环）
             graph.addEdge(NODE_RESUME_TASK, NODE_FINALIZE);
             // decompose 直连 retrieval：分解完成（含降级单查询）无条件进入检索
@@ -211,7 +256,7 @@ public class AgentGraphBuilder {
      * 推导：图上有两个环 ——
      * 多跳环 hop_check→retrieval 每次占 2 个节点，最多 maxHops 轮；
      * 质检环 validate→retrieval→generate 每次占 3 个节点，最多 maxRetries 轮；
-     * 两者之和再加固定余量 10 覆盖 entry/intent/decompose/fallback/finalize 等线性节点开销。
+     * 两者之和再加固定余量 13 覆盖 entry/intent/decompose/fallback/finalize 与任务链路 3 节点开销。
      * 若路由配置错误导致死循环，达到上限后框架会抛异常中断，而非无限跑。
      */
     private int recursionLimit() {
@@ -219,6 +264,29 @@ public class AgentGraphBuilder {
         int maxHops = Math.max(1, properties.getMaxHops());
         int maxRetries = Math.max(1, properties.getMaxValidateRetries());
         // 步骤2：多跳环 2 节点 × 轮数 + 质检环 3 节点 × 轮数 + 10 个线性节点余量
-        return maxHops * 2 + maxRetries * 3 + 10;
+        // 步骤3：任务链路为线性 4 节点（plan/confirm-or-execute/answer/finalize 的最大路径），额外加 4 步余量
+        return maxHops * 2 + maxRetries * 3 + 14;
+    }
+
+    /**
+     * 确认执行图：用户确认后只跑“执行 → 回答 → 收尾”，不重新做意图识别和规划。
+     * <p>
+     * 使用独立编译图而不是主图 resume：确认阶段不写主会话 checkpoint，
+     * 也不会触发 EntryNode 的 perTurnReset 把已确认计划清空。
+     */
+    public CompiledGraph<WorkflowState> buildTaskConfirmGraph() {
+        StateGraph<WorkflowState> graph = new StateGraph<>(stateSerializer);
+        try {
+            graph.addNode(NODE_TASK_EXECUTE, node_async(taskExecuteNode));
+            graph.addNode(NODE_TASK_ANSWER, node_async(taskAnswerNode));
+            graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
+            graph.addEdge(START, NODE_TASK_EXECUTE);
+            graph.addEdge(NODE_TASK_EXECUTE, NODE_TASK_ANSWER);
+            graph.addEdge(NODE_TASK_ANSWER, NODE_FINALIZE);
+            graph.addEdge(NODE_FINALIZE, END);
+            return graph.compile(CompileConfig.builder().recursionLimit(10).build());
+        } catch (GraphStateException e) {
+            throw new IllegalStateException("Task confirm graph assembly failed", e);
+        }
     }
 }

@@ -44,13 +44,24 @@ public class RateLimiter {
     }
 
     /**
-     * 尝试获取一个令牌（计数 +1）。
+     * 尝试获取一个默认额度令牌（聊天等通用维度使用 agent.rate-limit.permits-per-minute）。
      *
-     * @param dimension 限流维度标识（如 userId、IP），将拼入 Redis key
+     * @param dimension 限流维度标识（如 userId、IP、tool:userId），将拼入 Redis key
      * @return true=放行（含限流禁用与 Redis 故障 fail-open）；false=拒绝（触发限流或 fail-closed）
      */
     public boolean tryAcquire(String dimension) {
-        if (!properties.getRateLimit().isEnabled()) {
+        return tryAcquire(dimension, properties.getRateLimit().getPermitsPerMinute());
+    }
+
+    /**
+     * 尝试获取一个指定额度令牌（工具等独立维度传入自己的每分钟上限）。
+     *
+     * @param dimension 限流维度标识，将拼入 Redis key
+     * @param limit     窗口内允许次数；非正数视为关闭该维度限流
+     * @return true=放行（含限流禁用与 Redis 故障 fail-open）；false=拒绝（触发限流或 fail-closed）
+     */
+    public boolean tryAcquire(String dimension, int limit) {
+        if (!properties.getRateLimit().isEnabled() || limit <= 0) {
             return true;
         }
         String key = KEY_PREFIX + sanitize(dimension);
@@ -59,7 +70,7 @@ public class RateLimiter {
             Long count = redissonClient.getScript().eval(
                     RScript.Mode.READ_WRITE, INCR_SCRIPT, RScript.ReturnType.INTEGER,
                     List.<Object>of(key), String.valueOf(WINDOW.getSeconds()));
-            boolean allowed = count == null || count <= properties.getRateLimit().getPermitsPerMinute();
+            boolean allowed = count == null || count <= limit;
             if (!allowed) {
                 metrics.recordRateLimited();
                 log.warn("[rate-limit] rejected, key={}, count={}", key, count);

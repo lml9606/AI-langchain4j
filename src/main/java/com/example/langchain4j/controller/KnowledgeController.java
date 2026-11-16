@@ -1,11 +1,11 @@
 package com.example.langchain4j.controller;
 
 import com.example.langchain4j.common.response.ApiResponse;
-import com.example.langchain4j.dto.KnowledgeBatchImportRequest;
-import com.example.langchain4j.dto.KnowledgeBatchImportResponse;
-import com.example.langchain4j.dto.KnowledgeHealthResponse;
-import com.example.langchain4j.dto.KnowledgeSearchResponse;
-import com.example.langchain4j.dto.KnowledgeUpdateRequest;
+import com.example.langchain4j.dto.request.KnowledgeBatchImportRequest;
+import com.example.langchain4j.dto.request.KnowledgeUpdateRequest;
+import com.example.langchain4j.dto.response.KnowledgeBatchImportResponse;
+import com.example.langchain4j.dto.response.KnowledgeHealthResponse;
+import com.example.langchain4j.dto.response.KnowledgeSearchResponse;
 import com.example.langchain4j.service.KnowledgeService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;

@@ -4,7 +4,7 @@ import com.example.langchain4j.common.auth.RequireRole;
 import com.example.langchain4j.common.auth.UserRole;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
-import com.example.langchain4j.common.guard.OutputGuardService;
+import com.example.langchain4j.guard.OutputGuardService;
 import com.example.langchain4j.common.response.ApiResponse;
 import com.example.langchain4j.repository.entity.SensitiveWord;
 import org.springframework.web.bind.annotation.DeleteMapping;
