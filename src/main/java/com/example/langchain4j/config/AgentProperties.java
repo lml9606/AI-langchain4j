@@ -4,6 +4,8 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
+
 /**
  * Agent 运行参数（application.properties 中 agent.* 前缀）。
  */
@@ -158,8 +160,12 @@ public class AgentProperties {
         private String apiKey = "";
         /** OpenAI 兼容协议接入地址 */
         private String baseUrl = "https://api.deepseek.com";
-        /** 模型名：deepseek-flash（V4.1-Flash，性价比）；需要更强推理可换 deepseek-v4-pro */
-        private String modelName = "deepseek-flash";
+        /**
+         * 支持的模型名列表（逗号分隔）：每个模型注册一个独立实例，共用同一 apiKey/baseUrl；
+         * 新增模型只需在列表加一个名字（模型名以 DeepSeek 官方 API 为准），零代码改动。
+         * 列表必须包含 agent.llm.default-model，否则启动期 ModelRegistry 校验 fail-fast。
+         */
+        private List<String> modelNames = List.of("deepseek-flash");
     }
 
     @Data

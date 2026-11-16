@@ -44,7 +44,8 @@ public class ValidateNode implements NodeAction<WorkflowState> {
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：规则层门禁（非空/最小长度/无模型自曝错误），失败 → 格式问题，回生成重试
-        if (!isValid(state.result())) {
+        //        闲聊意图放宽：寒暄回复本就短（如“你好！”），只拦空输出，防重试环白烧 token
+        if (!isValid(state.result(), state.intent())) {
             return fail(state, ISSUE_FORMAT, "输出为空、过于简短或格式错误");
         }
         // 步骤2：LLM 质检层 —— 仅知识问答意图启用（有检索上下文可对照；代码生成难自动校验，跳过省一次调用）
@@ -107,14 +108,14 @@ public class ValidateNode implements NodeAction<WorkflowState> {
         return text.length() <= MAX_REASON_LENGTH ? text : text.substring(0, MAX_REASON_LENGTH);
     }
 
-    private boolean isValid(String result) {
+    private boolean isValid(String result, String intent) {
         // 规则1：空/空白结果直接判无效
         if (result == null || result.isBlank()) {
             return false;
         }
-        // 规则2：去空白后长度低于最小阈值判无效（防模型只吐几个字）
+        // 规则2：去空白后长度低于最小阈值判无效（防模型只吐几个字）；闲聊意图只要求非空（回复天然短）
         String trimmed = result.trim();
-        if (trimmed.length() < MIN_RESULT_LENGTH) {
+        if (!IntentNode.INTENT_CHITCHAT.equals(intent) && trimmed.length() < MIN_RESULT_LENGTH) {
             return false;
         }
         // 规则3：模型自曝异常的输出（中/英道歉话术）视为无效

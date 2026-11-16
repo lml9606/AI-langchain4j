@@ -34,10 +34,4 @@ public class ChatRequest {
      */
     @Size(max = 16, message = "visibility 长度不能超过 16")
     private String visibility;
-
-    /**
-     * 用户 ID（已废弃）：身份以 JWT 为准（服务端从 Authorization 头解析，忽略此字段）；
-     * 保留仅为兼容旧客户端，可传任意值不影响鉴权结果。
-     */
-    private String userId;
 }

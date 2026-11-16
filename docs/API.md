@@ -28,7 +28,7 @@
 | GET | `/api/agent/state/{threadId}` | 查询 checkpoint 执行状态 | 路径参数 threadId |
 | GET | `/api/agent/conversation/{id}/messages` | 会话历史（默认 50 条，上限 200） | `?limit=50` |
 
-安全：会话归属校验（403 防水平越权）；`request.userId` 已废弃（服务端以 Token 身份为准）。
+安全：会话归属校验（403 防水平越权）；身份以 Token 为准（服务端从 Authorization 头解析，请求体不携带用户 ID）。
 
 ## 3. 知识库 `/api/knowledge`
 

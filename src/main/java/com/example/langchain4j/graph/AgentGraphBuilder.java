@@ -37,6 +37,7 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
  *        ⇄（Corrective RAG 有限重试环）→ fallback(兜底) → finalize(收尾) → END
  *        （entry 校验失败 → 直接 fallback，跳过 intent，省一次 LLM 调用）
  *        （代码生成意图跳过 decompose/hopCheck，直接 retrieval → generate）
+ *        （闲聊意图 chitchat 跳过 decompose/retrieval/hopCheck，直接 generate → validate）
  *        （检索无结果：知识问答先经多跳换问法补查，仍空才转人工，不进入 LLM 生成）
  * <p>
  * 说明：
@@ -150,11 +151,13 @@ public class AgentGraphBuilder {
                     Map.of(Router.TO_INTENT, NODE_INTENT,
                             Router.TO_FALLBACK, NODE_FALLBACK));
             // intent 意图路由：knowledge_qa → decompose 分解；code_generate → retrieval 直接检索；
+            //                 chitchat 闲聊 → generate 直接生成（不检索不转人工）；
             //                 reject/未知意图/异常 → fallback 兜底拒绝回答
             graph.addConditionalEdges(NODE_INTENT, edge_async(router.afterIntent()),
                     Map.of(Router.TO_DECOMPOSE, NODE_DECOMPOSE,
                             Router.TO_RETRIEVAL, NODE_RETRIEVAL,
                             Router.TO_RESUME_TASK, NODE_RESUME_TASK,
+                            Router.TO_GENERATE, NODE_GENERATE,
                             Router.TO_FALLBACK, NODE_FALLBACK));
             // resume_task 直连 finalize：触发结果提示语汇入收尾（一轮对话照常闭环）
             graph.addEdge(NODE_RESUME_TASK, NODE_FINALIZE);

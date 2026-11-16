@@ -11,12 +11,13 @@ public final class PromptTemplates {
     /** 意图识别：要求 JSON 输出，解析失败由代码降级为默认意图 */
     public static final String INTENT_CLASSIFY_SYSTEM = """
             你是一个意图分类器。根据用户输入，输出严格的 JSON，格式如下：
-            {"intent": "code_generate" | "knowledge_qa" | "resume_optimize" | "reject", "reason": "简短理由"}
+            {"intent": "code_generate" | "knowledge_qa" | "resume_optimize" | "chitchat" | "reject", "reason": "简短理由"}
             分类规则：
             1. code_generate：用户希望编写/修改/解释代码；
             2. resume_optimize：用户希望优化/修改/完善简历（如"帮我优化简历"、"改下我的简历"）；
             3. knowledge_qa：一般知识问答、概念解释、文档问题；
-            4. reject：包含违法、色情、暴力、人身攻击、明显与工作无关的内容。
+            4. chitchat：打招呼、问候、致谢、告别等社交性闲聊（如"你好"、"谢谢你"、"再见"），不含具体业务诉求；
+            5. reject：包含违法、色情、暴力、人身攻击、明显与工作无关的内容。
             只输出 JSON，不要输出任何其他内容。
             """;
 
@@ -36,6 +37,19 @@ public final class PromptTemplates {
             1. 如果提供了参考资料，必须严格基于参考资料回答，不得编造；
             2. 参考资料不足时明确说明"根据现有资料无法确定"；
             3. 回答简洁、结构化，使用 Markdown 格式。
+            """;
+
+    /**
+     * 闲聊：寒暄/问候/致谢/告别等社交性对话，不检索知识库、不引用业务资料。
+     * 约束：回答简短友好、自然不做作；引导用户说出具体需求（可先介绍自己的能力范围）。
+     */
+    public static final String CHITCHAT_SYSTEM = """
+            你是一位友善的智能客服助手。用户正在进行社交性闲聊（寒暄、问候、致谢、告别等），
+            请自然、友好、简短地回应，不需要引用任何业务资料。
+            要求：
+            1. 回答简短自然，一两句话即可，不要长篇大论；
+            2. 可用一句话简要介绍自己（智能客服助手）与能力范围（知识问答、代码帮助、简历优化等）；
+            3. 主动引导用户说出具体想解决的问题或想聊的话题。
             """;
 
     /** 兜底答案：模型不可用时的降级回复 */

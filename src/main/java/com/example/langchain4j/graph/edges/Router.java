@@ -54,7 +54,7 @@ public class Router {
         };
     }
 
-    /** 意图节点后：知识问答 → 问题分解（拆并列复合问题）；代码生成 → 直接检索（无需分解）；简历优化 → 触发节点；reject/异常 → 兜底 */
+    /** 意图节点后：知识问答 → 问题分解（拆并列复合问题）；代码生成 → 直接检索（无需分解）；简历优化 → 触发节点；闲聊 → 直接生成（不检索）；reject/异常 → 兜底 */
     public EdgeAction<WorkflowState> afterIntent() {
         return state -> {
             // 步骤1：error 非空（理论不常见，意图节点已降级）→ 兜底
@@ -69,11 +69,15 @@ public class Router {
             if (IntentNode.INTENT_RESUME_OPTIMIZE.equals(state.intent())) {
                 return TO_RESUME_TASK;
             }
-            // 步骤4：知识问答意图 → 问题分解节点（拆并列复合问题，单问题原样放行）
+            // 步骤4：闲聊意图 → 直接生成（寒暄不检索、不分解，也不走转人工；无上下文由生成端闲聊 prompt 兑住）
+            if (IntentNode.INTENT_CHITCHAT.equals(state.intent())) {
+                return TO_GENERATE;
+            }
+            // 步骤5：知识问答意图 → 问题分解节点（拆并列复合问题，单问题原样放行）
             if (IntentNode.INTENT_KNOWLEDGE_QA.equals(state.intent())) {
                 return TO_DECOMPOSE;
             }
-            // 步骤5：reject（非法内容）或未知意图 → 兜底拒绝回答
+            // 步骤6：reject（非法内容）或未知意图 → 兜底拒绝回答
             return TO_FALLBACK;
         };
     }

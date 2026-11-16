@@ -112,7 +112,7 @@ public class AgentService {
     public ChatResponse chat(ChatRequest request) {
         long start = System.currentTimeMillis();
         metrics.recordAgentRequest();
-        // 身份以 JWT 为准（JwtAuthFilter 已解析写入上下文；request.userId 已废弃不可信）
+        // 身份以 JWT 为准（JwtAuthFilter 已解析写入上下文，登录态不可伪造）
         String userId = UserContext.require();
         // 1. 限流（超限抛 429）
         rateLimiter.checkAcquire(userId);

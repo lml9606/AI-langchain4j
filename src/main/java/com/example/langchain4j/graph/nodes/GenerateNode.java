@@ -120,7 +120,11 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         if (IntentNode.INTENT_CODE_GENERATE.equals(intent)) {
             return promptTemplateService.resolve("CODE_GENERATE_SYSTEM", PromptTemplates.CODE_GENERATE_SYSTEM);
         }
-        // 步骤2：其余（含默认意图）→ 知识问答模板
+        // 步骤2：闲聊意图 → 闲聊模板（无检索上下文，引导用户说出需求）
+        if (IntentNode.INTENT_CHITCHAT.equals(intent)) {
+            return promptTemplateService.resolve("CHITCHAT_SYSTEM", PromptTemplates.CHITCHAT_SYSTEM);
+        }
+        // 步骤3：其余（含默认意图）→ 知识问答模板
         return promptTemplateService.resolve("KNOWLEDGE_QA_SYSTEM", PromptTemplates.KNOWLEDGE_QA_SYSTEM);
     }
 
