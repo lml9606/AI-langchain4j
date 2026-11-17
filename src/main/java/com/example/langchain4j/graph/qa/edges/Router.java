@@ -4,6 +4,7 @@ import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.qa.nodes.IntentNode;
 import com.example.langchain4j.graph.qa.nodes.ValidateNode;
 import com.example.langchain4j.graph.state.WorkflowState;
+import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.EdgeAction;
 import org.springframework.stereotype.Component;
 
@@ -11,6 +12,7 @@ import org.springframework.stereotype.Component;
  * 条件路由：决定节点执行后的下一跳。
  * 路由 key 与 {@link com.example.langchain4j.graph.AgentGraphBuilder} 中的 mapping 对应。
  */
+@Slf4j
 @Component
 public class Router {
 
@@ -44,8 +46,17 @@ public class Router {
 
     private final AgentProperties properties;
 
+    /** 注入 Agent 配置，用于重试和多跳上限判断。 */
     public Router(AgentProperties properties) {
         this.properties = properties;
+    }
+
+    /** 统一记录路由决策并返回下一跳 key，避免各分支重复写日志。 */
+    private String route(String stage, WorkflowState state, String target) {
+        log.info("[route] stage={}, intent={}, error={}, target={}",
+                stage, state.intent(),
+                state.error() != null && !state.error().isBlank(), target);
+        return target;
     }
 
     /** 守卫节点后：输入校验失败（空输入）直接兜底，跳过意图识别，省一次 LLM 调用 */
@@ -53,10 +64,10 @@ public class Router {
         return state -> {
             // 步骤1：error 非空说明守卫校验失败（如空输入）→ 直接兜底
             if (state.error() != null && !state.error().isBlank()) {
-                return TO_FALLBACK;
+                return route("entry", state, TO_FALLBACK);
             }
             // 步骤2：校验通过 → 进入意图识别
-            return TO_INTENT;
+            return route("entry", state, TO_INTENT);
         };
     }
 
@@ -65,30 +76,30 @@ public class Router {
         return state -> {
             // 步骤1：error 非空（理论不常见，意图节点已降级）→ 兜底
             if (state.error() != null && !state.error().isBlank()) {
-                return TO_FALLBACK;
+                return route("intent", state, TO_FALLBACK);
             }
             // 步骤2：代码生成意图 → 直接检索（无需分解，检索上下文对代码意图参考价值低）
             if (IntentNode.INTENT_CODE_GENERATE.equals(state.intent())) {
-                return TO_RETRIEVAL;
+                return route("intent", state, TO_RETRIEVAL);
             }
             // 步骤3：简历优化意图 → 触发节点（查档案 + 落草稿 + 提交后台异步执行，不进入检索/生成链路）
             if (IntentNode.INTENT_RESUME_OPTIMIZE.equals(state.intent())) {
-                return TO_RESUME_TASK;
+                return route("intent", state, TO_RESUME_TASK);
             }
             // 步骤3.5：任务型请求 → 任务规划（可能缺参追问，也可能直接生成工具计划）
             if (IntentNode.INTENT_TASK.equals(state.intent())) {
-                return TO_TASK_PLAN;
+                return route("intent", state, TO_TASK_PLAN);
             }
             // 步骤4：闲聊意图 → 直接生成（寒暄不检索、不分解，也不走转人工；无上下文由生成端闲聊 prompt 兑住）
             if (IntentNode.INTENT_CHITCHAT.equals(state.intent())) {
-                return TO_GENERATE;
+                return route("intent", state, TO_GENERATE);
             }
             // 步骤5：知识问答意图 → 问题分解节点（拆并列复合问题，单问题原样放行）
             if (IntentNode.INTENT_KNOWLEDGE_QA.equals(state.intent())) {
-                return TO_DECOMPOSE;
+                return route("intent", state, TO_DECOMPOSE);
             }
             // 步骤6：reject（非法内容）或未知意图 → 兜底拒绝回答
-            return TO_FALLBACK;
+            return route("intent", state, TO_FALLBACK);
         };
     }
 
@@ -97,18 +108,18 @@ public class Router {
         return state -> {
             // 步骤1：缺参追问已生成答案，直接收尾（不再调用工具）
             if (state.taskClarify()) {
-                return TO_FINALIZE;
+                return route("task-plan", state, TO_FINALIZE);
             }
             // 步骤2：规划失败（模型输出为空/无可用步骤）→ 兜底
             if (state.error() != null && !state.error().isBlank()) {
-                return TO_FALLBACK;
+                return route("task-plan", state, TO_FALLBACK);
             }
             // 步骤3：含写工具 → 生成确认令牌，等待用户确认后再执行
             if (state.taskConfirmationRequired()) {
-                return TO_TASK_CONFIRM;
+                return route("task-plan", state, TO_TASK_CONFIRM);
             }
             // 步骤4：纯只读计划 → 执行工具
-            return TO_TASK_EXECUTE;
+            return route("task-plan", state, TO_TASK_EXECUTE);
         };
     }
 
@@ -116,9 +127,9 @@ public class Router {
     public EdgeAction<WorkflowState> afterTaskConfirm() {
         return state -> {
             if (state.error() != null && !state.error().isBlank()) {
-                return TO_FALLBACK;
+                return route("task-confirm", state, TO_FALLBACK);
             }
-            return TO_FINALIZE;
+            return route("task-confirm", state, TO_FINALIZE);
         };
     }
 
@@ -134,14 +145,14 @@ public class Router {
         return state -> {
             // 步骤1：知识问答意图 → 多跳判断（首轮空上下文也进：换问法补查可能挽救，仍空由 afterHopCheck 闸门转人工）
             if (IntentNode.INTENT_KNOWLEDGE_QA.equals(state.intent())) {
-                return TO_HOP_CHECK;
+                return route("retrieval", state, TO_HOP_CHECK);
             }
             // 步骤2：代码生成空上下文 → 转人工（无改写补查环节，不进入 LLM 生成）
             if (state.context() == null || state.context().isBlank()) {
-                return TO_HANDOFF;
+                return route("retrieval", state, TO_HANDOFF);
             }
             // 步骤3：代码生成有资料 → 直接生成（无需多跳补全）
-            return TO_GENERATE;
+            return route("retrieval", state, TO_GENERATE);
         };
     }
 
@@ -153,14 +164,14 @@ public class Router {
         return state -> {
             // 步骤1：足够但上下文仍空（补查失败/fail-open 误判）→ 转人工，空资料不许进生成
             if (state.hop().sufficient() && (state.context() == null || state.context().isBlank())) {
-                return TO_HANDOFF;
+                return route("hop-check", state, TO_HANDOFF);
             }
             // 步骤2：HopCheckNode 写入的显式判定标记（足够/超限 → 生成，路由只读标记避免逻辑重复）
             if (state.hop().sufficient()) {
-                return TO_GENERATE;
+                return route("hop-check", state, TO_GENERATE);
             }
             // 步骤3：不足且未达上限 → 回检索节点，用下一跳查询补查
-            return TO_RETRIEVAL;
+            return route("hop-check", state, TO_RETRIEVAL);
         };
     }
 
@@ -169,10 +180,10 @@ public class Router {
         return state -> {
             // 步骤1：error 非空说明 LLM 生成失败 → 兜底
             if (state.error() != null && !state.error().isBlank()) {
-                return TO_FALLBACK;
+                return route("generate", state, TO_FALLBACK);
             }
             // 步骤2：生成成功 → 进入质量校验
-            return TO_VALIDATE;
+            return route("generate", state, TO_VALIDATE);
         };
     }
 
@@ -181,7 +192,7 @@ public class Router {
         return state -> {
             // 步骤1：读取 ValidateNode 写入的显式判定标记（路由只读标记，避免逻辑重复）
             if (state.validation().validated()) {
-                return TO_FINALIZE;
+                return route("validate", state, TO_FINALIZE);
             }
             // 步骤2：校验失败但重试次数未达上限 → 按失败原因分路由
             int maxRetries = Math.max(1, properties.getMaxValidateRetries());
@@ -189,13 +200,13 @@ public class Router {
                 // 2.1：质检发现回答与资料矛盾/编造（grounding）→ 回检索节点
                 //      （RetrievalNode 会用失败原因改写 query 重新检索，换一批上下文再生成）
                 if (ValidateNode.ISSUE_GROUNDING.equals(state.validation().issue())) {
-                    return TO_RETRIEVAL;
+                    return route("validate", state, TO_RETRIEVAL);
                 }
                 // 2.2：其余失败（格式问题等）→ 回生成节点重试
-                return TO_GENERATE;
+                return route("validate", state, TO_GENERATE);
             }
             // 步骤3：重试次数超限 → 放弃重试，兜底收尾
-            return TO_FALLBACK;
+            return route("validate", state, TO_FALLBACK);
         };
     }
 }

@@ -32,6 +32,7 @@ public class QueryRewriter {
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
 
+    /** 注入 LLM 网关与提示词服务。 */
     public QueryRewriter(LlmGateway llmGateway, PromptTemplateService promptTemplateService) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
@@ -48,6 +49,7 @@ public class QueryRewriter {
      */
     public RewriteResult rewrite(String query, List<Map<String, String>> history,
                                  List<String> topics, String model) {
+        long start = System.currentTimeMillis();
         // 步骤1：清洗原始 query（控制字符 + 首尾空白），空输入返回空串（entry 节点会兜底）
         String cleaned = clean(query);
         if (cleaned.isEmpty()) {
@@ -55,6 +57,8 @@ public class QueryRewriter {
         }
         // 步骤2：无历史短路 —— 没有上下文可参考，指代消解与话题归属都无意义，省一次 LLM 调用
         if (history == null || history.isEmpty()) {
+            log.debug("[rewrite] skipped, reason=no-history, queryLength={}, costMs={}",
+                    cleaned.length(), System.currentTimeMillis() - start);
             return RewriteResult.degrade(cleaned);
         }
         try {
@@ -65,6 +69,8 @@ public class QueryRewriter {
                     buildUserPrompt(cleaned, history, topics), "rewrite");
             // 截断/解析失败 → 降级返回原句（宁可失忆不可失败）
             if (node == null) {
+                log.warn("[rewrite] degraded, reason=parse, queryLength={}, history={}, costMs={}",
+                        cleaned.length(), history.size(), System.currentTimeMillis() - start);
                 return RewriteResult.degrade(cleaned);
             }
             // 步骤4：字段级容错（JsonNode 手取而非强类型反序列化），rewritten 与 topic 各自独立降级；
@@ -77,10 +83,15 @@ public class QueryRewriter {
             }
             // topic 防御：清洗后为空则视为未判断，由调用方段解析兜底
             String topic = clean(node.path("topic").asText(""));
+            log.info("[rewrite] done, queryLength={}, rewrittenLength={}, topicPresent={}, newTopic={}, history={}, costMs={}",
+                    cleaned.length(), rewritten.length(), !topic.isBlank(),
+                    node.path("newTopic").asBoolean(false), history.size(),
+                    System.currentTimeMillis() - start);
             return new RewriteResult(rewritten, topic, node.path("newTopic").asBoolean(false));
         } catch (Exception e) {
             // 步骤5：LLM 失败（超时/熔断等）→ 降级原句，不阻断主流程
-            log.warn("[rewrite] llm failed, fallback to original query: {}", e.getMessage());
+            log.warn("[rewrite] llm failed, queryLength={}, history={}, costMs={}, fallback: {}",
+                    cleaned.length(), history.size(), System.currentTimeMillis() - start, e.getMessage());
             return RewriteResult.degrade(cleaned);
         }
     }

@@ -125,10 +125,14 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_parent ON ai_knowledge_chunk (parent_id
 CREATE INDEX IF NOT EXISTS idx_knowledge_embedding
     ON ai_knowledge_chunk USING hnsw (embedding vector_cosine_ops);
 
--- 混合检索词面通道：pg_trgm 三元组相似度（中文无需分词；pgvector 官方镜像内置 contrib，开箱可用）
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-CREATE INDEX IF NOT EXISTS idx_knowledge_content_trgm
-    ON ai_knowledge_chunk USING gin (content gin_trgm_ops);
+-- 混合检索稀疏通道：稀疏向量列（jieba 分词 + log-TF 加权 + hashing trick → pgvector sparsevec，2^20 维槽位）；
+-- 与稠密语义向量双路召回 RRF 融合：稠密管"语义泛化"，稀疏管"专有名词/型号/缩写精确命中"
+ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS sparse_vector sparsevec(1048576);
+-- 稀疏向量 HNSW 索引（内积；稀疏向量均已 L2 归一化，内积即余弦相似度）
+CREATE INDEX IF NOT EXISTS idx_knowledge_sparse
+    ON ai_knowledge_chunk USING hnsw (sparse_vector sparsevec_ip_ops);
+-- 历史词面通道（pg_trgm GIN 索引）已由稀疏向量通道取代：删除旧索引避免双份维护开销（扩展本身保留）
+DROP INDEX IF EXISTS idx_knowledge_content_trgm;
 
 -- 评测用例表（离线回归集：问题 + 期望关键词/参考答案；enabled 控制是否参与评测）
 CREATE TABLE IF NOT EXISTS ai_eval_case (

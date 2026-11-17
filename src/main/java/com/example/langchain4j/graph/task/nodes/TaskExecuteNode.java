@@ -36,16 +36,20 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
 
     private final ToolExecutor toolExecutor;
 
+    /** 注入统一工具执行器。 */
     public TaskExecuteNode(ToolExecutor toolExecutor) {
         this.toolExecutor = toolExecutor;
     }
 
+    /** 按计划顺序调用工具，收集调用轨迹与证据；致命错误时提前停止。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         ToolContext context = new ToolContext(state.userId(), state.conversationId(),
                 state.taskApproved(), state.taskIdempotencyKey());
         List<Map<String, Object>> trace = new ArrayList<>();
         List<Map<String, Object>> evidence = new ArrayList<>();
+        log.info("[task-execute] start, planSteps={}, approved={}, conversation={}",
+                state.taskPlan().size(), state.taskApproved(), state.conversationId());
 
         // 步骤1：按计划顺序执行；每一步的结构化结果都写入 trace，成功步骤同时抽取证据
         for (Map<String, Object> step : state.taskPlan()) {
@@ -89,13 +93,16 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
             }
         }
         // 步骤2：返回轨迹与证据；不设置 error，回答节点会根据失败轨迹给出可解释答复
-        log.info("[task-execute] calls={}, evidence={}", trace.size(), evidence.size());
+        long successCalls = trace.stream().filter(item -> Boolean.TRUE.equals(item.get("success"))).count();
+        log.info("[task-execute] done, calls={}, success={}, evidence={}, approved={}",
+                trace.size(), successCalls, evidence.size(), state.taskApproved());
         return Map.of(
                 WorkflowState.TASK_TRACE, trace,
                 WorkflowState.TASK_EVIDENCE, evidence,
                 WorkflowState.ERROR, "");
     }
 
+    /** 截断文本，避免轨迹和证据中的摘要过长。 */
     private String truncate(String text, int max) {
         if (text == null) {
             return "";

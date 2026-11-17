@@ -15,6 +15,7 @@ import java.util.Map;
 @Component
 public class FinalizeNode implements NodeAction<WorkflowState> {
 
+    /** 收尾节点：保证结果非空并标记流程完成。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：读取生成结果
@@ -25,8 +26,9 @@ public class FinalizeNode implements NodeAction<WorkflowState> {
             result = "抱歉，未能生成有效回答，请稍后重试。";
         }
         // 步骤3：记录收尾结果（是否兜底 + 结果长度），方便追踪出口状态
-        log.info("[finalize] done, fallback={}, resultLength={}",
-                state.fallback(), result.length());
+        log.info("[finalize] done, intent={}, fallback={}, handoff={}, retryCount={}, hops={}, resultLength={}, rootCause={}",
+                state.intent(), state.fallback(), state.handoff(), state.retryCount(),
+                state.hop().count(), result.length(), state.rootCause());
         // 步骤4：返回增量更新：最终结果 + 流程完成标记
         return Map.of(
                 WorkflowState.RESULT, result,

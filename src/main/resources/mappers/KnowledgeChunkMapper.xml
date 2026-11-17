@@ -8,6 +8,7 @@
         <result property="content" column="content"/>
         <result property="embedding" column="embedding"
                 typeHandler="com.example.langchain4j.repository.typehandler.VectorTypeHandler"/>
+        <result property="sparseVector" column="sparse_vector"/>
         <result property="metadata" column="metadata"/>
         <result property="userId" column="user_id"/>
         <result property="parentId" column="parent_id"/>
@@ -19,10 +20,11 @@
 
     <insert id="insert" parameterType="com.example.langchain4j.repository.entity.KnowledgeChunk"
             useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO ai_knowledge_chunk (content, embedding, metadata, user_id, parent_id, chunk_type, title)
+        INSERT INTO ai_knowledge_chunk (content, embedding, sparse_vector, metadata, user_id, parent_id, chunk_type, title)
         VALUES (
             #{content},
             #{embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
+            #{sparseVector}::sparsevec,
             CAST(#{metadata} AS jsonb),
             #{userId},
             #{parentId},
@@ -44,20 +46,20 @@
     </select>
 
     <!--
-      词面检索（混合检索的词面通道）：pg_trgm word_similarity 按三元组相似度降序取 topK。
-      注意：WHERE 中直接用 word_similarity 函数无法走 GIN 索引（索引加速需 set_config 会话阈值 + <% 操作符），
-      小规模知识表全表扫描可接受；数据量大时改用操作符写法。
-      用户隔离：user_id IS NULL（公共库）或等于当前用户；#{userId} 为 null 时仅可见公共库（匿名默认）；
+      稀疏向量检索（混合检索的稀疏通道）：查询与块的共享词权重内积（L2 归一化后 = 余弦相似度）。
+      专有名词/型号/缩写等"词命中"信号强，与稠密语义通道互补；pgvector <#> 返回负内积（升序 = 最相似），
+      取负还原为正内积做阈值判定。用户隔离同 searchSimilar：user_id IS NULL（公共库）或等于当前用户；
       #{privateOnly}=true 时仅检索本人库（visibility=private）。
     -->
-    <select id="searchLexical" resultMap="KnowledgeChunkMap">
+    <select id="searchSparse" resultMap="KnowledgeChunkMap">
         SELECT id, content, embedding, metadata::text AS metadata, user_id,
-               parent_id, chunk_type, title, created_at
+               parent_id, chunk_type, title, created_at, sparse_vector::text AS sparse_vector
         FROM ai_knowledge_chunk
-        WHERE word_similarity(content, #{query}) &gt;= #{minScore}
+        WHERE sparse_vector IS NOT NULL
           AND chunk_type = 'CHILD'
+          AND (-(sparse_vector &lt;#&gt; CAST(#{querySparse} AS sparsevec))) &gt;= #{minScore}
           AND (user_id = #{userId} OR (NOT #{privateOnly} AND user_id IS NULL))
-        ORDER BY word_similarity(content, #{query}) DESC
+        ORDER BY sparse_vector &lt;#&gt; CAST(#{querySparse} AS sparsevec)
         LIMIT #{topK}
     </select>
 
@@ -70,12 +72,13 @@
       文档导入时把分块后的全部知识块一次落库，减少 DB 往返。
     -->
     <insert id="insertBatch">
-        INSERT INTO ai_knowledge_chunk (content, embedding, metadata, user_id, parent_id, chunk_type, title)
+        INSERT INTO ai_knowledge_chunk (content, embedding, sparse_vector, metadata, user_id, parent_id, chunk_type, title)
         VALUES
         <foreach collection="chunks" item="chunk" separator=",">
             (
                 #{chunk.content},
                 #{chunk.embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
+                #{chunk.sparseVector}::sparsevec,
                 CAST(#{chunk.metadata} AS jsonb),
                 #{chunk.userId},
                 #{chunk.parentId},
@@ -126,11 +129,12 @@
         ORDER BY id
     </select>
 
-    <!-- 更新内容 + 重嵌向量：SQL 层按 user_id 过滤（双保险防 TOCTOU 越权），公共库块无法命中 -->
+    <!-- 更新内容 + 重嵌向量（稠密/稀疏双向量同步重算；SQL 层按 user_id 过滤，双保险防 TOCTOU 越权，公共库块无法命中） -->
     <update id="updateContent">
         UPDATE ai_knowledge_chunk
         SET content = #{content},
             embedding = #{embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
+            sparse_vector = #{sparseVector}::sparsevec,
             metadata = CAST(#{metadata} AS jsonb),
             updated_at = now()
         WHERE id = #{id}

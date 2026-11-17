@@ -23,6 +23,7 @@ public class EntryNode implements NodeAction<WorkflowState> {
     /** 单条输入最大长度：超出部分直接截断，保护下游 token 开销（与 Controller @Size 一致，此处为图内兜底） */
     private static final int MAX_QUERY_LENGTH = 4000;
 
+    /** 入口节点：空输入兜底、控制字符清洗、超长截断与本轮状态初始化。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：读取用户输入
@@ -39,10 +40,14 @@ public class EntryNode implements NodeAction<WorkflowState> {
         String cleaned = query
                 .replaceAll("[\\p{Cntrl}]", " ")
                 .trim();
+        int originalLength = cleaned.length();
+        boolean truncated = cleaned.length() > MAX_QUERY_LENGTH;
         // 步骤4：超长截断 —— 超出上限的部分直接丢弃，保护下游 token 开销
         if (cleaned.length() > MAX_QUERY_LENGTH) {
             cleaned = cleaned.substring(0, MAX_QUERY_LENGTH);
         }
+        log.info("[entry] accepted, queryLength={}, source={}, truncated={}",
+                originalLength, state.rewrittenQuery().isBlank() ? "raw" : "rewritten", truncated);
         // 步骤5：返回增量更新：清洗后的输入 + 种入默认子查询（用清洗后 query 与改写句的有效组合；
         //        DecomposeNode 随后覆盖为分解结果，code_generate 跳过分解即用默认单查询）+ 跨轮计数归零 + 清空错误标记
         Map<String, Object> updates = new LinkedHashMap<>();

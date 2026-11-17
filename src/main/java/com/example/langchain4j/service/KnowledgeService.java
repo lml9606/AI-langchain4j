@@ -8,9 +8,12 @@ import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.request.KnowledgeBatchImportRequest;
 import com.example.langchain4j.dto.request.KnowledgeUpdateRequest;
 import com.example.langchain4j.dto.response.KnowledgeBatchImportResponse;
+import com.example.langchain4j.dto.response.KnowledgeFileImportResponse;
 import com.example.langchain4j.dto.response.KnowledgeHealthResponse;
 import com.example.langchain4j.dto.response.KnowledgeSearchResponse;
 import com.example.langchain4j.knowledge.EmbeddingService;
+import com.example.langchain4j.knowledge.KnowledgeFileParser;
+import com.example.langchain4j.knowledge.SparseEmbeddingService;
 import com.example.langchain4j.knowledge.VectorSearchService;
 import com.example.langchain4j.repository.entity.KnowledgeChunk;
 import com.example.langchain4j.repository.mapper.KnowledgeChunkMapper;
@@ -20,6 +23,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -58,25 +62,40 @@ public class KnowledgeService {
     private static final String TYPE_CHILD = "CHILD";
     /** 子块 content 标题前缀分隔符（方案 A：父标题拼进子块，解决父标题检索不到问题） */
     private static final String TITLE_SEPARATOR = "｜";
-    /** 标题行识别：Markdown 标题（#~######）或数字编号（1. / 1.1）或中文章节（第X章/节/部分） */
-    private static final Pattern TITLE_LINE = Pattern.compile(
-            "^\\s*(?:#{1,6}\\s+\\S|\\d+(?:\\.\\d+)*[、.．]\\s*\\S|第[一二三四五六七八九十百千\\d]+[章节篇部]).*",
+    /**
+     * 强结构标题行：Markdown 标题（#~######）与中文章节（第X章/节/篇/部）。
+     * 文档存在这类标题时只用它们切父块——有序列表（“1. xxx”）不会被误判为章节。
+     */
+    private static final Pattern STRONG_TITLE_LINE = Pattern.compile(
+            "^[ \\t]*(?:#{1,6}[ \\t]+\\S|第[一二三四五六七八九十百千\\d]+[章节篇部]).*",
             Pattern.MULTILINE);
+    /** 多级编号标题（1.1 / 2.3.1）：仅当文档无强结构标题时启用（单级 1. 与有序列表同形，不在本级） */
+    private static final Pattern MULTI_LEVEL_TITLE_LINE = Pattern.compile(
+            "^[ \\t]*\\d+(?:\\.\\d+)+[、.．]?[ \\t]*\\S.*", Pattern.MULTILINE);
+    /** 单级编号标题（1、/ 1.）：最后兜底——文档连多级编号都没有时，编号行大概率就是章节 */
+    private static final Pattern SINGLE_LEVEL_TITLE_LINE = Pattern.compile(
+            "^[ \\t]*\\d+[、.．][ \\t]*\\S.*", Pattern.MULTILINE);
 
     private final KnowledgeChunkMapper knowledgeChunkMapper;
     private final EmbeddingService embeddingService;
+    private final SparseEmbeddingService sparseEmbeddingService;
     private final VectorSearchService vectorSearchService;
+    private final KnowledgeFileParser fileParser;
     private final AgentProperties properties;
     private final ThreadPoolTaskExecutor importExecutor;
 
     public KnowledgeService(KnowledgeChunkMapper knowledgeChunkMapper,
                             EmbeddingService embeddingService,
+                            SparseEmbeddingService sparseEmbeddingService,
                             VectorSearchService vectorSearchService,
+                            KnowledgeFileParser fileParser,
                             AgentProperties properties,
                             @Qualifier("knowledgeImportExecutor") ThreadPoolTaskExecutor importExecutor) {
         this.knowledgeChunkMapper = knowledgeChunkMapper;
         this.embeddingService = embeddingService;
+        this.sparseEmbeddingService = sparseEmbeddingService;
         this.vectorSearchService = vectorSearchService;
+        this.fileParser = fileParser;
         this.properties = properties;
         this.importExecutor = importExecutor;
     }
@@ -133,8 +152,15 @@ public class KnowledgeService {
             List<String> pieces = split(section.body(), childSize, overlap);
             for (int i = 0; i < pieces.size(); i++) {
                 KnowledgeChunk child = new KnowledgeChunk();
-                child.setContent(section.title() + TITLE_SEPARATOR + pieces.get(i));
-                child.setEmbedding(embeddingService.embed(child.getContent()));
+                String piece = pieces.get(i);
+                // 首块自带章节标题行（原文完整保留），不再重复拼前缀；后续块拼标题提升检索命中
+                String childText = piece.startsWith(section.title())
+                        ? piece
+                        : section.title() + TITLE_SEPARATOR + piece;
+                child.setContent(childText);
+                // 双向量写入：稠密（语义，BGE-M3）+ 稀疏（词权重，jieba hashing），检索端 RRF 融合
+                child.setEmbedding(embeddingService.embed(childText));
+                child.setSparseVector(sparseEmbeddingService.embed(childText));
                 child.setChunkType(TYPE_CHILD);
                 child.setTitle(section.title());
                 child.setMetadata(withChunkInfo(metadata, i + 1, pieces.size()));
@@ -161,77 +187,41 @@ public class KnowledgeService {
     }
 
     /**
-     * 批量导入：逐篇提交到独立导入线程池并行执行，HTTP 线程只等待结果（不执行嵌入等耗时操作）。
-     * 单篇失败不中断整批（任务内 try-catch，返回逐条结果供重试失败项）；
-     * 单篇超时（嵌入慢/队列积压）即取消该篇记为失败，不无限挂起请求。
-     * 文档数上限按配置校验（防一次请求打爆嵌入服务）。
+     * 文件上传导入：逐个文件“解析 → 父子分块落库”，单文件失败不中断整批（与 batchImport 同语义）。
+     * <p>
+     * 与 batchImport 的差异：文件在 HTTP 线程内同步解析（PDF/Word 解析为 CPU 密集但单文件几秒内完成），
+     * 文件名写入 metadata.source 便于溯源，块归属当前登录用户（私有库）。
+     *
+     * @param files 上传文件列表（上限复用 agent.knowledge.batch-max-documents 配置）
+     * @return 逐文件导入结果（fileName / chunks / ok / error），失败项供重试
      */
-    public KnowledgeBatchImportResponse batchImport(KnowledgeBatchImportRequest request) {
-        int maxDocs = Math.max(1, properties.getKnowledge().getBatchMaxDocuments());
-        List<KnowledgeBatchImportRequest.Item> items = request.items();
-        if (items.size() > maxDocs) {
-            throw new BizException(ErrorCode.BAD_REQUEST, "单次最多导入 " + maxDocs + " 篇文档");
+    public KnowledgeFileImportResponse uploadFiles(List<MultipartFile> files) {
+        int maxFiles = Math.max(1, properties.getKnowledge().getBatchMaxDocuments());
+        if (files.size() > maxFiles) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "单次最多上传 " + maxFiles + " 个文件");
         }
-        // 步骤1：逐篇提交导入任务（用户身份经 TaskDecorator 透传入工作线程）
-        List<Future<KnowledgeBatchImportResponse.ItemResult>> futures = new ArrayList<>(items.size());
-        for (int i = 0; i < items.size(); i++) {
-            int index = i;
-            KnowledgeBatchImportRequest.Item item = items.get(i);
-            try {
-                futures.add(importExecutor.getThreadPoolExecutor().submit(() -> importItem(index, item)));
-            } catch (RejectedExecutionException e) {
-                // 队列满：该篇记为失败（整体不抛错，其余篇照常执行），用户可按明细重试
-                log.warn("[knowledge] batch import item {} rejected, queue full", index);
-                futures.add(null);
-            }
-        }
-        // 步骤2：逐篇取回结果（有界等待，超时取消），保持响应语义：单篇失败不中断整批
-        long timeoutSeconds = Math.max(10, properties.getKnowledgeImport().getTimeoutSeconds());
-        List<KnowledgeBatchImportResponse.ItemResult> results = new ArrayList<>(items.size());
+        List<KnowledgeFileImportResponse.FileResult> results = new ArrayList<>(files.size());
         int imported = 0;
         int failed = 0;
-        for (int i = 0; i < futures.size(); i++) {
-            Future<KnowledgeBatchImportResponse.ItemResult> future = futures.get(i);
-            if (future == null) {
-                results.add(new KnowledgeBatchImportResponse.ItemResult(i, 0, false, "导入队列已满，请稍后重试"));
-                failed++;
-                continue;
-            }
+        for (int i = 0; i < files.size(); i++) {
+            MultipartFile file = files.get(i);
+            String fileName = file != null ? file.getOriginalFilename() : null;
             try {
-                KnowledgeBatchImportResponse.ItemResult result = future.get(timeoutSeconds, TimeUnit.SECONDS);
-                if (result.ok()) {
-                    imported++;
-                } else {
-                    failed++;
+                if (file == null || file.isEmpty()) {
+                    throw new BizException(ErrorCode.BAD_REQUEST, "文件内容为空");
                 }
-                results.add(result);
-            } catch (TimeoutException e) {
-                future.cancel(true);
-                log.warn("[knowledge] batch import item {} timeout after {}s, cancelled", i, timeoutSeconds);
-                results.add(new KnowledgeBatchImportResponse.ItemResult(i, 0, false, "导入超时（" + timeoutSeconds + "s）"));
-                failed++;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                results.add(new KnowledgeBatchImportResponse.ItemResult(i, 0, false, "导入被中断"));
-                failed++;
-            } catch (ExecutionException e) {
-                log.warn("[knowledge] batch import item {} failed: {}", i, e.getMessage());
-                results.add(new KnowledgeBatchImportResponse.ItemResult(i, 0, false, rootMessage(e)));
+                String text = fileParser.extract(fileName, file.getBytes());
+                String metadata = "{\"source\":\"file:" + fileName + "\"}";
+                int chunks = importDocument(text, metadata, null, null);
+                results.add(new KnowledgeFileImportResponse.FileResult(i, fileName, chunks, true, null));
+                imported++;
+            } catch (Exception e) {
+                log.warn("[knowledge] file import {} failed: {}", fileName, e.getMessage());
+                results.add(new KnowledgeFileImportResponse.FileResult(i, fileName, 0, false, rootMessage(e)));
                 failed++;
             }
         }
-        return new KnowledgeBatchImportResponse(items.size(), imported, failed, results);
-    }
-
-    /** 单篇导入任务：失败自吞并转结果对象（单篇失败不中断整批的语义在任务内闭环） */
-    private KnowledgeBatchImportResponse.ItemResult importItem(int index, KnowledgeBatchImportRequest.Item item) {
-        try {
-            int chunks = importDocument(item.content(), item.metadata(), item.chunkSize(), item.chunkOverlap());
-            return new KnowledgeBatchImportResponse.ItemResult(index, chunks, true, null);
-        } catch (Exception e) {
-            log.warn("[knowledge] batch import item {} failed: {}", index, e.getMessage());
-            return new KnowledgeBatchImportResponse.ItemResult(index, 0, false, e.getMessage());
-        }
+        return new KnowledgeFileImportResponse(files.size(), imported, failed, results);
     }
 
     /** 取异常链最深处的 message（业务原因通常在最底层），避免向上只看到包装信息 */
@@ -265,7 +255,9 @@ public class KnowledgeService {
         KnowledgeChunk chunk = new KnowledgeChunk();
         chunk.setId(id);
         chunk.setContent(content);
+        // 双向量同步重算：内容变更后稠密/稀疏任一不重算都会造成该通道命中错位
         chunk.setEmbedding(embeddingService.embed(content));
+        chunk.setSparseVector(sparseEmbeddingService.embed(content));
         chunk.setMetadata(request.getMetadata());
         chunk.setUserId(userId);
         if (knowledgeChunkMapper.updateContent(chunk) == 0) {
@@ -333,7 +325,8 @@ public class KnowledgeService {
     private int lastBoundaryEnd(String content, int from, int to) {
         int paragraph = content.lastIndexOf(PARAGRAPH_BOUNDARY, to - 1);
         if (paragraph >= from) {
-            return paragraph + PARAGRAPH_BOUNDARY.length();
+            // 钳制到 to：空行起点为 to-1 时终点会越界 1 个字符，避免首/尾碎片被下一块重复消费
+            return Math.min(paragraph + PARAGRAPH_BOUNDARY.length(), to);
         }
         int line = content.lastIndexOf('\n', to - 1);
         if (line >= from) {
@@ -414,11 +407,7 @@ public class KnowledgeService {
      * </ul>
      */
     List<ParentSection> splitParents(String content, int parentSize) {
-        Matcher matcher = TITLE_LINE.matcher(content);
-        List<Integer> titleStarts = new ArrayList<>();
-        while (matcher.find()) {
-            titleStarts.add(matcher.start());
-        }
+        List<Integer> titleStarts = titleStarts(content);
         if (titleStarts.isEmpty()) {
             String title = deriveTitle(content);
             return split(content, parentSize, 0).stream()
@@ -450,6 +439,24 @@ public class KnowledgeService {
             }
         }
         return sections;
+    }
+
+    /**
+     * 扫描标题行起点（按结构强度逐级回退）：强结构（#/第X章）> 多级编号（1.1）> 单级编号（1.）。
+     * 逐级回退是为了避免有序列表（“1. xxx”）在正常 Markdown 文档里被误切成章节。
+     */
+    private List<Integer> titleStarts(String content) {
+        for (Pattern pattern : List.of(STRONG_TITLE_LINE, MULTI_LEVEL_TITLE_LINE, SINGLE_LEVEL_TITLE_LINE)) {
+            Matcher matcher = pattern.matcher(content);
+            List<Integer> starts = new ArrayList<>();
+            while (matcher.find()) {
+                starts.add(matcher.start());
+            }
+            if (!starts.isEmpty()) {
+                return starts;
+            }
+        }
+        return List.of();
     }
 
     /** 父块切分单元：title（紧凑标题，装配分组键）+ body（整章上下文） */

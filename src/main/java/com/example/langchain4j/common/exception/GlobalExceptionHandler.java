@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
@@ -51,6 +52,17 @@ public class GlobalExceptionHandler {
     public ApiResponse<Void> handleBadRequest(Exception e) {
         log.warn("[bad-request] {}", e.getMessage());
         return ApiResponse.error(ErrorCode.BAD_REQUEST.getCode(), ErrorCode.BAD_REQUEST.getMessage());
+    }
+
+    /**
+     * 上传文件超限（multipart 大小上限，见 spring.servlet.multipart.max-file-size）：
+     * 400 语义，避免落入兜底伪装成 500。
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public ApiResponse<Void> handleMaxUploadSize(MaxUploadSizeExceededException e) {
+        log.warn("[bad-request] upload size exceeded");
+        return ApiResponse.error(ErrorCode.BAD_REQUEST.getCode(), "上传文件超过大小上限（单文件 20MB）");
     }
 
     /** 数据库异常：脱敏后返回，细节只进日志 */

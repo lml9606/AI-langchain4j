@@ -18,10 +18,12 @@ public class FallbackNode implements NodeAction<WorkflowState> {
 
     private final PromptTemplateService promptTemplateService;
 
+    /** 注入提示词服务。 */
     public FallbackNode(PromptTemplateService promptTemplateService) {
         this.promptTemplateService = promptTemplateService;
     }
 
+    /** 兜底节点：记录进入原因并返回固定降级答案，保证图始终有输出。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：记录进入兜底的原因（错误信息 + 当前意图），便于问题排查

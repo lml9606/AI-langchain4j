@@ -15,6 +15,8 @@ public class KnowledgeChunk {
     private String content;
     /** 向量（pgvector 由 VectorTypeHandler 映射为 float[]，1024 维 BGE-M3） */
     private float[] embedding;
+    /** 稀疏向量（pgvector sparsevec 文本格式 {idx:weight,...}/1048576；jieba 分词 + log-TF + hashing，仅子块） */
+    private String sparseVector;
     /** 元数据 JSON（来源、标签等扩展信息） */
     private String metadata;
     /** 所属用户（NULL = 公共库对所有用户可见；非 NULL 仅本用户可见/可查） */

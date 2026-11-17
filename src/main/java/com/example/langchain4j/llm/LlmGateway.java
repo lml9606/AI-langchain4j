@@ -44,9 +44,6 @@ public class LlmGateway {
     private static final String CB_FAILURES_KEY = "agent:llm:cb:failures";
     private static final String CB_OPEN_KEY = "agent:llm:cb:open";
     private static final long BASE_BACKOFF_MS = 1000L;
-    /** 日志用原始输出截断长度：防 LLM 超长输出刷屏 */
-    private static final int MAX_LOG_TEXT_LENGTH = 200;
-
     private final ModelRegistry modelRegistry;
     private final RedissonClient redissonClient;
     private final AgentProperties properties;
@@ -59,6 +56,7 @@ public class LlmGateway {
     private final Executor llmExecutor;
     private final AgentMetrics metrics;
 
+    /** 注入模型注册表、Redis、Agent 配置与独立 LLM 线程池。 */
     public LlmGateway(ModelRegistry modelRegistry,
                       RedissonClient redissonClient,
                       AgentProperties properties,
@@ -132,19 +130,13 @@ public class LlmGateway {
             String cleaned = result.text().replaceAll("[\\p{Cntrl}]", " ");
             return JsonUtil.fromJson(JsonUtil.extractJsonObject(cleaned), JsonNode.class);
         } catch (Exception e) {
-            log.warn("[{}] json extract/parse failed, raw={}: {}", scene, abbreviate(result.text()), e.getMessage());
+            log.warn("[{}] json extract/parse failed, outputLength={}: {}",
+                    scene, result.text().length(), e.getMessage());
             return null;
         }
     }
 
-    /** 日志用文本截断：防 LLM 超长输出刷屏（MAX_LOG_TEXT_LENGTH 上限） */
-    private String abbreviate(String text) {
-        if (text == null) {
-            return "";
-        }
-        return text.length() <= MAX_LOG_TEXT_LENGTH ? text : text.substring(0, MAX_LOG_TEXT_LENGTH);
-    }
-
+    /** 组装 system + user 两条消息，供普通文本生成使用。 */
     private List<ChatMessage> buildMessages(String systemPrompt, String userPrompt) {
         List<ChatMessage> messages = new ArrayList<>(2);
         if (systemPrompt != null && !systemPrompt.isBlank()) {
@@ -154,10 +146,12 @@ public class LlmGateway {
         return messages;
     }
 
+    /** 使用已完成的消息列表生成文本。 */
     public LlmResult generate(String modelName, List<ChatMessage> messages) {
         return generate(modelName, messages, null, null);
     }
 
+    /** 核心生成逻辑：模型路由、重试、熔断、超时与 Token 统计。 */
     private LlmResult generate(String modelName, List<ChatMessage> messages, ResponseFormat responseFormat) {
         return generate(modelName, messages, responseFormat, null);
     }
@@ -278,6 +272,7 @@ public class LlmGateway {
     //  冷却后  ：CB_OPEN_KEY 自动过期，熔断器自动回到 closed（下次调用成功即清空失败计数）。
     // 选择 Redis 计数而非本地计数器：多实例部署时失败次数全局共享，熔断判定一致。
 
+    /** 判断当前熔断器是否处于打开状态。 */
     private boolean isCircuitOpen() {
         try {
             return redissonClient.getBucket(CB_OPEN_KEY).isExists();
@@ -318,6 +313,7 @@ public class LlmGateway {
         }
     }
 
+    /** 取异常链最深处的 message，便于日志定位根因。 */
     private String rootMessage(Throwable t) {
         Throwable cur = t;
         while (cur.getCause() != null && cur.getCause() != cur) {

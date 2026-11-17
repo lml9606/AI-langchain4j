@@ -53,17 +53,20 @@ public class IntentNode implements NodeAction<WorkflowState> {
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
 
+    /** 注入 LLM 网关与提示词服务。 */
     public IntentNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
     }
 
+    /** 识别本轮意图；规则命中寒暄直接返回，否则调用 LLM 并做白名单降级。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤0：规则快速通道 —— 纯寒暄短句直接判为闲聊，省一次 LLM 调用（企业级两级路由惯例）
         String effective = state.effectiveQuery();
         if (isChitchatByRule(effective)) {
-            log.info("[intent] chitchat matched by rule: {}", effective);
+            log.info("[intent] resolved, intent={}, source=rule, queryLength={}",
+                    INTENT_CHITCHAT, effective.length());
             return Map.of(
                     WorkflowState.INTENT, INTENT_CHITCHAT,
                     WorkflowState.INTENT_REASON, "规则匹配：寒暄",
@@ -78,6 +81,7 @@ public class IntentNode implements NodeAction<WorkflowState> {
                     state.effectiveQuery(), "intent");
             // 步骤2：截断/解析失败 → 降级为默认意图（安全默认，不阻断主流程）
             if (node == null) {
+                log.warn("[intent] output parse degraded, fallback to default={}", INTENT_DEFAULT);
                 return Map.of(
                         WorkflowState.INTENT, INTENT_DEFAULT,
                         WorkflowState.INTENT_REASON, "输出截断或解析失败",
@@ -96,6 +100,8 @@ public class IntentNode implements NodeAction<WorkflowState> {
             String reason = node.hasNonNull("reason")
                     ? node.get("reason").asText()
                     : "";
+            log.info("[intent] resolved, intent={}, source=llm, queryLength={}",
+                    intent, state.effectiveQuery().length());
             // 步骤6：返回增量更新：意图 + 理由 + 清空错误标记
             return Map.of(
                     WorkflowState.INTENT, intent,

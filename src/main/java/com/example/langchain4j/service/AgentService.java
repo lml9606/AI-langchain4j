@@ -79,6 +79,7 @@ public class AgentService {
     private final PromptTemplateService promptTemplateService;
     private final ConfirmationService confirmationService;
 
+    /** 注入图执行、会话、限流、审计、模型与确认等编排依赖。 */
     public AgentService(@Qualifier("agentGraph") CompiledGraph<WorkflowState> agentGraph,
                         @Qualifier("taskConfirmGraph") CompiledGraph<WorkflowState> taskConfirmGraph,
                         RateLimiter rateLimiter,
@@ -137,6 +138,8 @@ public class AgentService {
         // 4. 会话初始化（失败抛 DB_UNAVAILABLE，快速失败）
         String conversationId = conversationService.ensureConversation(
                 userId, request.getConversationId(), query);
+        log.info("[agent] chat start, conversation={}, model={}, queryLength={}, answerMode={}, visibility={}",
+                conversationId, model, query.length(), answerMode, visibility);
         // 5. 会话锁内：保存用户消息 → 装配记忆 → 图执行 → 保存助手消息
         //    用户与助手消息都在锁内落库，一轮对话闭环后才释放锁；
         //    否则上一轮释放锁后、下一轮先读到历史时，上一轮回答尚未落库，
@@ -162,6 +165,10 @@ public class AgentService {
         if (state.handoff()) {
             ticketService.createIfAbsent(userId, conversationId, query, state.rootCause());
         }
+        log.info("[agent] chat done, conversation={}, intent={}, fallback={}, handoff={}, costMs={}, resultLength={}, tokenUsage={}, toolCalls={}, rootCause={}",
+                conversationId, state.intent(), state.fallback(), state.handoff(),
+                System.currentTimeMillis() - start, resultLength(state.result()), state.tokenUsage(),
+                state.taskTrace().size(), state.rootCause());
         ChatResponse response = ChatResponse.of(conversationId, state.result(), state.fallback(),
                 state.tokenUsage(), System.currentTimeMillis() - start, state.done(), state.rootCause(),
                 citations(state), confidence(state), confidenceReason(state),
@@ -186,6 +193,8 @@ public class AgentService {
                 .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND,
                         "确认请求不存在、已过期或已使用，请重新发起操作"));
         conversationService.requireOwnership(action.conversationId(), userId);
+        log.info("[agent] confirm start, conversation={}, confirmationTail={}, approved={}, tool={}",
+                action.conversationId(), idTail(action.confirmationId()), request.isApproved(), action.tool());
 
         // 拒绝路径：只记录一条取消消息，不触碰业务数据
         if (!request.isApproved()) {
@@ -198,6 +207,8 @@ public class AgentService {
                 auditService.audit(action.conversationId(), "tool-confirm",
                         GraphExecution.STATUS_SUCCESS, action.confirmationId(), "REJECTED",
                         null, System.currentTimeMillis() - start);
+                log.info("[agent] confirm rejected, conversation={}, confirmationTail={}, costMs={}",
+                        action.conversationId(), idTail(action.confirmationId()), System.currentTimeMillis() - start);
                 return ChatResponse.of(action.conversationId(), answer, false, null,
                         System.currentTimeMillis() - start, true, "");
             });
@@ -228,6 +239,9 @@ public class AgentService {
             if (state.fallback()) {
                 metrics.recordFallback();
             }
+            log.info("[agent] confirm done, conversation={}, confirmationTail={}, fallback={}, costMs={}, resultLength={}, toolCalls={}",
+                    action.conversationId(), idTail(action.confirmationId()), state.fallback(),
+                    System.currentTimeMillis() - start, resultLength(state.result()), state.taskTrace().size());
             return ChatResponse.of(action.conversationId(), state.result(), state.fallback(),
                     state.tokenUsage(), System.currentTimeMillis() - start, state.done(), state.rootCause(),
                     citations(state), confidence(state), confidenceReason(state),
@@ -388,14 +402,17 @@ public class AgentService {
                 longOf(pending.get("expiresAt")));
     }
 
+    /** 安全读取字符串值；值为 null 时返回默认值。 */
     private String textOf(Object value, String defaultValue) {
         return value == null ? defaultValue : String.valueOf(value);
     }
 
+    /** 把数值对象转成 double；非数值返回 0.0。 */
     private double doubleOf(Object value) {
         return value instanceof Number number ? number.doubleValue() : 0.0;
     }
 
+    /** 把数值对象转成 long；非数值返回 0。 */
     private long longOf(Object value) {
         return value instanceof Number number ? number.longValue() : 0L;
     }
@@ -411,6 +428,7 @@ public class AgentService {
     }
 
     @SuppressWarnings("unchecked")
+    /** 把对象安全转成字符串键 Map；类型不符返回空 Map。 */
     private Map<String, Object> mapOf(Object value) {
         return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
     }
@@ -492,8 +510,12 @@ public class AgentService {
                 GENERATION_CANDIDATE_LIMIT);
         // 步骤7：异步触发段摘要（锁内仅提交任务，不等待 LLM 执行）
         summaryService.triggerIfNeeded(conversationId, segment);
-        return new PreparedTurn(rewrite, generationView,
-                segment.getContent() == null ? "" : segment.getContent());
+        String summary = segment.getContent() == null ? "" : segment.getContent();
+        log.info("[agent] turn prepared, conversation={}, segment={}, rewritten={}, history={}, summaryLength={}",
+                conversationId, segment.getSegmentId(),
+                rewrite.rewritten() != null && !rewrite.rewritten().isBlank(),
+                generationView.size(), summary.length());
+        return new PreparedTurn(rewrite, generationView, summary);
     }
 
     /** 每轮准备产物：改写结果 + 生成视图 + 当前段摘要，供同步/流式共用 */
@@ -628,6 +650,19 @@ public class AgentService {
             auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query, null, rootMessage(cause), null);
             throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行失败: " + rootMessage(cause));
         }
+    }
+
+    /** 返回结果文本长度；null 按 0 处理，供日志统一记录。 */
+    private int resultLength(String result) {
+        return result == null ? 0 : result.length();
+    }
+
+    /** 确认令牌脱敏：长 ID 仅保留末 8 位，短 ID 完全隐藏。 */
+    private String idTail(String id) {
+        if (id == null || id.isBlank()) {
+            return "";
+        }
+        return id.length() <= 8 ? "***" : id.substring(id.length() - 8);
     }
 
     /**

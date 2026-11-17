@@ -32,6 +32,7 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
     private final OutputGuardService outputGuardService;
     private final PromptTemplateService promptTemplateService;
 
+    /** 注入 LLM、输出安全审核与提示词服务。 */
     public TaskAnswerNode(LlmGateway llmGateway,
                           OutputGuardService outputGuardService,
                           PromptTemplateService promptTemplateService) {
@@ -40,6 +41,7 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
         this.promptTemplateService = promptTemplateService;
     }
 
+    /** 基于工具轨迹和证据生成回答，计算置信度并统一追加参考依据。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         List<Map<String, Object>> evidence = state.taskEvidence();
@@ -82,10 +84,13 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
         if (tokenUsage != null) {
             updates.put(WorkflowState.TOKEN_USAGE, tokenUsage);
         }
-        log.info("[task-answer] evidence={}, calls={}, confidence={}", evidence.size(), trace.size(), confidence);
+        log.info("[task-answer] evidence={}, calls={}, confidence={}, resultLength={}, tokenUsage={}",
+                evidence.size(), trace.size(), confidence,
+                answer == null ? 0 : answer.length(), tokenUsage);
         return updates;
     }
 
+    /** 拼装用户问题、工具轨迹和证据清单，供回答模型参考。 */
     private String buildUserPrompt(WorkflowState state,
                                    List<Map<String, Object>> evidence,
                                    List<Map<String, Object>> trace) {
@@ -162,6 +167,7 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
         return builder.toString().trim();
     }
 
+    /** 按证据数量与工具失败次数计算确定性置信度。 */
     private double confidence(int evidenceCount, int successCalls, int failures) {
         if (evidenceCount == 0) {
             return successCalls > 0 ? 0.35 : 0.2;
@@ -175,6 +181,7 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
         return Math.max(0.3, Math.min(0.95, Math.round(score * 100.0) / 100.0));
     }
 
+    /** 生成可解释的置信度说明。 */
     private String confidenceReason(int evidenceCount, int successCalls, int failures) {
         if (evidenceCount == 0) {
             return "未获得工具证据（成功调用 " + successCalls + " 次，失败 " + failures + " 次）";
@@ -182,6 +189,7 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
         return "基于 " + evidenceCount + " 条工具证据，工具调用成功 " + successCalls + " 次、失败 " + failures + " 次";
     }
 
+    /** 截断回答或证据片段，控制响应长度。 */
     private String truncate(String text, int max) {
         if (text == null) {
             return "";

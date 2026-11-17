@@ -68,6 +68,8 @@
         <redisson.version>3.49.0</redisson.version>
         <!-- JWT 库（jjwt 0.12.x）：认证签发/校验，API 模块编译期可见，impl/jackson 仅运行时需要 -->
         <jjwt.version>0.12.6</jjwt.version>
+        <!-- 文档解析（知识库文件上传导入）：Apache Tika 3.3.x 维护线（Java 11+，4.x 刚重构暂不追） -->
+        <tika.version>3.3.2</tika.version>
     </properties>
 
     <!-- ==================== 依赖管理：BOM 导入，统一各模块版本 ==================== -->
@@ -79,6 +81,14 @@
                 <groupId>org.bsc.langgraph4j</groupId>
                 <artifactId>langgraph4j-bom</artifactId>
                 <version>${langgraph4j.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Apache Tika BOM：统一解析器全家桶与传递依赖版本（PDFBox/POI 等由 BOM 管理，避免模块间版本割裂） -->
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-bom</artifactId>
+                <version>${tika.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -193,6 +203,32 @@
             <groupId>com.pgvector</groupId>
             <artifactId>pgvector</artifactId>
             <version>${pgvector.version}</version>
+        </dependency>
+
+        <!-- 文档解析（知识库文件上传导入：PDF/Word/文本统一走 Tika）：
+             注意 3.3.x 模块重组：AutoDetectParser/BodyContentHandler 已内聚到 tika-core，
+             且 package POM 将 tika-core 标为 provided（面向 app/server 打包场景），嵌入式使用需显式声明 -->
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-core</artifactId>
+            <version>${tika.version}</version>
+        </dependency>
+        <!-- tika-parsers-standard-package 为解析器全家桶（传递依赖含 PDFBox 3.x / POI 5.x 等，版本由上方 BOM 统一）；
+             注意：解析器多 → 漏洞面大，上传入口保留 扩展名白名单 + 20MB 上限 + writeLimit 三重防御，
+             解析只认魔数（内部按 MIME 选解析器，天然防伪造扩展名） -->
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-parsers-standard-package</artifactId>
+            <version>${tika.version}</version>
+        </dependency>
+
+        <!-- 中文分词（稀疏向量通道）：jieba 纯 Java 分词 → log-TF 词权重 hashing → pgvector sparsevec 内积检索；
+             Ollama 的 /api/embed 仅输出稠密向量，BGE-M3 原生 sparse 输出需额外推理服务（FlagEmbedding/TEI），
+             此处用"分词 + 统计权重"落地同形态稀疏向量（维度=词、值=权重），避免引入新服务 -->
+        <dependency>
+            <groupId>com.huaban</groupId>
+            <artifactId>jieba-analysis</artifactId>
+            <version>1.0.2</version>
         </dependency>
 
         <!-- MyBatis：手写 SQL 持久层（替换裸 mybatis 3.5.7 + JPA；3.0.x 适配 Boot 3.5，4.x 需 Boot 4 不选） -->

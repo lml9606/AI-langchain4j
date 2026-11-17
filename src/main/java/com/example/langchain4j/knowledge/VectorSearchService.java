@@ -14,9 +14,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 /**
- * 混合检索服务：稠密语义（BGE-M3 + pgvector 余弦）与词面（pg_trgm 三元组）双通道召回，RRF 融合排序。
+ * 混合检索服务：稠密语义（BGE-M3 + pgvector 余弦）与稀疏词权重（jieba 分词 + hashing → sparsevec 内积）
+ * 双通道召回，RRF 融合排序。
  * <p>
- * 单通道可独立降级：稠密通道嵌入/DB 故障、词面通道扩展缺失/DB 故障均返回空列表（fail-open），
+ * 单通道可独立降级：稠密通道嵌入/DB 故障、稀疏通道分词/DB 故障均返回空列表（fail-open），
  * 双通道均空才整体降级为空（上游按无结果处理）。
  */
 @Slf4j
@@ -30,8 +31,8 @@ public class VectorSearchService {
      * 应基于评测集下调（如 0.6~0.7），不要盲调。
      */
     private static final double DEFAULT_MIN_SCORE = 0.85;
-    /** 词面相似度下限：滤掉零重叠的纯噪声命中（中文短查询三元组弱匹配），低于 0.05 不进融合池 */
-    private static final double LEXICAL_MIN_SCORE = 0.05;
+    /** 稀疏通道最小内积阈值（已 L2 归一化即余弦）：低于该值不进融合池；稀疏余弦天然低于稠密，0.05 只滤零重叠噪声 */
+    private static final double SPARSE_MIN_SCORE = 0.05;
     /** RRF 融合常数：经典取值 60，rank 从 1 起，决定低排名项对融合分的贡献衰减速度 */
     private static final int RRF_K = 60;
     /** 单路候选池大小：先宽召回再融合截断，避免单路 topK 截断丢掉融合后可排前的项 */
@@ -39,21 +40,25 @@ public class VectorSearchService {
 
     private final KnowledgeChunkMapper knowledgeChunkMapper;
     private final EmbeddingService embeddingService;
+    private final SparseEmbeddingService sparseEmbeddingService;
     private final AgentProperties properties;
 
+    /** 注入知识块查询、稠密/稀疏嵌入服务与 Agent 配置。 */
     public VectorSearchService(KnowledgeChunkMapper knowledgeChunkMapper, EmbeddingService embeddingService,
-                               AgentProperties properties) {
+                               SparseEmbeddingService sparseEmbeddingService, AgentProperties properties) {
         this.knowledgeChunkMapper = knowledgeChunkMapper;
         this.embeddingService = embeddingService;
+        this.sparseEmbeddingService = sparseEmbeddingService;
         this.properties = properties;
     }
 
+    /** 使用默认可见范围检索指定条数的知识块。 */
     public List<KnowledgeChunk> search(String query, int topK) {
         return search(query, topK, false);
     }
 
     /**
-     * 混合检索相关知识块：稠密 + 词面双通道召回后 RRF 融合，返回 topK。
+     * 混合检索相关知识块：稠密 + 稀疏双通道召回后 RRF 融合，返回 topK。
      * <p>
      * 用户隔离：当前身份取自 {@link UserContext}（HTTP 线程直查或图执行线程透传）；
      * 无身份上下文（null）时仅可见公共库（user_id IS NULL），安全默认宁缺勿滥。
@@ -67,58 +72,69 @@ public class VectorSearchService {
         if (query == null || query.isBlank()) {
             return List.of();
         }
+        long start = System.currentTimeMillis();
         String userId = UserContext.get();
         int k = Math.max(1, topK);
         // 步骤1：双通道独立宽召回（各取候选池大小，给 RRF 融合留出排序余地）
         List<KnowledgeChunk> dense = denseSearch(query, userId, privateOnly);
-        List<KnowledgeChunk> lexical = lexicalSearch(query, userId, privateOnly);
+        List<KnowledgeChunk> sparse = sparseSearch(query, userId, privateOnly);
         // 步骤2：RRF 融合去重排序并截断返回
-        return fuse(dense, lexical, k);
+        List<KnowledgeChunk> fused = fuse(dense, sparse, k);
+        log.info("[vector] search done, queryLength={}, topK={}, privateOnly={}, dense={}, sparse={}, fused={}, costMs={}",
+                query.length(), k, privateOnly, dense.size(), sparse.size(), fused.size(),
+                System.currentTimeMillis() - start);
+        return fused;
     }
 
+    /** 使用默认条数和默认可见范围检索知识块。 */
     public List<KnowledgeChunk> search(String query) {
         return search(query, DEFAULT_TOP_K);
     }
 
-    /** 稠密通道：BGE-M3 嵌入 + pgvector 余弦检索；嵌入/DB 故障降级为空列表（fail-open，不拖累词面通道） */
+    /** 稠密通道：BGE-M3 嵌入 + pgvector 余弦检索；嵌入/DB 故障降级为空列表（fail-open，不拖累稀疏通道） */
     private List<KnowledgeChunk> denseSearch(String query, String userId, boolean privateOnly) {
         try {
             float[] queryVector = embeddingService.embed(query);
             return knowledgeChunkMapper.searchSimilar(queryVector, FUSION_POOL, DEFAULT_MIN_SCORE, userId, privateOnly);
         } catch (Exception e) {
-            log.warn("[vector] dense search degraded, query={}, reason={}", query, e.getMessage());
+            log.warn("[vector] dense search degraded, queryLength={}, reason={}", query.length(), e.getMessage());
             return List.of();
         }
     }
 
-    /** 词面通道：pg_trgm 三元组相似度检索（中文无需分词）；扩展缺失/DB 故障降级为空列表（fail-open） */
-    private List<KnowledgeChunk> lexicalSearch(String query, String userId, boolean privateOnly) {
+    /** 稀疏通道：查询分词 → sparsevec 文本 → pgvector 内积检索（专有名词/型号精确命中）；分词/DB 故障降级空列表（fail-open） */
+    private List<KnowledgeChunk> sparseSearch(String query, String userId, boolean privateOnly) {
         try {
-            return knowledgeChunkMapper.searchLexical(query, FUSION_POOL, LEXICAL_MIN_SCORE, userId, privateOnly);
+            String querySparse = sparseEmbeddingService.embed(query);
+            if (querySparse == null) {
+                // 查询无有效词（纯标点/停用词）：本通道无召回信号，交给稠密通道
+                return List.of();
+            }
+            return knowledgeChunkMapper.searchSparse(querySparse, FUSION_POOL, SPARSE_MIN_SCORE, userId, privateOnly);
         } catch (Exception e) {
-            log.warn("[vector] lexical search degraded, query={}, reason={}", query, e.getMessage());
+            log.warn("[vector] sparse search degraded, queryLength={}, reason={}", query.length(), e.getMessage());
             return List.of();
         }
     }
 
     /**
      * RRF 融合：score = Σ 1/(k + rank)，rank 从 1 起，两路分数叠加后降序取 topK。
-     * 单路为空时退化为另一路的 topK 截断（不融合，行为等价旧版单通道检索）。
+     * 单路为空时退化为另一路的 topK 截断（不融合，行为等价单通道检索）。
      */
-    private List<KnowledgeChunk> fuse(List<KnowledgeChunk> dense, List<KnowledgeChunk> lexical, int topK) {
-        if (dense.isEmpty() && lexical.isEmpty()) {
+    private List<KnowledgeChunk> fuse(List<KnowledgeChunk> dense, List<KnowledgeChunk> sparse, int topK) {
+        if (dense.isEmpty() && sparse.isEmpty()) {
             return List.of();
         }
         if (dense.isEmpty()) {
-            return lexical.size() > topK ? lexical.subList(0, topK) : lexical;
+            return sparse.size() > topK ? sparse.subList(0, topK) : sparse;
         }
-        if (lexical.isEmpty()) {
+        if (sparse.isEmpty()) {
             return dense.size() > topK ? dense.subList(0, topK) : dense;
         }
         Map<Long, Double> scores = new LinkedHashMap<>();
         Map<Long, KnowledgeChunk> byId = new LinkedHashMap<>();
         accumulate(scores, byId, dense);
-        accumulate(scores, byId, lexical);
+        accumulate(scores, byId, sparse);
         return scores.entrySet().stream()
                 .sorted(Map.Entry.<Long, Double>comparingByValue().reversed())
                 .limit(topK)
@@ -149,6 +165,7 @@ public class VectorSearchService {
         return searchContext(query, topK, false);
     }
 
+    /** 使用默认条数和默认可见范围检索并组装上下文。 */
     public String searchContext(String query) {
         return searchContext(query, DEFAULT_TOP_K, false);
     }

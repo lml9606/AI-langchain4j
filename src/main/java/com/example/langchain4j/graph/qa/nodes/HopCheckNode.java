@@ -38,6 +38,7 @@ public class HopCheckNode implements NodeAction<WorkflowState> {
     private final AgentProperties properties;
     private final PromptTemplateService promptTemplateService;
 
+    /** 注入 LLM、配置与提示词服务。 */
     public HopCheckNode(LlmGateway llmGateway, AgentProperties properties,
                         PromptTemplateService promptTemplateService) {
         this.llmGateway = llmGateway;
@@ -45,6 +46,7 @@ public class HopCheckNode implements NodeAction<WorkflowState> {
         this.promptTemplateService = promptTemplateService;
     }
 
+    /** 判断当前上下文是否足够回答；不足时生成下一跳查询。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         return check(state);
@@ -64,6 +66,8 @@ public class HopCheckNode implements NodeAction<WorkflowState> {
                     || WorkflowState.ROOT_CAUSE_KNOWLEDGE_MISSING.equals(state.rootCause()))) {
                 updates.put(WorkflowState.ROOT_CAUSE, WorkflowState.ROOT_CAUSE_EXPRESSION_ISSUE);
             }
+            log.info("[hop-check] sufficient, hops={}, contextLength={}",
+                    state.hop().count(), state.context().length());
             return updates;
         }
         int maxHops = Math.max(1, properties.getMaxHops());
@@ -74,8 +78,8 @@ public class HopCheckNode implements NodeAction<WorkflowState> {
         // 步骤2：不足但已达多跳上限 → 标记上下文不完整，带已有资料进生成
         //        （已有部分资料可答，生成端声明边界；不转人工——与「首轮检索就空」场景区分）
         if (state.hop().count() >= maxHops) {
-            log.warn("[hop-check] context insufficient but maxHops reached, generate with incomplete context, hops={}",
-                    state.hop().count());
+            log.warn("[hop-check] context insufficient but maxHops reached, generate with incomplete context, hops={}, contextLength={}",
+                    state.hop().count(), state.context().length());
             // 补查超限仍不足 → 知识缺失（覆盖此前的复杂/表述根因，终局结论以缺失为准）
             return Map.of(
                     WorkflowState.HOP, WorkflowState.Hop.of(state.hop().count(), "", true),
@@ -83,8 +87,9 @@ public class HopCheckNode implements NodeAction<WorkflowState> {
                     WorkflowState.ROOT_CAUSE, WorkflowState.ROOT_CAUSE_KNOWLEDGE_MISSING);
         }
         // 步骤3：不足且未达上限 → 写入下一跳查询、计数 +1，路由回检索
-        log.info("[hop-check] context insufficient, hop {} -> {}, nextQuery={}",
-                state.hop().count(), state.hop().count() + 1, result.nextQuery());
+        log.info("[hop-check] context insufficient, hop {} -> {}, nextQueryLength={}, contextLength={}",
+                state.hop().count(), state.hop().count() + 1,
+                result.nextQuery().length(), state.context().length());
         return Map.of(
                 WorkflowState.HOP, WorkflowState.Hop.of(state.hop().count() + 1, result.nextQuery(), false));
     }

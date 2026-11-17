@@ -40,6 +40,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
     private final OutputGuardService outputGuardService;
     private final PromptTemplateService promptTemplateService;
 
+    /** 注入 LLM、输出安全审核与提示词服务。 */
     public GenerateNode(LlmGateway llmGateway, OutputGuardService outputGuardService,
                         PromptTemplateService promptTemplateService) {
         this.llmGateway = llmGateway;
@@ -47,6 +48,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         this.promptTemplateService = promptTemplateService;
     }
 
+    /** 按意图组装 Prompt、调用模型生成回答，并执行输出安全审核。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：按意图选 system prompt（代码生成 / 知识问答两套模板），并拼入当前话题段摘要
@@ -68,8 +70,10 @@ public class GenerateNode implements NodeAction<WorkflowState> {
             // 步骤5：调用 LLM 生成，并记录耗时与输出长度
             long start = System.currentTimeMillis();
             LlmResult result = llmGateway.generate(state.model(), messages);
-            log.info("[generate] cost={}ms, outputLength={}",
-                    System.currentTimeMillis() - start, result.text().length());
+            log.info("[generate] cost={}ms, intent={}, retries={}, history={}, contextLength={}, outputLength={}, tokenUsage={}, truncated={}",
+                    System.currentTimeMillis() - start, state.intent(), state.retryCount(),
+                    state.history().size(), state.context().length(), result.text().length(),
+                    result.tokenUsage(), result.truncated());
             // 步骤5.5：输出侧审核：命中敏感词替换为拒答文案（不透出命中词，防用户绕过测试）
             String text = result.text();
             if (outputGuardService.blocked(text)) {
@@ -115,6 +119,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         return messages;
     }
 
+    /** 按意图选择系统提示词模板。 */
     private String selectSystemPrompt(String intent) {
         // 步骤1：代码生成意图 → 代码专用模板（提示词走配置化解析，DB 覆盖优先）
         if (IntentNode.INTENT_CODE_GENERATE.equals(intent)) {
@@ -128,6 +133,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         return promptTemplateService.resolve("KNOWLEDGE_QA_SYSTEM", PromptTemplates.KNOWLEDGE_QA_SYSTEM);
     }
 
+    /** 拼装用户需求、检索上下文与重试修正指令。 */
     private String buildUserPrompt(WorkflowState state) {
         StringBuilder sb = new StringBuilder();
         // 步骤1：校验重试时（重试计数 > 0），拼入重试修正指令（带质检失败原因 + 有效查询）

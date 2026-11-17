@@ -32,19 +32,20 @@ public interface KnowledgeChunkMapper {
                                        @Param("privateOnly") boolean privateOnly);
 
     /**
-     * 词面相似度检索 topK（pg_trgm 三元组，中文无需分词；混合检索的词面通道，用户隔离同上）。
+     * 稀疏向量内积检索 topK（jieba 词权重：查询与块的共享词权重内积，专有名词/型号/缩写精确命中；
+     * 混合检索的稀疏通道，用户隔离同上）。
      *
-     * @param query       查询文本
+     * @param querySparse 查询稀疏向量（sparsevec 文本格式 {idx:weight,...}/DIM）
      * @param topK        返回条数
-     * @param minScore    最小词面相似度阈值（0~1），过滤零重叠的纯噪声命中
+     * @param minScore    最小内积阈值（0~1，L2 归一化后即余弦），过滤弱相关命中
      * @param userId      当前用户；null 表示无身份上下文（仅可见公共库）
      * @param privateOnly 仅检索本人知识（visibility=private）
      */
-    List<KnowledgeChunk> searchLexical(@Param("query") String query,
-                                       @Param("topK") int topK,
-                                       @Param("minScore") double minScore,
-                                       @Param("userId") String userId,
-                                       @Param("privateOnly") boolean privateOnly);
+    List<KnowledgeChunk> searchSparse(@Param("querySparse") String querySparse,
+                                      @Param("topK") int topK,
+                                      @Param("minScore") double minScore,
+                                      @Param("userId") String userId,
+                                      @Param("privateOnly") boolean privateOnly);
 
     long count();
 

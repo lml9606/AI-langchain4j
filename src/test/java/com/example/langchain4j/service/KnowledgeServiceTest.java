@@ -2,6 +2,8 @@ package com.example.langchain4j.service;
 
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.knowledge.EmbeddingService;
+import com.example.langchain4j.knowledge.KnowledgeFileParser;
+import com.example.langchain4j.knowledge.SparseEmbeddingService;
 import com.example.langchain4j.knowledge.VectorSearchService;
 import com.example.langchain4j.repository.mapper.KnowledgeChunkMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,7 +30,11 @@ class KnowledgeServiceTest {
     @Mock
     private EmbeddingService embeddingService;
     @Mock
+    private SparseEmbeddingService sparseEmbeddingService;
+    @Mock
     private VectorSearchService vectorSearchService;
+    @Mock
+    private KnowledgeFileParser fileParser;
     @Mock
     private AgentProperties properties;
     @Mock
@@ -38,8 +44,8 @@ class KnowledgeServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new KnowledgeService(knowledgeChunkMapper, embeddingService, vectorSearchService,
-                properties, importExecutor);
+        service = new KnowledgeService(knowledgeChunkMapper, embeddingService, sparseEmbeddingService,
+                vectorSearchService, fileParser, properties, importExecutor);
     }
 
     @Test
@@ -99,15 +105,27 @@ class KnowledgeServiceTest {
     }
 
     @Test
-    @DisplayName("父子分块：数字编号与中文章节行同样识别为标题")
+    @DisplayName("父子分块：无强结构标题时多级编号（1.1）识别为标题")
     void splitParentsByNumberedTitleLines() {
-        String content = "1.1 退款条件\n正文A。\n第2章 退款流程\n正文B。";
+        String content = "1.1 退款条件\n正文A。\n1.2 退款流程\n正文B。";
 
         List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
 
         assertThat(sections).hasSize(2);
         assertThat(sections.get(0).title()).isEqualTo("1.1 退款条件");
-        assertThat(sections.get(1).title()).isEqualTo("第2章 退款流程");
+        assertThat(sections.get(1).title()).isEqualTo("1.2 退款流程");
+    }
+
+    @Test
+    @DisplayName("父子分块：存在强结构标题时，有序列表（1. xxx）不得误判为章节")
+    void splitParentsIgnoresOrderedListUnderMarkdownTitles() {
+        String content = "# 退款流程\n1. 打开订单页面\n2. 点击申请退款按钮\n3. 等待客服审核";
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
+
+        assertThat(sections).hasSize(1);
+        assertThat(sections.get(0).title()).isEqualTo("# 退款流程");
+        assertThat(sections.get(0).body()).contains("2. 点击申请退款按钮");
     }
 
     @Test

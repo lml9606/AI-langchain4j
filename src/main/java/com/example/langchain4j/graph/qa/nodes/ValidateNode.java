@@ -36,11 +36,13 @@ public class ValidateNode implements NodeAction<WorkflowState> {
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
 
+    /** 注入 LLM 与提示词服务。 */
     public ValidateNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
     }
 
+    /** 先做规则校验，再对知识问答执行 LLM 质检，并写入校验结果。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：规则层门禁（非空/最小长度/无模型自曝错误），失败 → 格式问题，回生成重试
@@ -56,14 +58,16 @@ public class ValidateNode implements NodeAction<WorkflowState> {
             }
         }
         // 步骤3：两层都过 → 写入通过标记，路由转收尾节点
+        log.info("[validate] passed, intent={}, retryCount={}, resultLength={}",
+                state.intent(), state.retryCount(), state.result().length());
         return Map.of(WorkflowState.VALIDATION, WorkflowState.Validation.of(true, "", ""));
     }
 
     /** 校验失败：重试计数 +1，写入失败类型与原因，交由路由判断回生成/回检索/兜底 */
     private Map<String, Object> fail(WorkflowState state, String issue, String reason) {
         int retries = state.retryCount() + 1;
-        log.warn("[validate] failed, issue={}, retryCount={}, resultLength={}",
-                issue, retries, state.result() == null ? 0 : state.result().length());
+        log.warn("[validate] failed, intent={}, issue={}, retryCount={}, resultLength={}",
+                state.intent(), issue, retries, state.result() == null ? 0 : state.result().length());
         return Map.of(
                 WorkflowState.RETRY_COUNT, retries,
                 WorkflowState.VALIDATION, WorkflowState.Validation.of(false, issue, truncate(reason)));
@@ -91,7 +95,8 @@ public class ValidateNode implements NodeAction<WorkflowState> {
             String issue = ISSUE_GROUNDING.equals(node.path("issue").asText(""))
                     ? ISSUE_GROUNDING : ISSUE_FORMAT;
             String reason = node.path("reason").asText("");
-            log.warn("[validate] llm check failed, issue={}, reason={}", issue, reason);
+            log.warn("[validate] llm check failed, issue={}, reasonLength={}",
+                    issue, reason == null ? 0 : reason.length());
             return new QaResult(false, issue, reason);
         } catch (Exception e) {
             // 质检 LLM 失败：fail-open 放行，不因质检故障阻断主流程
@@ -108,6 +113,7 @@ public class ValidateNode implements NodeAction<WorkflowState> {
         return text.length() <= MAX_REASON_LENGTH ? text : text.substring(0, MAX_REASON_LENGTH);
     }
 
+    /** 规则层校验：非空、最小长度且不包含模型自曝错误话术。 */
     private boolean isValid(String result, String intent) {
         // 规则1：空/空白结果直接判无效
         if (result == null || result.isBlank()) {

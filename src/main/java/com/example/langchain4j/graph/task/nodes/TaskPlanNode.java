@@ -37,6 +37,7 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
     private final ToolRegistry toolRegistry;
     private final AgentProperties properties;
 
+    /** 注入 LLM、提示词、工具注册表与 Agent 配置。 */
     public TaskPlanNode(LlmGateway llmGateway,
                         PromptTemplateService promptTemplateService,
                         ToolRegistry toolRegistry,
@@ -47,6 +48,7 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
         this.properties = properties;
     }
 
+    /** 解析实体、判断缺参并生成工具执行计划；写操作转确认，只读操作转执行。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：准备工具清单（名称/描述/参数 Schema），模型只能从清单中选择
@@ -64,6 +66,8 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
                 "TASK_PLAN_SYSTEM", PromptTemplates.TASK_PLAN_SYSTEM, maxSteps);
         String userPrompt = "用户请求：\n" + state.effectiveQuery()
                 + "\n\n可用工具：\n" + JsonUtil.toJson(catalog);
+        log.info("[task-plan] start, queryLength={}, tools={}, maxSteps={}",
+                state.effectiveQuery().length(), catalog.size(), maxSteps);
 
         Map<String, Object> updates = new LinkedHashMap<>();
         try {
@@ -129,10 +133,13 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
                 updates.put(WorkflowState.RESULT, promptTemplateService.resolveFormatted(
                         "TASK_CLARIFY_ANSWER", PromptTemplates.TASK_CLARIFY_ANSWER, slotLabels(missing)));
                 updates.put(WorkflowState.ERROR, "");
+                log.info("[task-plan] clarification required, missingSlots={}, entityFields={}",
+                        missing, entities.keySet());
                 return updates;
             }
             // 步骤7：没有可执行步骤视为规划失败（意图为 task 但模型没有给出工具计划）
             if (plan.isEmpty()) {
+                log.warn("[task-plan] plan empty, entityFields={}", entities.keySet());
                 updates.put(WorkflowState.ERROR, "任务计划为空：未生成可执行步骤");
                 return updates;
             }
@@ -153,6 +160,7 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
             }
             // 步骤8.1：一次只允许确认一个写操作，避免一次确认批量修改多处数据
             if (writeSteps.size() > 1) {
+                log.warn("[task-plan] multiple write steps rejected, count={}", writeSteps.size());
                 updates.put(WorkflowState.ERROR, "一次只能确认一个写操作，请拆分为多轮处理");
                 return updates;
             }

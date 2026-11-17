@@ -43,6 +43,7 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
 
+    /** 注入混合检索、LLM 与提示词服务。 */
     public RetrievalNode(VectorSearchService vectorSearchService, LlmGateway llmGateway,
                          PromptTemplateService promptTemplateService) {
         this.vectorSearchService = vectorSearchService;
@@ -50,6 +51,7 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
         this.promptTemplateService = promptTemplateService;
     }
 
+    /** 按首轮/多跳/纠错重查三种模式检索，并写回上下文与根因。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：记录开始时间，用于统计检索耗时
@@ -57,9 +59,10 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
         // 步骤2：按状态字段组合分派检索模式并判定根因（见 resolveContext）
         RetrievalResult result = resolveContext(state);
         // 步骤3：记录检索耗时与上下文长度，便于观测检索质量
-        log.info("[retrieval] cost={}ms, requery={}, hops={}, contextLength={}, rootCause={}",
+        log.info("[retrieval] cost={}ms, requery={}, hops={}, subQueries={}, topK={}, visibility={}, contextLength={}, rootCause={}",
                 System.currentTimeMillis() - start, !state.validation().issue().isBlank(),
-                state.hop().count(), result.context().length(), result.rootCause());
+                state.hop().count(), state.subQueries().size(), topK(state), state.visibility(),
+                result.context().length(), result.rootCause());
         // 步骤4：返回增量更新：检索上下文与根因写入状态，供生成/路由节点使用
         Map<String, Object> updates = new LinkedHashMap<>();
         updates.put(WorkflowState.CONTEXT, result.context());
@@ -139,6 +142,7 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
         // 步骤2：每个子问题独立召回，父子装配父块整章上下文，按子问题分组标注
         StringBuilder sb = new StringBuilder();
         int index = 1;
+        int matched = 0;
         for (String subQuery : subQueries) {
             String part = vectorSearchService.searchContext(subQuery, topK(state), privateOnly(state));
             if (part.isBlank()) {
@@ -146,7 +150,10 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
             }
             sb.append("【子问题 ").append(index).append("：").append(subQuery).append("】\n").append(part);
             index++;
+            matched++;
         }
+        log.info("[retrieval] first round done, subQueries={}, matched={}, contextLength={}",
+                subQueries.size(), matched, sb.length());
         return sb.toString();
     }
 
@@ -163,6 +170,8 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
         }
         // 步骤2：追加合并（空基线直接作为新上下文，避免前导换行）+ 总长截断防御
         String merged = state.context().isBlank() ? part : state.context() + "\n" + part;
+        log.info("[retrieval] hop merged, hop={}, addedLength={}, totalLength={}",
+                state.hop().count(), part.length(), merged.length());
         return merged.length() > MAX_CONTEXT_LENGTH ? merged.substring(0, MAX_CONTEXT_LENGTH) : merged;
     }
 
@@ -202,7 +211,8 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
                     userPrompt).text();
             String cleaned = clean(refined);
             if (!cleaned.isBlank()) {
-                log.info("[retrieval] requery refined: {} -> {}", state.effectiveQuery(), cleaned);
+                log.info("[retrieval] requery refined, queryLength={}, refinedLength={}",
+                        state.effectiveQuery().length(), cleaned.length());
                 return cleaned;
             }
         } catch (Exception e) {

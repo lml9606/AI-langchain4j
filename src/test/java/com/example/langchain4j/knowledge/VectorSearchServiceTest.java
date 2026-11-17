@@ -28,6 +28,8 @@ class VectorSearchServiceTest {
     @Mock
     private EmbeddingService embeddingService;
     @Mock
+    private SparseEmbeddingService sparseEmbeddingService;
+    @Mock
     private AgentProperties properties;
 
     private VectorSearchService service;
@@ -38,7 +40,7 @@ class VectorSearchServiceTest {
         retrieval.setContextBudget(1000);
         // lenient：空命中用例不读预算配置，避免严格模式报不必要的 stub
         lenient().when(properties.getRetrieval()).thenReturn(retrieval);
-        service = new VectorSearchService(knowledgeChunkMapper, embeddingService, properties);
+        service = new VectorSearchService(knowledgeChunkMapper, embeddingService, sparseEmbeddingService, properties);
     }
 
     /** 命中子块（parentId 非空） */

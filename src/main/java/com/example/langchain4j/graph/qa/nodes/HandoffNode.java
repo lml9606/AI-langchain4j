@@ -20,15 +20,17 @@ public class HandoffNode implements NodeAction<WorkflowState> {
 
     private final PromptTemplateService promptTemplateService;
 
+    /** 注入提示词服务。 */
     public HandoffNode(PromptTemplateService promptTemplateService) {
         this.promptTemplateService = promptTemplateService;
     }
 
+    /** 检索无结果时返回固定转人工提示并写入 HANDOFF 标记。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：记录触发转人工的意图与查询，便于排查检索质量
-        log.warn("[handoff] no knowledge match, intent={}, query={}",
-                state.intent(), state.effectiveQuery());
+        log.warn("[handoff] no knowledge match, intent={}, queryLength={}, contextLength={}, rootCause={}",
+                state.intent(), state.effectiveQuery().length(), state.context().length(), state.rootCause());
         // 步骤2：返回增量更新：固定转人工提示 + 转人工标记（服务层据此建工单）
         // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
         return Map.of(

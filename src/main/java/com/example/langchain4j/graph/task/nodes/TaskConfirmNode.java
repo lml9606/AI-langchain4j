@@ -25,11 +25,13 @@ public class TaskConfirmNode implements NodeAction<WorkflowState> {
     private final ConfirmationService confirmationService;
     private final ToolRegistry toolRegistry;
 
+    /** 注入确认令牌服务与工具注册表。 */
     public TaskConfirmNode(ConfirmationService confirmationService, ToolRegistry toolRegistry) {
         this.confirmationService = confirmationService;
         this.toolRegistry = toolRegistry;
     }
 
+    /** 为写工具创建一次性确认令牌，并返回待确认卡片，不执行实际写操作。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         Map<String, Object> pending = state.taskPendingAction();
@@ -44,6 +46,8 @@ public class TaskConfirmNode implements NodeAction<WorkflowState> {
                 .orElse(toolName);
         String summary = "即将执行：" + description + "。参数："
                 + JsonUtil.toJson(rawArgs == null ? Map.of() : rawArgs) + "。";
+        log.info("[task-confirm] creating token, tool={}, planSteps={}, conversation={}",
+                toolName, state.taskPlan().size(), state.conversationId());
 
         try {
             ConfirmationService.PendingAction action = confirmationService.create(
@@ -67,7 +71,8 @@ public class TaskConfirmNode implements NodeAction<WorkflowState> {
             updates.put(WorkflowState.TASK_CONFIDENCE_REASON, "等待用户确认写操作");
             updates.put(WorkflowState.TASK_CLARIFY, false);
             updates.put(WorkflowState.ERROR, "");
-            log.info("[task-confirm] token created, tool={}, id={}", toolName, action.confirmationId());
+            log.info("[task-confirm] token created, tool={}, idTail={}, conversation={}",
+                    toolName, idTail(action.confirmationId()), state.conversationId());
             return updates;
         } catch (BizException e) {
             log.warn("[task-confirm] create token failed: {}", e.getMessage());
@@ -86,11 +91,20 @@ public class TaskConfirmNode implements NodeAction<WorkflowState> {
                 WorkflowState.TASK_CONFIRMATION_REQUIRED, false);
     }
 
+    /** 安全读取字符串值；空值回退默认值。 */
     private String textOf(Object value, String defaultValue) {
         if (value == null) {
             return defaultValue;
         }
         String text = String.valueOf(value).trim();
         return text.isEmpty() ? defaultValue : text;
+    }
+
+    /** 确认令牌脱敏：长 ID 仅保留末 8 位，短 ID 完全隐藏。 */
+    private String idTail(String id) {
+        if (id == null || id.isBlank()) {
+            return "";
+        }
+        return id.length() <= 8 ? "***" : id.substring(id.length() - 8);
     }
 }

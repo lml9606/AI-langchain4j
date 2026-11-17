@@ -4,11 +4,14 @@ import com.example.langchain4j.common.response.ApiResponse;
 import com.example.langchain4j.dto.request.KnowledgeBatchImportRequest;
 import com.example.langchain4j.dto.request.KnowledgeUpdateRequest;
 import com.example.langchain4j.dto.response.KnowledgeBatchImportResponse;
+import com.example.langchain4j.dto.response.KnowledgeFileImportResponse;
 import com.example.langchain4j.dto.response.KnowledgeHealthResponse;
 import com.example.langchain4j.dto.response.KnowledgeSearchResponse;
 import com.example.langchain4j.service.KnowledgeService;
+import io.swagger.v3.oas.annotations.Operation;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -18,7 +21,11 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.util.List;
 
 /**
  * 知识接入层：父子分块导入（批量）、语义检索与知识治理
@@ -50,17 +57,22 @@ public class KnowledgeController {
     }
 
     /**
-     * 批量导入：多篇文档逐篇父子分块落库（父块整章不嵌入 + 子块嵌入；子块参数逐篇可配）。
+     * 文件上传导入：multipart 上传 PDF/Word/Markdown/txt，服务端解析文本后走父子分块落库。
      * <p>
-     * 特殊条件：单篇失败不中断整批。
+     * 特殊条件：单文件失败不中断整批（逐文件结果供重试失败项）；块归属当前登录用户（私有库）；
+     * 单文件大小上限见 spring.servlet.multipart.max-file-size 配置。
+     * <p>
+     * 文档说明：OpenAPI 将参数覆写描述为单文件 binary（Knife4j 4.4.0 不渲染 array&lt;binary&gt;
+     * 表单参数，原生推断的 List 会导致调试页无文件选择框）；实际接口支持同名 files 参数重复传多个文件。
      *
-     * @param request 批量导入请求（文档列表 + 分块参数）
-     * @return 逐篇导入结果，供重试失败项
+     * @param files 上传文件列表（支持多选；单次数量上限同 agent.knowledge.batch-max-documents）
+     * @return 逐文件导入结果（fileName / chunks / ok / error）
      */
-    @PostMapping("/batch")
-    public ApiResponse<KnowledgeBatchImportResponse> batchImport(
-            @Valid @RequestBody KnowledgeBatchImportRequest request) {
-        return ApiResponse.success(knowledgeService.batchImport(request));
+    @Operation(summary = "文件上传导入知识库并父子分块落库")
+    @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ApiResponse<KnowledgeFileImportResponse> upload(
+            @RequestPart("files") List<MultipartFile> files) {
+        return ApiResponse.success(knowledgeService.uploadFiles(files));
     }
 
     /**

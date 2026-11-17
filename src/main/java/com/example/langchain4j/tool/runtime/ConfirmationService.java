@@ -32,6 +32,7 @@ public class ConfirmationService {
     private final AgentProperties properties;
     private final ObjectMapper objectMapper = JsonUtil.copyMapper();
 
+    /** 注入 Redis 客户端与 Agent 配置。 */
     public ConfirmationService(RedissonClient redissonClient, AgentProperties properties) {
         this.redissonClient = redissonClient;
         this.properties = properties;
@@ -58,7 +59,8 @@ public class ConfirmationService {
         try {
             RBucket<String> bucket = redissonClient.getBucket(KEY_PREFIX + confirmationId);
             bucket.set(objectMapper.writeValueAsString(action), ttlSeconds, TimeUnit.SECONDS);
-            log.info("[confirm] created, id={}, tool={}, ttl={}s", confirmationId, tool, ttlSeconds);
+            log.info("[confirm] created, idTail={}, tool={}, ttl={}s",
+                    idTail(confirmationId), tool, ttlSeconds);
             return action;
         } catch (Exception e) {
             log.error("[confirm] create failed, fail-closed: {}", e.getMessage());
@@ -85,19 +87,31 @@ public class ConfirmationService {
             }
             PendingAction action = objectMapper.readValue(json, PendingAction.class);
             if (!userId.equals(action.userId())) {
-                log.warn("[confirm] user mismatch, id={}, owner={}, current={}",
-                        confirmationId, action.userId(), userId);
+                log.warn("[confirm] user mismatch, idTail={}, conversation={}",
+                        idTail(confirmationId), action.conversationId());
                 return Optional.empty();
             }
             if (action.expiresAt() < System.currentTimeMillis()) {
-                log.warn("[confirm] expired, id={}", confirmationId);
+                log.warn("[confirm] expired, idTail={}, conversation={}",
+                        idTail(confirmationId), action.conversationId());
                 return Optional.empty();
             }
+            log.info("[confirm] consumed, idTail={}, conversation={}, tool={}",
+                    idTail(confirmationId), action.conversationId(), action.tool());
             return Optional.of(action);
         } catch (Exception e) {
-            log.warn("[confirm] consume failed, fail-closed: {}", e.getMessage());
+            log.warn("[confirm] consume failed, idTail={}, fail-closed: {}",
+                    idTail(confirmationId), e.getMessage());
             return Optional.empty();
         }
+    }
+
+    /** 确认令牌脱敏：长 ID 仅保留末 8 位，短 ID 完全隐藏。 */
+    private String idTail(String id) {
+        if (id == null || id.isBlank()) {
+            return "";
+        }
+        return id.length() <= 8 ? "***" : id.substring(id.length() - 8);
     }
 
     /** 待确认写操作：plan 为完整执行计划，确认后原样交给执行图 */

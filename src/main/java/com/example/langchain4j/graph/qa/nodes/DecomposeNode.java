@@ -34,6 +34,7 @@ public class DecomposeNode implements NodeAction<WorkflowState> {
     private final AgentProperties properties;
     private final PromptTemplateService promptTemplateService;
 
+    /** 注入 LLM、配置与提示词服务。 */
     public DecomposeNode(LlmGateway llmGateway, AgentProperties properties,
                          PromptTemplateService promptTemplateService) {
         this.llmGateway = llmGateway;
@@ -41,12 +42,14 @@ public class DecomposeNode implements NodeAction<WorkflowState> {
         this.promptTemplateService = promptTemplateService;
     }
 
+    /** 调用问题分解并把子查询写回状态，供检索节点逐条召回。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：调用 LLM 分解子查询（内部 fail-open：任何失败降级为单查询）
         List<String> subQueries = decompose(state);
         // 步骤2：写入状态覆盖 entry 种入的默认单查询，供 RetrievalNode 首轮遍历检索
-        log.info("[decompose] subQueries={}", subQueries);
+        log.info("[decompose] done, count={}, lengths={}",
+                subQueries.size(), subQueries.stream().map(String::length).toList());
         return Map.of(WorkflowState.SUB_QUERIES, subQueries);
     }
 
