@@ -14,6 +14,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -88,7 +89,8 @@ class VectorSearchServiceTest {
         KnowledgeChunk hit = hit(10L, 5L);
         KnowledgeChunk parent = parent(5L, "## 退款规则", "父块整章上下文内容");
         when(knowledgeChunkMapper.selectParentById(5L, null)).thenReturn(parent);
-        when(knowledgeChunkMapper.selectParentsByTitle("## 退款规则", null)).thenReturn(List.of(parent));
+        when(knowledgeChunkMapper.selectParentsByTitle("## 退款规则", null, null, null))
+                .thenReturn(List.of(parent));
 
         List<KnowledgeChunk> result = service.assemble(List.of(hit));
 
@@ -104,7 +106,7 @@ class VectorSearchServiceTest {
         KnowledgeChunk p2 = parent(5L, "## 退款规则", "第二节内容");
         KnowledgeChunk p3 = parent(6L, "## 退款规则", "第三节内容");
         when(knowledgeChunkMapper.selectParentById(5L, null)).thenReturn(p2);
-        when(knowledgeChunkMapper.selectParentsByTitle("## 退款规则", null))
+        when(knowledgeChunkMapper.selectParentsByTitle("## 退款规则", null, null, null))
                 .thenReturn(List.of(p1, p2, p3));
 
         List<KnowledgeChunk> result = service.assemble(List.of(hit));
@@ -115,6 +117,25 @@ class VectorSearchServiceTest {
     }
 
     @Test
+    @DisplayName("长同标题组：命中末尾父块时优先保留命中块，不被组开头挤掉")
+    void assembleKeepsHitParentWhenBudgetTight() {
+        KnowledgeChunk hit = hit(10L, 7L);
+        KnowledgeChunk p1 = parent(5L, "## 长章节", "A".repeat(400));
+        KnowledgeChunk p2 = parent(6L, "## 长章节", "B".repeat(400));
+        KnowledgeChunk p3 = parent(7L, "## 长章节", "C".repeat(400));
+        when(knowledgeChunkMapper.selectParentById(7L, null)).thenReturn(p3);
+        when(knowledgeChunkMapper.selectParentsByTitle("## 长章节", null, null, null))
+                .thenReturn(List.of(p1, p2, p3));
+
+        List<KnowledgeChunk> result = service.assemble(List.of(hit));
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getContent()).contains("C".repeat(400));
+        assertThat(result.get(0).getContent()).doesNotContain("A".repeat(400));
+        assertThat(result.get(0).getContent().length()).isLessThanOrEqualTo(1000);
+    }
+
+    @Test
     @DisplayName("同 title 但 id 不连续（跨文档同标题）→ 只装命中父块不混拼")
     void assembleNonContiguousGroup() {
         KnowledgeChunk hit = hit(10L, 5L);
@@ -122,7 +143,7 @@ class VectorSearchServiceTest {
         KnowledgeChunk p2 = parent(5L, "## 退款规则", "命中父块内容");
         KnowledgeChunk pFar = parent(100L, "## 退款规则", "另一文档同标题内容");
         when(knowledgeChunkMapper.selectParentById(5L, null)).thenReturn(p2);
-        when(knowledgeChunkMapper.selectParentsByTitle("## 退款规则", null))
+        when(knowledgeChunkMapper.selectParentsByTitle("## 退款规则", null, null, null))
                 .thenReturn(List.of(p1, p2, pFar));
 
         List<KnowledgeChunk> result = service.assemble(List.of(hit));
@@ -132,13 +153,32 @@ class VectorSearchServiceTest {
     }
 
     @Test
+    @DisplayName("父块组回查带 documentId/version：不同版本文档不混拼")
+    void assembleScopesParentsByDocumentVersion() {
+        KnowledgeChunk hit = hit(10L, 5L);
+        KnowledgeChunk parent = parent(5L, "## 退款规则", "版本二内容");
+        parent.setDocumentId("doc-1");
+        parent.setVersion(2);
+        when(knowledgeChunkMapper.selectParentById(5L, null)).thenReturn(parent);
+        when(knowledgeChunkMapper.selectParentsByTitle("## 退款规则", null, "doc-1", 2))
+                .thenReturn(List.of(parent));
+
+        List<KnowledgeChunk> result = service.assemble(List.of(hit));
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getContent()).isEqualTo("版本二内容");
+        verify(knowledgeChunkMapper).selectParentsByTitle("## 退款规则", null, "doc-1", 2);
+    }
+
+    @Test
     @DisplayName("多个命中指向同一父块 → 去重只装配一次")
     void assembleDedupByParent() {
         KnowledgeChunk hit1 = hit(10L, 5L);
         KnowledgeChunk hit2 = hit(11L, 5L);
         KnowledgeChunk parent = parent(5L, "## 退款规则", "父块整章上下文内容");
         when(knowledgeChunkMapper.selectParentById(5L, null)).thenReturn(parent);
-        when(knowledgeChunkMapper.selectParentsByTitle("## 退款规则", null)).thenReturn(List.of(parent));
+        when(knowledgeChunkMapper.selectParentsByTitle("## 退款规则", null, null, null))
+                .thenReturn(List.of(parent));
 
         List<KnowledgeChunk> result = service.assemble(List.of(hit1, hit2));
 
@@ -154,8 +194,10 @@ class VectorSearchServiceTest {
         KnowledgeChunk parent2 = parent(6L, "## 标题B", "B".repeat(800));
         when(knowledgeChunkMapper.selectParentById(5L, null)).thenReturn(parent1);
         when(knowledgeChunkMapper.selectParentById(6L, null)).thenReturn(parent2);
-        when(knowledgeChunkMapper.selectParentsByTitle("## 标题A", null)).thenReturn(List.of(parent1));
-        when(knowledgeChunkMapper.selectParentsByTitle("## 标题B", null)).thenReturn(List.of(parent2));
+        when(knowledgeChunkMapper.selectParentsByTitle("## 标题A", null, null, null))
+                .thenReturn(List.of(parent1));
+        when(knowledgeChunkMapper.selectParentsByTitle("## 标题B", null, null, null))
+                .thenReturn(List.of(parent2));
 
         List<KnowledgeChunk> result = service.assemble(List.of(hit1, hit2));
 

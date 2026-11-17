@@ -107,6 +107,8 @@ CREATE TABLE IF NOT EXISTS ai_knowledge_chunk (
     content      TEXT NOT NULL,
     embedding    vector(1024),                             -- text-embedding-v3 输出维度
     metadata     JSONB,                                    -- 来源、标签等扩展信息
+    document_id  VARCHAR(64),                              -- 逻辑文档 ID（同一次导入的父/子块共享）
+    version      INTEGER NOT NULL DEFAULT 1,               -- 文档版本（同 document_id 重新导入时递增）
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- 已存在表补列（幂等）：所属用户（NULL = 公共库对所有用户可见；非 NULL 仅本用户可见/可查）
@@ -119,8 +121,14 @@ ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
 ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS parent_id BIGINT;
 ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS chunk_type VARCHAR(8) NOT NULL DEFAULT 'CHILD';
 ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS title VARCHAR(256);
+-- 文档版本：document_id 标识逻辑文档，version 标识该文档的一次完整导入；父/子块共享同一组值
+ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS document_id VARCHAR(64);
+ALTER TABLE ai_knowledge_chunk ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
 -- 父子关联索引：命中子块后按 parent_id 取兄弟块/父块（滑窗装配与父块内容重建）
 CREATE INDEX IF NOT EXISTS idx_knowledge_parent ON ai_knowledge_chunk (parent_id);
+-- 文档版本索引：按用户 + 文档版本过滤 / 清理旧版本
+CREATE INDEX IF NOT EXISTS idx_knowledge_document
+    ON ai_knowledge_chunk (user_id, document_id, version);
 -- HNSW 向量索引（余弦距离；写入量大的场景可考虑先写后建索引）
 CREATE INDEX IF NOT EXISTS idx_knowledge_embedding
     ON ai_knowledge_chunk USING hnsw (embedding vector_cosine_ops);

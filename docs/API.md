@@ -34,25 +34,23 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/knowledge/import` | 单条知识导入（嵌入 + 落库） |
-| POST | `/api/knowledge/batch` | 批量导入：逐篇分块嵌入落库，单篇失败不中断整批，返回逐条结果 |
+| POST | `/api/knowledge/upload` | 文件导入：Tika 解析 txt/md/pdf/docx，父子分块后嵌入落库；支持多文件 |
 | PUT | `/api/knowledge/{id}` | 更新知识块（重嵌向量；仅本人私有块，公共库 403） |
 | DELETE | `/api/knowledge/{id}` | 删除知识块（仅本人私有块，公共库 403） |
 | GET | `/api/knowledge/search?query=&topK=` | 语义检索（topK 有界防御 1~10） |
 | GET | `/api/knowledge/health` | 健康度：总块/私有/公共/空内容/无向量/平均长度/最近导入 |
 
-批量导入请求示例：
+文件导入示例（单文件更新已有逻辑文档版本）：
 
-```json
-{
-  "items": [
-    {"content": "长文档一...", "metadata": "{\"source\":\"wiki\"}", "chunkSize": 800, "chunkOverlap": 80},
-    {"content": "长文档二..."}
-  ]
-}
+```bash
+curl -X POST "http://localhost:8082/api/knowledge/upload?documentId=refund-policy&version=2" \
+  -H "Authorization: Bearer <token>" \
+  -F "files=@refund-policy.pdf"
 ```
 
-分块可配：`chunkSize`/`chunkOverlap` 逐篇可空，缺省用 `agent.knowledge.*` 配置；批量上限 `agent.knowledge.batch-max-documents`（默认 20）。
+`documentId`/`version` 可空：`documentId` 为空时生成新 UUID；`version` 为空时自动取当前最大版本 + 1。多文件上传不能共用同一组 `documentId`/`version`。
+
+分块策略：父子分块。父块按 Markdown/中文章节标题切分，保留整章上下文且不嵌入；子块按段落、标题、围栏代码块等结构语义单元合并，并同时受 `agent.knowledge.chunk-size` 字符上限与 `agent.knowledge.chunk-token-limit` token 估算上限约束。检索只召回每个 `documentId` 的最新 `version`。
 
 ## 4. 评测体系 `/api/eval`
 

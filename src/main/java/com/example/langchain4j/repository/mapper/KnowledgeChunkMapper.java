@@ -77,8 +77,26 @@ public interface KnowledgeChunkMapper {
      *
      * @param title  父块紧凑标题（与子块行的 title 列一致）
      * @param userId 当前用户；null 仅查公共库
+     * @param documentId 逻辑文档 ID；null 表示存量数据（不按文档过滤）
+     * @param version    文档版本；null 表示存量数据（不按版本过滤）
      */
-    List<KnowledgeChunk> selectParentsByTitle(@Param("title") String title, @Param("userId") String userId);
+    List<KnowledgeChunk> selectParentsByTitle(@Param("title") String title,
+                                              @Param("userId") String userId,
+                                              @Param("documentId") String documentId,
+                                              @Param("version") Integer version);
+
+    /** 查询同一用户下某逻辑文档的当前最大版本号；无记录返回 null */
+    Integer selectMaxVersion(@Param("documentId") String documentId, @Param("userId") String userId);
+
+    /** 删除同一用户下某逻辑文档的旧版本（保留当前版本，控制存储与误召回） */
+    int deleteOlderVersions(@Param("documentId") String documentId,
+                            @Param("version") Integer version,
+                            @Param("userId") String userId);
+
+    /** 删除某逻辑文档的指定版本（导入中途失败时清理已写入的半成品） */
+    int deleteDocumentVersion(@Param("documentId") String documentId,
+                              @Param("version") Integer version,
+                              @Param("userId") String userId);
 
     /**
      * 同父块下的兄弟子块（按 id 升序保持文档顺序）：滑窗装配时围绕命中子块补相邻上下文。

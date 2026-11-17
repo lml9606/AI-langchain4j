@@ -214,17 +214,14 @@ public class VectorSearchService {
             if (!seenGroups.add(dedupKey)) {
                 continue;
             }
-            String part = resolveParentContext(hit, userId);
-            if (part.isBlank()) {
-                continue;
-            }
-            // 预算截断：剩余预算不足时截尾（首命中优先保证完整，尾部命中可能只入部分）
             int remaining = budget - used;
             if (remaining <= 0) {
                 break;
             }
-            if (part.length() > remaining) {
-                part = part.substring(0, remaining);
+            // 命中父块优先占预算：长同 title 组从组开头拼接时，命中块可能被前面的块挤出上下文
+            String part = resolveParentContext(hit, userId, remaining);
+            if (part.isBlank()) {
+                continue;
             }
             used += part.length();
             KnowledgeChunk ctx = new KnowledgeChunk();
@@ -234,34 +231,114 @@ public class VectorSearchService {
         return assembled;
     }
 
-    /** 解析命中块的装配原文：新数据取父块（同 title 相邻组拼接），孤儿子块退化子块原文；查询失败 fail-open 降级子块原文 */
-    private String resolveParentContext(KnowledgeChunk hit, String userId) {
+    /** 解析命中块的装配原文：新数据取父块（同 title 相邻组按命中块优先拼接），查询失败 fail-open 降级子块原文 */
+    private String resolveParentContext(KnowledgeChunk hit, String userId, int budget) {
         if (hit.getParentId() == null) {
-            return hit.getContent();
+            return truncate(hit.getContent(), budget);
         }
         try {
             KnowledgeChunk parent = knowledgeChunkMapper.selectParentById(hit.getParentId(), userId);
             if (parent == null || parent.getContent() == null) {
-                return hit.getContent();
+                return truncate(hit.getContent(), budget);
             }
             if (parent.getTitle() == null || parent.getTitle().isBlank()) {
-                return parent.getContent();
+                return truncate(parent.getContent(), budget);
             }
-            // 同 title 父块组：长章节拆多父块时整组找回；仅取 id 相邻连续段（同文档拆块 id 连续），防跨文档同标题误拼
-            List<KnowledgeChunk> group = knowledgeChunkMapper.selectParentsByTitle(parent.getTitle(), userId);
+            // 同文档 + 同版本 + 同 title 父块组：长章节拆多父块时整组找回；id 相邻连续段再防重复章节误拼
+            List<KnowledgeChunk> group = knowledgeChunkMapper.selectParentsByTitle(
+                    parent.getTitle(), userId, parent.getDocumentId(), parent.getVersion());
             List<KnowledgeChunk> contiguous = contiguousGroup(group, parent.getId());
             if (contiguous.size() <= 1) {
-                return parent.getContent();
+                return truncate(parent.getContent(), budget);
             }
-            return contiguous.stream()
-                    .map(KnowledgeChunk::getContent)
-                    .filter(java.util.Objects::nonNull)
-                    .reduce((a, b) -> a + "\n\n" + b)
-                    .orElse(parent.getContent());
+            return assembleAdjacentGroup(contiguous, parent.getId(), budget);
         } catch (Exception e) {
             log.warn("[vector] parent assembly degraded, parentId={}, reason={}", hit.getParentId(), e.getMessage());
-            return hit.getContent();
+            return truncate(hit.getContent(), budget);
         }
+    }
+
+    /**
+     * 同 title 相邻父块组装配：命中父块先完整入预算，再按距离向左右补相邻块，最后按 id 还原文档顺序。
+     * 相邻块放不下时停止该方向，避免跳过中间块导致上下文断裂。
+     */
+    private String assembleAdjacentGroup(List<KnowledgeChunk> group, Long hitParentId, int budget) {
+        int hitIndex = -1;
+        for (int i = 0; i < group.size(); i++) {
+            if (group.get(i) != null && hitParentId.equals(group.get(i).getId())) {
+                hitIndex = i;
+                break;
+            }
+        }
+        if (hitIndex < 0) {
+            return "";
+        }
+        String hitContent = group.get(hitIndex).getContent();
+        if (hitContent == null) {
+            return "";
+        }
+        if (hitContent.length() >= budget) {
+            return hitContent.substring(0, budget);
+        }
+        int used = hitContent.length();
+        int left = hitIndex - 1;
+        int right = hitIndex + 1;
+        boolean canLeft = true;
+        boolean canRight = true;
+        while (canLeft || canRight) {
+            boolean progressed = false;
+            if (canLeft) {
+                if (left < 0) {
+                    canLeft = false;
+                } else {
+                    String content = group.get(left).getContent();
+                    if (content != null && used + 2 + content.length() <= budget) {
+                        used += 2 + content.length();
+                        left--;
+                        progressed = true;
+                    } else {
+                        canLeft = false;
+                    }
+                }
+            }
+            if (canRight) {
+                if (right >= group.size()) {
+                    canRight = false;
+                } else {
+                    String content = group.get(right).getContent();
+                    if (content != null && used + 2 + content.length() <= budget) {
+                        used += 2 + content.length();
+                        right++;
+                        progressed = true;
+                    } else {
+                        canRight = false;
+                    }
+                }
+            }
+            if (!progressed) {
+                break;
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = left + 1; i < right; i++) {
+            String content = group.get(i).getContent();
+            if (content == null) {
+                continue;
+            }
+            if (!sb.isEmpty()) {
+                sb.append("\n\n");
+            }
+            sb.append(content);
+        }
+        return sb.toString();
+    }
+
+    /** 按剩余预算截断原文；null 视为空串 */
+    private String truncate(String text, int budget) {
+        if (text == null) {
+            return "";
+        }
+        return text.length() <= budget ? text : text.substring(0, budget);
     }
 
     /**

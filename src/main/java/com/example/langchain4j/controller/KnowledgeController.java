@@ -66,13 +66,17 @@ public class KnowledgeController {
      * 表单参数，原生推断的 List 会导致调试页无文件选择框）；实际接口支持同名 files 参数重复传多个文件。
      *
      * @param files 上传文件列表（支持多选；单次数量上限同 agent.knowledge.batch-max-documents）
+     * @param documentId 逻辑文档 ID（可空；单文件重导同一文档时传入，用于版本更新）
+     * @param version    文档版本（可空；空则自动取当前最大版本 + 1）
      * @return 逐文件导入结果（fileName / chunks / ok / error）
      */
     @Operation(summary = "文件上传导入知识库并父子分块落库")
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ApiResponse<KnowledgeFileImportResponse> upload(
-            @RequestPart("files") List<MultipartFile> files) {
-        return ApiResponse.success(knowledgeService.uploadFiles(files));
+            @RequestPart("files") List<MultipartFile> files,
+            @RequestParam(required = false) String documentId,
+            @RequestParam(required = false) Integer version) {
+        return ApiResponse.success(knowledgeService.uploadFiles(files, documentId, version));
     }
 
     /**

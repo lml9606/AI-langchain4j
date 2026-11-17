@@ -4,6 +4,7 @@ import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.util.JsonUtil;
+import com.example.langchain4j.common.util.TokenEstimator;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.request.KnowledgeBatchImportRequest;
 import com.example.langchain4j.dto.request.KnowledgeUpdateRequest;
@@ -29,12 +30,12 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -53,6 +54,11 @@ public class KnowledgeService {
     /** 父块大小防御边界：过小失去整章语义、过大装配时超出上下文预算 */
     private static final int MIN_PARENT_SIZE = 500;
     private static final int MAX_PARENT_SIZE = 8000;
+    /** 子块 token 估算上限（与字符上限双约束）：中文按 1 字 1 token 的保守估算，给嵌入模型留安全余量 */
+    private static final int MIN_CHUNK_TOKEN_LIMIT = 256;
+    private static final int MAX_CHUNK_TOKEN_LIMIT = 2048;
+    /** 逻辑文档 ID 列宽（schema: VARCHAR(64)） */
+    private static final int MAX_DOCUMENT_ID_LENGTH = 64;
     /** 段落边界：空行切分优先级最高，保证段落语义块完整 */
     private static final String PARAGRAPH_BOUNDARY = "\n\n";
     /** 句末边界字符：段落/行边界都找不到时退而求其次，避免把句子拦腰截断 */
@@ -62,10 +68,7 @@ public class KnowledgeService {
     private static final String TYPE_CHILD = "CHILD";
     /** 子块 content 标题前缀分隔符（方案 A：父标题拼进子块，解决父标题检索不到问题） */
     private static final String TITLE_SEPARATOR = "｜";
-    /**
-     * 强结构标题行：Markdown 标题（#~######）与中文章节（第X章/节/篇/部）。
-     * 文档存在这类标题时只用它们切父块——有序列表（“1. xxx”）不会被误判为章节。
-     */
+    /** 强结构标题行：Markdown 标题（#~######）与中文章节（第X章/节/篇/部）；Markdown 优先按层级处理 */
     private static final Pattern STRONG_TITLE_LINE = Pattern.compile(
             "^[ \\t]*(?:#{1,6}[ \\t]+\\S|第[一二三四五六七八九十百千\\d]+[章节篇部]).*",
             Pattern.MULTILINE);
@@ -75,6 +78,8 @@ public class KnowledgeService {
     /** 单级编号标题（1、/ 1.）：最后兜底——文档连多级编号都没有时，编号行大概率就是章节 */
     private static final Pattern SINGLE_LEVEL_TITLE_LINE = Pattern.compile(
             "^[ \\t]*\\d+[、.．][ \\t]*\\S.*", Pattern.MULTILINE);
+    /** Markdown 标题行：语义切分子块时作为结构边界（不依赖空行也能断开） */
+    private static final Pattern MARKDOWN_HEADING_LINE = Pattern.compile("^#{1,6}[ \\t]+\\S.*");
 
     private final KnowledgeChunkMapper knowledgeChunkMapper;
     private final EmbeddingService embeddingService;
@@ -115,16 +120,14 @@ public class KnowledgeService {
     }
 
     /**
-     * 导入长文档（父子分块）：
-     * 步骤1 按标题/章节切父块（整章上下文，约 parentChunkSize，不嵌入）；
-     * 步骤2 父块内按段落切子块（约 chunkSize，标题前缀拼入 content 后嵌入）；
-     * 步骤3 父块先落库拿自增 ID，子块回填 parent_id 后批量落库。
-     * 子块大小/重叠可配：请求级 chunkSize/chunkOverlap 优先，缺省用 agent.knowledge 配置值；
-     * 父块大小仅走配置（章节边界优先，大小是上限参考）。
+     * 导入长文档并绑定逻辑文档版本。
      *
+     * @param documentId 逻辑文档 ID；空则生成 UUID（新文档）
+     * @param version    文档版本；空则自动取当前最大版本 + 1，显式值必须大于当前最大版本
      * @return 落库总块数（父块 + 子块）
      */
-    public int importDocument(String content, String metadata, Integer chunkSize, Integer chunkOverlap) {
+    public int importDocument(String content, String metadata, Integer chunkSize, Integer chunkOverlap,
+                              String documentId, Integer version) {
         String cleaned = sanitize(content);
         if (cleaned.isEmpty()) {
             throw new BizException(ErrorCode.BAD_REQUEST, "content 清洗后为空");
@@ -133,7 +136,10 @@ public class KnowledgeService {
         int childSize = boundedChunkSize(chunkSize);
         int overlap = boundedChunkOverlap(chunkOverlap, childSize);
         int parentSize = boundedParentChunkSize();
+        int childTokenLimit = boundedChunkTokenLimit();
         String userId = UserContext.require();
+        String resolvedDocumentId = resolveDocumentId(documentId);
+        int resolvedVersion = resolveVersion(resolvedDocumentId, userId, version);
         // 步骤1：按标题/章节切父块（同 title 长章节可拆多父块，装配时按 title 组找回）
         List<ParentSection> sections = splitParents(cleaned, parentSize);
         // 步骤2：逐父块切子块并嵌入（易失败的嵌入先行，失败时尚未落库零残留）
@@ -148,8 +154,10 @@ public class KnowledgeService {
             parent.setTitle(section.title());
             parent.setMetadata(withChunkInfo(metadata, p + 1, sections.size()));
             parent.setUserId(userId);
+            parent.setDocumentId(resolvedDocumentId);
+            parent.setVersion(resolvedVersion);
             parents.add(parent);
-            List<String> pieces = split(section.body(), childSize, overlap);
+            List<String> pieces = splitChildren(section.body(), section.title(), childSize, overlap, childTokenLimit);
             for (int i = 0; i < pieces.size(); i++) {
                 KnowledgeChunk child = new KnowledgeChunk();
                 String piece = pieces.get(i);
@@ -165,25 +173,54 @@ public class KnowledgeService {
                 child.setTitle(section.title());
                 child.setMetadata(withChunkInfo(metadata, i + 1, pieces.size()));
                 child.setUserId(userId);
+                child.setDocumentId(resolvedDocumentId);
+                child.setVersion(resolvedVersion);
                 children.add(child);
             }
             childrenPerParent.add(pieces.size());
         }
-        // 步骤3：父块逐个落库拿自增 ID，子块按父块顺序回填 parent_id 后一次批量落库
-        int cursor = 0;
-        for (int p = 0; p < parents.size(); p++) {
-            knowledgeChunkMapper.insert(parents.get(p));
-            for (int i = 0; i < childrenPerParent.get(p); i++) {
-                children.get(cursor + i).setParentId(parents.get(p).getId());
+        try {
+            // 步骤3：父块逐个落库拿自增 ID，子块按父块顺序回填 parent_id 后一次批量落库
+            int cursor = 0;
+            for (int p = 0; p < parents.size(); p++) {
+                knowledgeChunkMapper.insert(parents.get(p));
+                for (int i = 0; i < childrenPerParent.get(p); i++) {
+                    children.get(cursor + i).setParentId(parents.get(p).getId());
+                }
+                cursor += childrenPerParent.get(p);
             }
-            cursor += childrenPerParent.get(p);
+            if (!children.isEmpty()) {
+                knowledgeChunkMapper.insertBatch(children);
+            }
+        } catch (RuntimeException e) {
+            // 失败版本必须清理：否则半成品会成为 MAX(version)，把上一份完整版本遮住
+            cleanupFailedImport(resolvedDocumentId, resolvedVersion, userId);
+            throw e;
         }
-        if (!children.isEmpty()) {
-            knowledgeChunkMapper.insertBatch(children);
+        // 新版本已完整落库后再清理旧版本；检索端按 MAX(version) 过滤，清理失败也不会召回旧内容
+        if (resolvedVersion > 1) {
+            try {
+                knowledgeChunkMapper.deleteOlderVersions(resolvedDocumentId, resolvedVersion, userId);
+            } catch (Exception e) {
+                log.warn("[knowledge] old version cleanup failed, documentId={}, version={}, reason={}",
+                        resolvedDocumentId, resolvedVersion, e.getMessage());
+            }
         }
-        log.info("[knowledge] document imported, parents={}, children={}, parentSize={}, childSize={}",
-                parents.size(), children.size(), parentSize, childSize);
+        log.info("[knowledge] document imported, documentId={}, version={}, parents={}, children={}, "
+                        + "parentSize={}, childSize={}, childTokenLimit={}",
+                resolvedDocumentId, resolvedVersion, parents.size(), children.size(),
+                parentSize, childSize, childTokenLimit);
         return parents.size() + children.size();
+    }
+
+    /** 清理导入失败时可能已落库的半成品版本（尽力而为，清理失败不覆盖原始异常） */
+    private void cleanupFailedImport(String documentId, int version, String userId) {
+        try {
+            knowledgeChunkMapper.deleteDocumentVersion(documentId, version, userId);
+        } catch (Exception cleanupError) {
+            log.warn("[knowledge] failed import cleanup failed, documentId={}, version={}, reason={}",
+                    documentId, version, cleanupError.getMessage());
+        }
     }
 
     /**
@@ -196,9 +233,21 @@ public class KnowledgeService {
      * @return 逐文件导入结果（fileName / chunks / ok / error），失败项供重试
      */
     public KnowledgeFileImportResponse uploadFiles(List<MultipartFile> files) {
+        return uploadFiles(files, null, null);
+    }
+
+    /**
+     * 文件上传导入（可指定逻辑文档与版本）。
+     * <p>
+     * 多文件请求不能共用同一个 documentId；单文件可传 documentId/version 实现同文档版本更新。
+     */
+    public KnowledgeFileImportResponse uploadFiles(List<MultipartFile> files, String documentId, Integer version) {
         int maxFiles = Math.max(1, properties.getKnowledge().getBatchMaxDocuments());
         if (files.size() > maxFiles) {
             throw new BizException(ErrorCode.BAD_REQUEST, "单次最多上传 " + maxFiles + " 个文件");
+        }
+        if (files.size() > 1 && (documentId != null || version != null)) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "多文件上传不能共用 documentId/version");
         }
         List<KnowledgeFileImportResponse.FileResult> results = new ArrayList<>(files.size());
         int imported = 0;
@@ -212,7 +261,7 @@ public class KnowledgeService {
                 }
                 String text = fileParser.extract(fileName, file.getBytes());
                 String metadata = "{\"source\":\"file:" + fileName + "\"}";
-                int chunks = importDocument(text, metadata, null, null);
+                int chunks = importDocument(text, metadata, null, null, documentId, version);
                 results.add(new KnowledgeFileImportResponse.FileResult(i, fileName, chunks, true, null));
                 imported++;
             } catch (Exception e) {
@@ -347,7 +396,241 @@ public class KnowledgeService {
     }
 
     /**
-     * 入口 token 拦截：单篇内容超过上限直接拒绝导入/更新。
+     * 子块语义切分：先按空行 / Markdown 标题拆成语义单元，代码块作为一个整体保留；
+     * 单元只在预算内合并，单个单元超预算时才递归回退到句子 / 硬切。
+     * <p>
+     * 字符上限与 token 估算上限同时生效。token 使用 {@link TokenEstimator} 的保守估算，
+     * 目的是防止长英文、代码块或中文密排文本把嵌入输入撑爆；它不是模型 tokenizer 的精确替代。
+     */
+    List<String> splitSemantic(String content, int chunkSize, int chunkOverlap, int maxTokens) {
+        if (content == null || content.isBlank()) {
+            return List.of();
+        }
+        String text = content.trim();
+        int tokenLimit = Math.max(1, maxTokens);
+        // TokenEstimator 对 CJK 按 1 字 1 token 估算，因此字符上限不超过 token 上限即可形成保守兜底
+        int charLimit = Math.max(1, Math.min(chunkSize, tokenLimit));
+        if (fits(text, charLimit, tokenLimit)) {
+            return List.of(text);
+        }
+
+        List<String> parts = expandSemanticUnits(text, charLimit, tokenLimit);
+        List<String> pieces = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        String carry = "";
+        for (String part : parts) {
+            if (part == null || part.isBlank()) {
+                continue;
+            }
+            String candidate = current.isEmpty() ? part : current + "\n\n" + part;
+            if (!current.isEmpty() && !fits(candidate, charLimit, tokenLimit)) {
+                String flushed = current.toString().trim();
+                if (!flushed.isEmpty()) {
+                    pieces.add(flushed);
+                }
+                carry = overlapSuffix(flushed, chunkOverlap, charLimit, tokenLimit);
+                current.setLength(0);
+            }
+            if (current.isEmpty() && !carry.isEmpty()) {
+                if (fits(carry + "\n\n" + part, charLimit, tokenLimit)) {
+                    current.append(carry).append("\n\n");
+                }
+                // 带上重叠后放不下时直接丢弃 carry，保证单块不超预算
+                carry = "";
+            }
+            if (!current.isEmpty()) {
+                current.append("\n\n");
+            }
+            current.append(part);
+        }
+        if (!current.isEmpty()) {
+            pieces.add(current.toString().trim());
+        }
+        return pieces;
+    }
+
+    /** 父块内切子块：预扣标题前缀 token，保证拼上标题后的最终 childText 仍在预算内 */
+    private List<String> splitChildren(String body, String title, int maxChars, int overlap, int maxTokens) {
+        String titlePrefix = title == null || title.isBlank() ? "" : title + TITLE_SEPARATOR;
+        int prefixTokens = TokenEstimator.estimate(titlePrefix);
+        // 预留 16 token 余量吸收估算误差与分隔符拼接差异
+        int bodyTokenLimit = Math.max(64, maxTokens - prefixTokens - 16);
+        int bodyCharLimit = Math.min(maxChars, bodyTokenLimit);
+        int bodyOverlap = Math.min(overlap, bodyCharLimit / 2);
+        return splitSemantic(body, bodyCharLimit, bodyOverlap, bodyTokenLimit);
+    }
+
+    /** 把语义单元展开为不超过预算的切片：正常单元原样保留，超大单元才回退到句子/硬切 */
+    private List<String> expandSemanticUnits(String content, int charLimit, int tokenLimit) {
+        List<String> parts = new ArrayList<>();
+        for (String unit : semanticUnits(content)) {
+            if (fits(unit, charLimit, tokenLimit)) {
+                parts.add(unit);
+            } else {
+                parts.addAll(split(unit, charLimit, 0));
+            }
+        }
+        return parts;
+    }
+
+    /**
+     * 结构语义单元识别：空行结束段落；Markdown 标题开新单元；围栏代码块（``` / ~~~）跨空行保持完整。
+     * 不引入额外元数据，仅用文本自身结构决定切分边界。
+     */
+    private List<String> semanticUnits(String content) {
+        List<String> units = new ArrayList<>();
+        StringBuilder block = new StringBuilder();
+        String fence = null;
+        for (String line : content.split("\n", -1)) {
+            String trimmed = line.trim();
+            if (fence != null) {
+                block.append(line).append('\n');
+                if (trimmed.startsWith(fence)) {
+                    flushSemanticUnit(block, units);
+                    fence = null;
+                }
+                continue;
+            }
+            String openedFence = fenceMarker(trimmed);
+            if (openedFence != null) {
+                flushSemanticUnit(block, units);
+                block.append(line).append('\n');
+                fence = openedFence;
+                continue;
+            }
+            if (trimmed.isEmpty()) {
+                flushSemanticUnit(block, units);
+                continue;
+            }
+            if (MARKDOWN_HEADING_LINE.matcher(trimmed).matches() && !block.isEmpty()) {
+                flushSemanticUnit(block, units);
+            }
+            block.append(line).append('\n');
+        }
+        flushSemanticUnit(block, units);
+        return units;
+    }
+
+    /** 围栏代码块起始标记；普通行返回 null */
+    private String fenceMarker(String trimmedLine) {
+        if (trimmedLine.startsWith("```")) {
+            return "```";
+        }
+        return trimmedLine.startsWith("~~~") ? "~~~" : null;
+    }
+
+    /** 提交当前语义单元（空块忽略） */
+    private void flushSemanticUnit(StringBuilder block, List<String> units) {
+        String unit = block.toString().trim();
+        block.setLength(0);
+        if (!unit.isEmpty()) {
+            units.add(unit);
+        }
+    }
+
+    /** 字符与 token 双预算判断 */
+    private boolean fits(CharSequence text, int charLimit, int tokenLimit) {
+        return text != null
+                && text.length() <= charLimit
+                && TokenEstimator.estimate(text.toString()) <= tokenLimit;
+    }
+
+    /**
+     * 取上一块末尾的完整句子作为语义重叠：从最后一个句末标点向前找句子起点，
+     * 不截半个词或半句话；找不到完整句子就放弃重叠。
+     * 重叠量不超过单块预算的 1/3，避免重叠反而挤掉正文。
+     */
+    private String overlapSuffix(String text, int overlap, int charLimit, int tokenLimit) {
+        if (text == null || text.isBlank() || overlap <= 0) {
+            return "";
+        }
+        int maxCarry = Math.max(1, Math.min(charLimit / 3, tokenLimit / 3));
+        int carryChars = Math.min(overlap, maxCarry);
+        int end = lastSentenceEndExclusive(text);
+        if (end <= 0) {
+            return "";
+        }
+        int start = sentenceStartAtOrAfter(text, Math.max(0, end - carryChars), end);
+        if (start < 0) {
+            return "";
+        }
+        String suffix = text.substring(start, end).trim();
+        int maxCarryTokens = Math.max(1, tokenLimit / 3);
+        // token 预算仍可能因英文/代码密度超标：从左侧整句丢弃，绝不截断句子
+        while (!suffix.isEmpty() && TokenEstimator.estimate(suffix) > maxCarryTokens) {
+            start = sentenceStartAtOrAfter(text, start + 1, end);
+            if (start < 0) {
+                return "";
+            }
+            suffix = text.substring(start, end).trim();
+        }
+        return suffix;
+    }
+
+    /** 最后一个完整句子的结束位置（exclusive，含句末标点后的引号/括号）；没有句末标点返回 -1 */
+    private int lastSentenceEndExclusive(String text) {
+        for (int i = text.length() - 1; i >= 0; i--) {
+            if (!isSentenceEnd(text, i)) {
+                continue;
+            }
+            int end = i + 1;
+            while (end < text.length() && isClosingPunctuation(text.charAt(end))) {
+                end++;
+            }
+            return end;
+        }
+        return -1;
+    }
+
+    /**
+     * 在 [from, limit) 内找第一个完整句子起点：前一个非空白字符必须是句末标点，
+     * 保证重叠不会从半个句子开始。
+     */
+    private int sentenceStartAtOrAfter(String text, int from, int limit) {
+        for (int i = Math.max(0, from); i < limit; i++) {
+            if (Character.isWhitespace(text.charAt(i))) {
+                continue;
+            }
+            if (i == 0) {
+                return 0;
+            }
+            int prev = i - 1;
+            while (prev >= 0 && Character.isWhitespace(text.charAt(prev))) {
+                prev--;
+            }
+            while (prev >= 0 && isClosingPunctuation(text.charAt(prev))) {
+                prev--;
+            }
+            if (prev < 0 || isSentenceEnd(text, prev)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** 句末标点：中文标点直接判定；英文标点要求后接空白/结尾，避免把小数点或代码符号当句末 */
+    private boolean isSentenceEnd(String text, int index) {
+        char current = text.charAt(index);
+        if ("。！？；".indexOf(current) >= 0) {
+            return true;
+        }
+        if (current != '.' && current != '!' && current != '?' && current != ';') {
+            return false;
+        }
+        int next = index + 1;
+        while (next < text.length() && isClosingPunctuation(text.charAt(next))) {
+            next++;
+        }
+        return next >= text.length() || Character.isWhitespace(text.charAt(next));
+    }
+
+    /** 句末标点后可能紧跟的闭合符号，提取完整句子时一并带上 */
+    private boolean isClosingPunctuation(char current) {
+        return "”’\"'」』】）)》〉".indexOf(current) >= 0;
+    }
+
+    /**
+     * 入口大小拦截：单篇内容超过字符上限直接拒绝导入/更新。
      * 拒绝而非截断：静默截断会丢内容且用户无感知，显式报错让用户自行拆分后重导。
      */
     private void checkDocumentSize(String content) {
@@ -378,6 +661,41 @@ public class KnowledgeService {
         return Math.min(Math.max(overlap, 0), chunkSize / 2);
     }
 
+    /** 子块 token 估算上限：256~2048，防配置过小碎片化或过大超出嵌入模型预算 */
+    private int boundedChunkTokenLimit() {
+        int configured = properties.getKnowledge().getChunkTokenLimit();
+        return Math.min(Math.max(configured, MIN_CHUNK_TOKEN_LIMIT), MAX_CHUNK_TOKEN_LIMIT);
+    }
+
+    /** 归一化逻辑文档 ID：未传生成新 UUID；显式值做长度防御（对应 VARCHAR(64)） */
+    private String resolveDocumentId(String documentId) {
+        if (documentId == null || documentId.isBlank()) {
+            return UUID.randomUUID().toString();
+        }
+        String trimmed = documentId.trim();
+        if (trimmed.length() > MAX_DOCUMENT_ID_LENGTH) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "documentId 长度不能超过 " + MAX_DOCUMENT_ID_LENGTH);
+        }
+        return trimmed;
+    }
+
+    /** 解析版本：未传则当前最大版本 + 1；显式版本必须为正且大于当前最大版本 */
+    private int resolveVersion(String documentId, String userId, Integer version) {
+        Integer currentMax = knowledgeChunkMapper.selectMaxVersion(documentId, userId);
+        if (version == null) {
+            return currentMax == null ? 1 : currentMax + 1;
+        }
+        if (version < 1) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "version 必须大于 0");
+        }
+        if (currentMax != null && version <= currentMax) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "version 必须大于当前版本 " + currentMax);
+        }
+        return version;
+    }
+
     /** 元数据追加分块信息（chunkIndex/chunkCount）：原 JSON 对象合并，非 JSON 原文保留在 raw 字段 */
     private String withChunkInfo(String metadata, int index, int total) {
         Map<String, Object> map = new LinkedHashMap<>();
@@ -398,69 +716,169 @@ public class KnowledgeService {
     }
 
     /**
-     * 父子分块第一层：按标题/章节行切父块（整章上下文，不嵌入）。
+     * 父子分块第一层：按标题层级切父块（整章上下文，不嵌入）。
      * <ul>
-     *   <li>有标题行 → 标题行开新节；首个标题前的正文（前言）用兜底标题单独成节；</li>
+     *   <li>Markdown 标题按 # 数量分层，选最外层章节作为父块边界：
+     *       “## 一、Java 基础”下的所有“### ...”都属于同一个父块，不会被拆成孤立大标题；</li>
+     *   <li>只有一个一级标题时视为文档标题，不参与父块边界，避免整篇退化成同一个父标题；</li>
+     *   <li>只有标题、没有正文的节并入下一节，标题文本原样保留，避免产生无检索价值的空父块；</li>
+     *   <li>围栏代码块中的 # 注释不当作标题；</li>
      *   <li>无标题行 → 单一节，title 取首行（≤40 字）否则前 100 字；</li>
      *   <li>节超父块大小 → 复用 {@link #split} 续切成多个同 title 父块
      *       （同 title 组装配补长章节被拆散的漏）。</li>
      * </ul>
      */
     List<ParentSection> splitParents(String content, int parentSize) {
-        List<Integer> titleStarts = titleStarts(content);
-        if (titleStarts.isEmpty()) {
+        List<Heading> headings = headings(content);
+        if (headings.isEmpty()) {
             String title = deriveTitle(content);
             return split(content, parentSize, 0).stream()
                     .map(piece -> new ParentSection(title, piece))
                     .toList();
         }
+        int parentLevel = parentLevel(headings);
+        List<Heading> boundaries = headings.stream()
+                .filter(heading -> heading.level() == parentLevel)
+                .toList();
         List<ParentSection> sections = new ArrayList<>();
+        StringBuilder pending = new StringBuilder();
         // 标题前的正文（前言）单独成节，title 用兜底标题
-        if (titleStarts.get(0) > 0) {
-            String preamble = content.substring(0, titleStarts.get(0)).trim();
+        if (boundaries.get(0).start() > 0) {
+            String preamble = content.substring(0, boundaries.get(0).start()).trim();
             if (!preamble.isEmpty()) {
-                String title = deriveTitle(preamble);
-                for (String piece : split(preamble, parentSize, 0)) {
-                    sections.add(new ParentSection(title, piece));
+                if (hasBodyBeyondFirstLine(preamble)) {
+                    addSections(sections, deriveTitle(preamble), preamble, parentSize);
+                } else {
+                    // 前言只有标题时不能单独成块，并入第一个正文节，标题文本不丢
+                    pending.append(preamble);
                 }
             }
         }
-        // 相邻标题行之间为一个节；节首行即标题（超长节续切为同 title 多父块）
-        for (int i = 0; i < titleStarts.size(); i++) {
-            int begin = titleStarts.get(i);
-            int end = i + 1 < titleStarts.size() ? titleStarts.get(i + 1) : content.length();
+        // 相邻同层标题之间为一个节；外层标题包含其下所有更深层标题
+        for (int i = 0; i < boundaries.size(); i++) {
+            int begin = boundaries.get(i).start();
+            int end = i + 1 < boundaries.size() ? boundaries.get(i + 1).start() : content.length();
             String section = content.substring(begin, end).trim();
             if (section.isEmpty()) {
                 continue;
             }
-            String title = extractTitle(section);
-            for (String piece : split(section, parentSize, 0)) {
-                sections.add(new ParentSection(title, piece));
+            if (!hasBodyBeyondFirstLine(section)) {
+                // 只有标题的节并入下一节；连续空标题按原顺序一起挂到下一节
+                if (!pending.isEmpty()) {
+                    pending.append("\n\n");
+                }
+                pending.append(section);
+                continue;
             }
+            String title = extractTitle(section);
+            String body = pending.isEmpty() ? section : pending.toString() + "\n\n" + section;
+            pending.setLength(0);
+            addSections(sections, title, body, parentSize);
+        }
+        // 文档末尾只有标题：没有下一节可并，保留为父块，不能丢内容
+        if (!pending.isEmpty()) {
+            String leftover = pending.toString().trim();
+            addSections(sections, extractTitle(leftover), leftover, parentSize);
         }
         return sections;
     }
 
     /**
-     * 扫描标题行起点（按结构强度逐级回退）：强结构（#/第X章）> 多级编号（1.1）> 单级编号（1.）。
-     * 逐级回退是为了避免有序列表（“1. xxx”）在正常 Markdown 文档里被误切成章节。
+     * 扫描标题行并标注层级。Markdown 标题用 # 数量作层级；非 Markdown 标题统一按同一层处理。
+     * 按结构强度逐级回退：强结构（#/第X章）> 多级编号（1.1）> 单级编号（1.）；
+     * 围栏代码块内的行不参与标题识别。
      */
-    private List<Integer> titleStarts(String content) {
-        for (Pattern pattern : List.of(STRONG_TITLE_LINE, MULTI_LEVEL_TITLE_LINE, SINGLE_LEVEL_TITLE_LINE)) {
-            Matcher matcher = pattern.matcher(content);
-            List<Integer> starts = new ArrayList<>();
-            while (matcher.find()) {
-                starts.add(matcher.start());
+    private List<Heading> headings(String content) {
+        List<Heading> markdown = new ArrayList<>();
+        List<Heading> strongChapters = new ArrayList<>();
+        List<Heading> multiLevel = new ArrayList<>();
+        List<Heading> singleLevel = new ArrayList<>();
+        String fence = null;
+        int lineStart = 0;
+        while (lineStart <= content.length()) {
+            int lineEnd = content.indexOf('\n', lineStart);
+            if (lineEnd < 0) {
+                lineEnd = content.length();
             }
-            if (!starts.isEmpty()) {
-                return starts;
+            String line = content.substring(lineStart, lineEnd);
+            String trimmed = line.trim();
+            if (fence != null) {
+                if (trimmed.startsWith(fence)) {
+                    fence = null;
+                }
+            } else {
+                String openedFence = fenceMarker(trimmed);
+                if (openedFence != null) {
+                    fence = openedFence;
+                } else if (MARKDOWN_HEADING_LINE.matcher(trimmed).matches()) {
+                    int level = 0;
+                    while (level < trimmed.length() && trimmed.charAt(level) == '#') {
+                        level++;
+                    }
+                    markdown.add(new Heading(lineStart, level));
+                } else if (STRONG_TITLE_LINE.matcher(line).matches()) {
+                    strongChapters.add(new Heading(lineStart, 2));
+                } else if (MULTI_LEVEL_TITLE_LINE.matcher(line).matches()) {
+                    multiLevel.add(new Heading(lineStart, 2));
+                } else if (SINGLE_LEVEL_TITLE_LINE.matcher(line).matches()) {
+                    singleLevel.add(new Heading(lineStart, 2));
+                }
             }
+            if (lineEnd >= content.length()) {
+                break;
+            }
+            lineStart = lineEnd + 1;
         }
-        return List.of();
+        if (!markdown.isEmpty()) {
+            // 只有一个一级标题且正文用“第X章”这类标题时，把它当文档标题，退回章节标题切分
+            if (markdown.size() == 1 && markdown.get(0).level() == 1 && !strongChapters.isEmpty()) {
+                return strongChapters;
+            }
+            return markdown;
+        }
+        if (!strongChapters.isEmpty()) {
+            return strongChapters;
+        }
+        if (!multiLevel.isEmpty()) {
+            return multiLevel;
+        }
+        return singleLevel;
+    }
+
+    /** 选父块边界层级：最小标题层级；唯一的首个一级标题视为文档标题时跳过它 */
+    private int parentLevel(List<Heading> headings) {
+        int minLevel = headings.stream().mapToInt(Heading::level).min().orElse(1);
+        long minCount = headings.stream().filter(heading -> heading.level() == minLevel).count();
+        boolean hasDeeper = headings.stream().anyMatch(heading -> heading.level() > minLevel);
+        if (minLevel == 1 && minCount == 1 && headings.get(0).level() == 1 && hasDeeper) {
+            return headings.stream()
+                    .filter(heading -> heading.level() > 1)
+                    .mapToInt(Heading::level)
+                    .min()
+                    .orElse(1);
+        }
+        return minLevel;
+    }
+
+    /** 标题行之外是否还有正文；只有标题的节需要并入下一节，避免产生空父块 */
+    private boolean hasBodyBeyondFirstLine(String text) {
+        int end = text.indexOf('\n');
+        return end >= 0 && !text.substring(end + 1).isBlank();
+    }
+
+    /** 按父块预算切节（超长节续切为多个同 title 父块） */
+    private void addSections(List<ParentSection> sections, String title, String body, int parentSize) {
+        for (String piece : split(body, parentSize, 0)) {
+            sections.add(new ParentSection(title, piece));
+        }
     }
 
     /** 父块切分单元：title（紧凑标题，装配分组键）+ body（整章上下文） */
     record ParentSection(String title, String body) {
+    }
+
+    /** 标题行：start 为行首偏移，level 为 Markdown 层级（非 Markdown 标题统一为 2） */
+    private record Heading(int start, int level) {
     }
 
     /** 节首行即标题（标题行 ≤100 字防御截断）；首行过长时退化为前 100 字 */
@@ -485,6 +903,8 @@ public class KnowledgeService {
 
     /** 控制字符清洗 + 边界空白清理（嵌入前的防御性处理） */
     private String sanitize(String content) {
-        return content.replaceAll("[\\p{Cntrl}]", " ").trim();
+        // 保留换行/制表符：语义切分依赖段落与代码块结构；其余控制字符替换为空格
+        String normalized = content.replace("\r\n", "\n").replace('\r', '\n');
+        return normalized.replaceAll("[\\p{Cntrl}&&[^\\n\\t]]", " ").trim();
     }
 }

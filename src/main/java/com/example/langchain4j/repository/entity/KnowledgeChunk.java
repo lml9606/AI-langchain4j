@@ -21,6 +21,10 @@ public class KnowledgeChunk {
     private String metadata;
     /** 所属用户（NULL = 公共库对所有用户可见；非 NULL 仅本用户可见/可查） */
     private String userId;
+    /** 逻辑文档 ID：同一文档的父块/子块共享；为空表示存量数据或非文档导入块 */
+    private String documentId;
+    /** 文档版本：同一 document_id 重新导入时递增；存量数据默认 1 */
+    private Integer version;
     /** 父块 ID（NULL = 孤儿子块/存量数据；文档导入时子块指向所属父块） */
     private Long parentId;
     /** 块类型：PARENT（父块，整章上下文，不嵌入）/ CHILD（子块，嵌入供检索） */

@@ -191,6 +191,8 @@ public class AgentProperties {
         private int chunkSize = 400;
         /** 相邻子块重叠字符数：保留跨块边界的句间语义 */
         private int chunkOverlap = 80;
+        /** 子块 token 估算上限：与 chunkSize 双约束，防止长英文/代码/密排中文超出嵌入模型预算 */
+        private int chunkTokenLimit = 512;
         /** 批量导入单次请求最大文档数（超限拒绝，防嵌入服务被打爆） */
         private int batchMaxDocuments = 20;
         /** 单篇文档/知识块最大字符数（入口 token 拦截：超限拒绝导入，防超大内容打爆嵌入服务与检索预算） */

@@ -11,6 +11,8 @@
         <result property="sparseVector" column="sparse_vector"/>
         <result property="metadata" column="metadata"/>
         <result property="userId" column="user_id"/>
+        <result property="documentId" column="document_id"/>
+        <result property="version" column="version"/>
         <result property="parentId" column="parent_id"/>
         <result property="chunkType" column="chunk_type"/>
         <result property="title" column="title"/>
@@ -20,13 +22,16 @@
 
     <insert id="insert" parameterType="com.example.langchain4j.repository.entity.KnowledgeChunk"
             useGeneratedKeys="true" keyProperty="id">
-        INSERT INTO ai_knowledge_chunk (content, embedding, sparse_vector, metadata, user_id, parent_id, chunk_type, title)
+        INSERT INTO ai_knowledge_chunk (content, embedding, sparse_vector, metadata, user_id, document_id, version,
+                                        parent_id, chunk_type, title)
         VALUES (
             #{content},
             #{embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
             #{sparseVector}::sparsevec,
             CAST(#{metadata} AS jsonb),
             #{userId},
+            #{documentId},
+            COALESCE(#{version}, 1),
             #{parentId},
             COALESCE(#{chunkType}, 'CHILD'),
             #{title}
@@ -34,14 +39,21 @@
     </insert>
 
     <select id="searchSimilar" resultMap="KnowledgeChunkMap">
-        SELECT id, content, embedding, metadata::text AS metadata, user_id,
-               parent_id, chunk_type, title, created_at
-        FROM ai_knowledge_chunk
-        WHERE embedding IS NOT NULL
-          AND chunk_type = 'CHILD'
-          AND (1 - (embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler})) &gt;= #{minScore}
-          AND (user_id = #{userId} OR (NOT #{privateOnly} AND user_id IS NULL))
-        ORDER BY embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}
+        SELECT c.id, c.content, c.embedding, c.metadata::text AS metadata, c.user_id,
+               c.document_id, c.version, c.parent_id, c.chunk_type, c.title, c.created_at
+        FROM ai_knowledge_chunk c
+        WHERE c.embedding IS NOT NULL
+          AND c.chunk_type = 'CHILD'
+          AND (1 - (c.embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler})) &gt;= #{minScore}
+          AND (c.user_id = #{userId} OR (NOT #{privateOnly} AND c.user_id IS NULL))
+          <!-- 文档只召回最新版本；document_id 为空的存量块不受影响 -->
+          AND (c.document_id IS NULL OR c.version = (
+              SELECT MAX(v.version)
+              FROM ai_knowledge_chunk v
+              WHERE v.document_id = c.document_id
+                AND v.user_id IS NOT DISTINCT FROM c.user_id
+          ))
+        ORDER BY c.embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}
         LIMIT #{topK}
     </select>
 
@@ -52,14 +64,21 @@
       #{privateOnly}=true 时仅检索本人库（visibility=private）。
     -->
     <select id="searchSparse" resultMap="KnowledgeChunkMap">
-        SELECT id, content, embedding, metadata::text AS metadata, user_id,
-               parent_id, chunk_type, title, created_at, sparse_vector::text AS sparse_vector
-        FROM ai_knowledge_chunk
-        WHERE sparse_vector IS NOT NULL
-          AND chunk_type = 'CHILD'
-          AND (-(sparse_vector &lt;#&gt; CAST(#{querySparse} AS sparsevec))) &gt;= #{minScore}
-          AND (user_id = #{userId} OR (NOT #{privateOnly} AND user_id IS NULL))
-        ORDER BY sparse_vector &lt;#&gt; CAST(#{querySparse} AS sparsevec)
+        SELECT c.id, c.content, c.embedding, c.metadata::text AS metadata, c.user_id,
+               c.document_id, c.version, c.parent_id, c.chunk_type, c.title, c.created_at,
+               c.sparse_vector::text AS sparse_vector
+        FROM ai_knowledge_chunk c
+        WHERE c.sparse_vector IS NOT NULL
+          AND c.chunk_type = 'CHILD'
+          AND (-(c.sparse_vector &lt;#&gt; CAST(#{querySparse} AS sparsevec))) &gt;= #{minScore}
+          AND (c.user_id = #{userId} OR (NOT #{privateOnly} AND c.user_id IS NULL))
+          AND (c.document_id IS NULL OR c.version = (
+              SELECT MAX(v.version)
+              FROM ai_knowledge_chunk v
+              WHERE v.document_id = c.document_id
+                AND v.user_id IS NOT DISTINCT FROM c.user_id
+          ))
+        ORDER BY c.sparse_vector &lt;#&gt; CAST(#{querySparse} AS sparsevec)
         LIMIT #{topK}
     </select>
 
@@ -72,7 +91,8 @@
       文档导入时把分块后的全部知识块一次落库，减少 DB 往返。
     -->
     <insert id="insertBatch">
-        INSERT INTO ai_knowledge_chunk (content, embedding, sparse_vector, metadata, user_id, parent_id, chunk_type, title)
+        INSERT INTO ai_knowledge_chunk (content, embedding, sparse_vector, metadata, user_id, document_id, version,
+                                        parent_id, chunk_type, title)
         VALUES
         <foreach collection="chunks" item="chunk" separator=",">
             (
@@ -81,6 +101,8 @@
                 #{chunk.sparseVector}::sparsevec,
                 CAST(#{chunk.metadata} AS jsonb),
                 #{chunk.userId},
+                #{chunk.documentId},
+                COALESCE(#{chunk.version}, 1),
                 #{chunk.parentId},
                 COALESCE(#{chunk.chunkType}, 'CHILD'),
                 #{chunk.title}
@@ -91,7 +113,7 @@
     <!-- 按 ID + 用户查询（可见范围 = 公共库 + 本人私有库），服务层据此做归属校验 -->
     <select id="selectById" resultMap="KnowledgeChunkMap">
         SELECT id, content, embedding, metadata::text AS metadata, user_id,
-               parent_id, chunk_type, title, created_at, updated_at
+               document_id, version, parent_id, chunk_type, title, created_at, updated_at
         FROM ai_knowledge_chunk
         WHERE id = #{id}
           AND (user_id IS NULL OR user_id = #{userId})
@@ -100,7 +122,7 @@
     <!-- 按父块 ID 取父块：子块命中后拿整章父块上下文装配（父块不嵌入，仅按 ID 直取） -->
     <select id="selectParentById" resultMap="KnowledgeChunkMap">
         SELECT id, content, embedding, metadata::text AS metadata, user_id,
-               parent_id, chunk_type, title, created_at, updated_at
+               document_id, version, parent_id, chunk_type, title, created_at, updated_at
         FROM ai_knowledge_chunk
         WHERE id = #{parentId}
           AND chunk_type = 'PARENT'
@@ -110,18 +132,48 @@
     <!-- 同标题父块组：长章节被拆成多父块时整组取出（按 id 升序保持章节顺序） -->
     <select id="selectParentsByTitle" resultMap="KnowledgeChunkMap">
         SELECT id, content, embedding, metadata::text AS metadata, user_id,
-               parent_id, chunk_type, title, created_at, updated_at
+               document_id, version, parent_id, chunk_type, title, created_at, updated_at
         FROM ai_knowledge_chunk
         WHERE title = #{title}
           AND chunk_type = 'PARENT'
           AND (user_id IS NULL OR user_id = #{userId})
+        <if test="documentId != null">
+          AND document_id = #{documentId}
+        </if>
+        <if test="version != null">
+          AND version = #{version}
+        </if>
         ORDER BY id
     </select>
+
+    <!-- 同文档最大版本：新导入未显式指定 version 时自动 +1 -->
+    <select id="selectMaxVersion" resultType="java.lang.Integer">
+        SELECT MAX(version)
+        FROM ai_knowledge_chunk
+        WHERE document_id = #{documentId}
+          AND user_id = #{userId}
+    </select>
+
+    <!-- 新版本完整落库后清理旧版本；检索端另有 latest-version 过滤，清理失败也不会召回旧内容 -->
+    <delete id="deleteOlderVersions">
+        DELETE FROM ai_knowledge_chunk
+        WHERE document_id = #{documentId}
+          AND version &lt; #{version}
+          AND user_id = #{userId}
+    </delete>
+
+    <!-- 导入中途失败清理：避免半成品版本成为 MAX(version) 后遮住上一份完整版本 -->
+    <delete id="deleteDocumentVersion">
+        DELETE FROM ai_knowledge_chunk
+        WHERE document_id = #{documentId}
+          AND version = #{version}
+          AND user_id = #{userId}
+    </delete>
 
     <!-- 同父块兄弟子块：滑窗装配围绕命中子块补相邻上下文（按 id 升序保持文档顺序） -->
     <select id="selectChildrenByParentId" resultMap="KnowledgeChunkMap">
         SELECT id, content, embedding, metadata::text AS metadata, user_id,
-               parent_id, chunk_type, title, created_at, updated_at
+               document_id, version, parent_id, chunk_type, title, created_at, updated_at
         FROM ai_knowledge_chunk
         WHERE parent_id = #{parentId}
           AND chunk_type = 'CHILD'
