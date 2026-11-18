@@ -56,9 +56,9 @@ class ConfirmationServiceTest {
 
     private ConfirmationService.PendingAction action(String userId) {
         return new ConfirmationService.PendingAction(
-                "cfm_1", userId, "c1", "model-x", "cancel_order",
-                List.of(Map.of("tool", "cancel_order", "args", Map.of("orderId", "A1001"))),
-                "即将执行：取消订单。", "WRITE",
+                "cfm_1", userId, "c1", "model-x", "write_tool",
+                List.of(Map.of("tool", "write_tool", "args", Map.of("entityId", "B1001"))),
+                "即将执行：修改业务数据。", "WRITE",
                 System.currentTimeMillis() + 60_000);
     }
 
@@ -66,9 +66,9 @@ class ConfirmationServiceTest {
     @DisplayName("创建确认令牌 → 写入 Redis 并返回带过期时间的动作")
     void createWritesTokenWithTtl() throws Exception {
         ConfirmationService.PendingAction created = service.create(
-                "demo", "c1", "model-x", "cancel_order",
-                List.of(Map.of("tool", "cancel_order", "args", Map.of("orderId", "A1001"))),
-                "即将执行：取消订单。", "WRITE");
+                "demo", "c1", "model-x", "write_tool",
+                List.of(Map.of("tool", "write_tool", "args", Map.of("entityId", "B1001"))),
+                "即将执行：修改业务数据。", "WRITE");
 
         assertThat(created.confirmationId()).startsWith("cfm_");
         assertThat(created.expiresAt()).isGreaterThan(System.currentTimeMillis());
@@ -111,7 +111,7 @@ class ConfirmationServiceTest {
     @DisplayName("令牌已过期 → 拒绝执行")
     void rejectExpiredToken() throws Exception {
         ConfirmationService.PendingAction expired = new ConfirmationService.PendingAction(
-                "cfm_1", "demo", "c1", "model-x", "cancel_order",
+                "cfm_1", "demo", "c1", "model-x", "write_tool",
                 List.of(), "已过期", "WRITE", System.currentTimeMillis() - 1);
         when(bucket.getAndDelete()).thenReturn(objectMapper.writeValueAsString(expired));
 
@@ -133,8 +133,8 @@ class ConfirmationServiceTest {
                 .when(bucket).set(anyString(), anyLong(), eq(TimeUnit.SECONDS));
 
         assertThatThrownBy(() -> service.create(
-                "demo", "c1", "model-x", "cancel_order", List.of(),
-                "即将执行：取消订单。", "WRITE"))
+                "demo", "c1", "model-x", "write_tool", List.of(),
+                "即将执行：修改业务数据。", "WRITE"))
                 .isInstanceOf(BizException.class)
                 .extracting(e -> ((BizException) e).getCode())
                 .isEqualTo(ErrorCode.CACHE_UNAVAILABLE.getCode());

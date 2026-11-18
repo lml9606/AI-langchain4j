@@ -65,7 +65,7 @@ public class ChatResponse {
         return response;
     }
 
-    /** 引用来源（type=TOOL/KNOWLEDGE；sourceId 为订单号或知识块 ID） */
+    /** 引用来源（type=TOOL/KNOWLEDGE；sourceId 为业务数据主键或知识块 ID） */
     public record Citation(String type, String sourceId, String title, String snippet, double score) {
     }
 

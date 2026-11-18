@@ -23,7 +23,7 @@ import java.util.function.Supplier;
  *   <li>释放前校验 isHeldByCurrentThread，避免误释放他人锁。</li>
  * </ul>
  * 代价：显式租约不自动续期，任务超过租约会被提前解锁，
- * 因此租约必须大于最长图执行耗时（execution-timeout-seconds / resume.timeout-seconds）。
+ * 因此租约必须大于最长图执行耗时（execution-timeout-seconds）。
  */
 @Slf4j
 @Component

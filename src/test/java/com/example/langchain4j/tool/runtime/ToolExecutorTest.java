@@ -100,7 +100,7 @@ class ToolExecutorTest {
     @Test
     @DisplayName("缺少必填参数 → INVALID_ARGS，且不执行")
     void rejectMissingRequiredArg() throws Exception {
-        when(tool.definition()).thenReturn(definition(ToolSideEffect.READ_ONLY, List.of("orderId")));
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.READ_ONLY, List.of("entityId")));
 
         ToolResult result = executor.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{}"));
 
@@ -111,9 +111,9 @@ class ToolExecutorTest {
     @Test
     @DisplayName("正常只读调用 → 执行并返回结果")
     void invokeReadOnlyTool() throws Exception {
-        when(tool.definition()).thenReturn(definition(ToolSideEffect.READ_ONLY, List.of("orderId")));
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.READ_ONLY, List.of("entityId")));
 
-        ToolResult result = executor.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{\"orderId\":\"A1001\"}"));
+        ToolResult result = executor.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{\"entityId\":\"B1001\"}"));
 
         assertThat(result.success()).isTrue();
         assertThat(result.summary()).isEqualTo("成功");

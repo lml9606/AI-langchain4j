@@ -52,27 +52,9 @@ curl -X POST "http://localhost:8082/api/knowledge/upload?documentId=refund-polic
 
 分块策略：父子分块。父块按 Markdown/中文章节标题切分，保留整章上下文且不嵌入；子块按段落、标题、围栏代码块等结构语义单元合并，并同时受 `agent.knowledge.chunk-size` 字符上限与 `agent.knowledge.chunk-token-limit` token 估算上限约束。检索只召回每个 `documentId` 的最新 `version`。
 
-## 4. 评测体系 `/api/eval`
+## 4. 运营闭环
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/api/eval/cases` | 新增评测用例 `{question, keywords[], expectedAnswer?}` |
-| GET | `/api/eval/cases` | 列出全部用例 |
-| POST | `/api/eval/cases/{id}/enabled` | 启用/停用用例 **需 ADMIN** |
-| POST | `/api/eval/run` | 执行评测（同步）：召回率 + 忠实度，返回本批报告 |
-| GET | `/api/eval/report?runId=` | 查询报告（默认最近一批） |
-
-## 5. 运营闭环
-
-### 5.1 反馈 `/api/feedback`
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/api/feedback` | 提交反馈 `{conversationId, messageId?, rating: UP/DOWN, comment?}`（会话归属校验） |
-| GET | `/api/feedback/conversation/{id}` | 会话反馈列表 |
-| GET | `/api/feedback/down-stats?days=` | 点踩按天统计（近 N 天趋势） |
-
-### 5.2 工单 `/api/tickets`
+### 4.1 工单 `/api/tickets`
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -83,7 +65,7 @@ curl -X POST "http://localhost:8082/api/knowledge/upload?documentId=refund-polic
 
 自动建单：同步对话命中转人工（handoff）时服务层自动建单（同会话 OPEN 单去重，失败降级不阻断）。
 
-### 5.3 敏感词（输出侧审核）`/api/sensitive-words`（全模块需 ADMIN）
+### 4.2 敏感词（输出侧审核）`/api/sensitive-words`（全模块需 ADMIN）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -94,7 +76,7 @@ curl -X POST "http://localhost:8082/api/knowledge/upload?documentId=refund-polic
 
 命中即拦截：生成答案替换为固定拒答文案（不透出命中词），词表内存热更新、DB 故障 fail-open 放行。
 
-## 6. Prompt 配置 `/api/prompts`
+## 5. Prompt 配置 `/api/prompts`
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -102,7 +84,7 @@ curl -X POST "http://localhost:8082/api/knowledge/upload?documentId=refund-polic
 | POST | `/api/prompts` | 保存/覆盖 `{key, text}`（白名单校验 + 版本递增 + 热生效）**需 ADMIN** |
 | DELETE | `/api/prompts/{key}` | 删除覆盖 → 回退代码默认值 **需 ADMIN** |
 
-key 必须为 `PromptTemplates` 已声明常量名（如 `INTENT_CLASSIFY_SYSTEM`），防止任意 key 注入。
+key 必须为 `PromptTemplates` 已声明常量名（如 `INTENT_PLAN_SYSTEM`），防止任意 key 注入。
 
 ## 通用错误码
 

@@ -198,15 +198,11 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
         }
     }
 
-    /** 槽位中文说明：已知槽位翻译，未知槽位原样输出 */
+    /** 槽位说明：任务工具由业务方注册，槽位名不写死，统一按参数名提示用户补充 */
     private String slotLabels(List<String> slots) {
         List<String> labels = new ArrayList<>(slots.size());
         for (String slot : slots) {
-            labels.add(switch (slot) {
-                case "orderId" -> "订单号（orderId）";
-                case "queryName" -> "查询类型（订单状态或退款记录）";
-                default -> slot;
-            });
+            labels.add(slot == null || slot.isBlank() ? "必要参数" : "参数（" + slot + "）");
         }
         return String.join("、", labels);
     }

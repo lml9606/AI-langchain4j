@@ -5,7 +5,7 @@ import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.response.ApiResponse;
 import com.example.langchain4j.dto.request.ChatRequest;
 import com.example.langchain4j.dto.request.ConfirmRequest;
-import com.example.langchain4j.dto.request.ResumeRequest;
+import com.example.langchain4j.dto.request.AgentResumeRequest;
 import com.example.langchain4j.dto.response.ChatResponse;
 import com.example.langchain4j.dto.response.MessageDto;
 import com.example.langchain4j.service.AgentService;
@@ -68,7 +68,7 @@ public class AgentController {
      * @return 恢复执行后的图状态 data；无待恢复任务返回 404 错误码
      */
     @PostMapping("/resume")
-    public ApiResponse<Map<String, Object>> resume(@Valid @RequestBody ResumeRequest request) {
+    public ApiResponse<Map<String, Object>> resume(@Valid @RequestBody AgentResumeRequest request) {
         requireOwnership(request.conversationId());
         return agentService.resume(request.conversationId())
                 .map(state -> ApiResponse.success(state.data()))

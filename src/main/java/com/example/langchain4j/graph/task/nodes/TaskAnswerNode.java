@@ -19,7 +19,7 @@ import java.util.Map;
  * 任务回答节点：把工具轨迹与证据合成最终答复，并给出可解释置信度。
  * <p>
  * 证据清单由系统统一追加（不依赖模型自觉引用），保证每条回答都有可追溯来源；
- * 置信度采用确定性启发式，便于离线复现与评测，不引入额外 LLM 判分成本。
+ * 置信度采用确定性启发式，便于离线复现与验证，不引入额外 LLM 判分成本。
  */
 @Slf4j
 @Component
@@ -142,7 +142,7 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
             return "本次查询未返回有效数据。\n\n"
                     + truncate(String.valueOf(trace.get(0).get("summary")), MAX_SNIPPET);
         }
-        return "未查询到相关业务数据，请确认订单号或稍后重试。";
+        return "未查询到相关业务数据，请确认查询条件或稍后重试。";
     }
 
     /** 统一追加参考依据；evidence 已按来源去重前的顺序截断 */

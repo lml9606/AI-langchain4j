@@ -45,24 +45,24 @@ class TaskConfirmNodeTest {
     @BeforeEach
     void setUp() {
         node = new TaskConfirmNode(confirmationService, toolRegistry);
-        lenient().when(toolRegistry.find("cancel_order")).thenReturn(Optional.of(agentTool));
+        lenient().when(toolRegistry.find("write_tool")).thenReturn(Optional.of(agentTool));
         lenient().when(agentTool.definition()).thenReturn(new ToolDefinition(
-                "cancel_order", "取消订单", "{}", List.of("orderId"),
+                "write_tool", "修改业务数据", "{}", List.of("entityId"),
                 ToolSideEffect.WRITE, 3000));
     }
 
     private WorkflowState state() {
         Map<String, Object> pending = new LinkedHashMap<>();
-        pending.put("tool", "cancel_order");
-        pending.put("args", Map.of("orderId", "A1001", "reason", "不想要了"));
-        pending.put("purpose", "取消订单");
+        pending.put("tool", "write_tool");
+        pending.put("args", Map.of("entityId", "B1001", "reason", "不想要了"));
+        pending.put("purpose", "修改业务数据");
         pending.put("risk", "WRITE");
         List<Map<String, Object>> plan = List.of(
-                Map.of("tool", "cancel_order",
-                        "args", Map.of("orderId", "A1001", "reason", "不想要了"),
-                        "purpose", "取消订单"));
+                Map.of("tool", "write_tool",
+                        "args", Map.of("entityId", "B1001", "reason", "不想要了"),
+                        "purpose", "修改业务数据"));
         return new WorkflowState(Map.of(
-                WorkflowState.QUERY, "取消订单 A1001",
+                WorkflowState.QUERY, "修改业务数据 B1001",
                 WorkflowState.MODEL, "test-model",
                 WorkflowState.USER_ID, "demo",
                 WorkflowState.CONVERSATION_ID, "c1",
@@ -74,14 +74,14 @@ class TaskConfirmNodeTest {
     @DisplayName("写操作 → 生成 confirmationId 与确认话术")
     void createConfirmation() {
         List<Map<String, Object>> plan = List.of(
-                Map.of("tool", "cancel_order",
-                        "args", Map.of("orderId", "A1001", "reason", "不想要了"),
-                        "purpose", "取消订单"));
+                Map.of("tool", "write_tool",
+                        "args", Map.of("entityId", "B1001", "reason", "不想要了"),
+                        "purpose", "修改业务数据"));
         ConfirmationService.PendingAction action = new ConfirmationService.PendingAction(
-                "cfm_1", "demo", "c1", "test-model", "cancel_order", plan,
-                "即将执行：取消订单。", "WRITE", 1760000000000L);
+                "cfm_1", "demo", "c1", "test-model", "write_tool", plan,
+                "即将执行：修改业务数据。", "WRITE", 1760000000000L);
         when(confirmationService.create(eq("demo"), eq("c1"), eq("test-model"),
-                eq("cancel_order"), eq(plan), anyString(), eq("WRITE"))).thenReturn(action);
+                eq("write_tool"), eq(plan), anyString(), eq("WRITE"))).thenReturn(action);
 
         Map<String, Object> updates = node.apply(state());
 
@@ -92,7 +92,7 @@ class TaskConfirmNodeTest {
         Map<String, Object> pending = (Map<String, Object>) updates.get(WorkflowState.TASK_PENDING_ACTION);
         assertThat(pending)
                 .containsEntry("confirmationId", "cfm_1")
-                .containsEntry("tool", "cancel_order");
+                .containsEntry("tool", "write_tool");
     }
 
     @Test

@@ -41,29 +41,29 @@ class TaskExecuteNodeTest {
 
     private WorkflowState stateWithPlan() {
         return new WorkflowState(Map.of(
-                WorkflowState.QUERY, "帮我查订单 A1001",
+                WorkflowState.QUERY, "帮我查业务对象 B1001",
                 WorkflowState.MODEL, "test-model",
                 WorkflowState.USER_ID, "demo",
                 WorkflowState.CONVERSATION_ID, "c1",
                 WorkflowState.TASK_PLAN, List.of(
-                        Map.of("tool", "query_business_data",
-                                "args", Map.of("queryName", "order_status", "orderId", "A1001"),
-                                "purpose", "查订单状态"),
-                        Map.of("tool", "query_order_api",
-                                "args", Map.of("orderId", "A1001"),
-                                "purpose", "查订单详情"))));
+                        Map.of("tool", "read_tool",
+                                "args", Map.of("queryType", "status_query", "entityId", "B1001"),
+                                "purpose", "查业务对象状态"),
+                        Map.of("tool", "http_tool",
+                                "args", Map.of("entityId", "B1001"),
+                                "purpose", "查业务对象详情"))));
     }
 
     @Test
     @DisplayName("成功与失败混合 → 轨迹保留两条，证据只沉淀成功步骤")
     void collectTraceAndEvidence() {
-        when(toolExecutor.invoke(any(), eq("query_business_data"), any(JsonNode.class)))
+        when(toolExecutor.invoke(any(), eq("read_tool"), any(JsonNode.class)))
                 .thenReturn(ToolResult.success(List.of(Map.of("status", "PAID")),
-                        "订单 A1001 状态 PAID",
-                        List.of(new ToolEvidence("TOOL", "A1001", "订单状态",
+                        "业务对象 B1001 状态 PAID",
+                        List.of(new ToolEvidence("TOOL", "B1001", "业务对象状态",
                                 "{\"status\":\"PAID\"}", 0.0)), 12));
-        when(toolExecutor.invoke(any(), eq("query_order_api"), any(JsonNode.class)))
-                .thenReturn(ToolResult.failure("HTTP_404", "订单不存在", 8));
+        when(toolExecutor.invoke(any(), eq("http_tool"), any(JsonNode.class)))
+                .thenReturn(ToolResult.failure("HTTP_404", "业务对象不存在", 8));
 
         Map<String, Object> updates = node.apply(stateWithPlan());
 
@@ -71,16 +71,16 @@ class TaskExecuteNodeTest {
         assertThat((List<?>) updates.get(WorkflowState.TASK_TRACE)).hasSize(2);
         assertThat((List<?>) updates.get(WorkflowState.TASK_EVIDENCE)).hasSize(1);
         assertThat(String.valueOf(updates.get(WorkflowState.TASK_TRACE)))
-                .contains("query_business_data")
+                .contains("read_tool")
                 .contains("HTTP_404");
     }
 
     @Test
     @DisplayName("参数 Map 正确转成 JsonNode 传给执行器")
     void passArgsAsJson() {
-        when(toolExecutor.invoke(any(), eq("query_business_data"), any(JsonNode.class)))
+        when(toolExecutor.invoke(any(), eq("read_tool"), any(JsonNode.class)))
                 .thenReturn(ToolResult.success(List.of(), "空", List.of(), 1));
-        when(toolExecutor.invoke(any(), eq("query_order_api"), any(JsonNode.class)))
+        when(toolExecutor.invoke(any(), eq("http_tool"), any(JsonNode.class)))
                 .thenReturn(ToolResult.success(List.of(), "空", List.of(), 1));
         ArgumentCaptor<JsonNode> captor = ArgumentCaptor.forClass(JsonNode.class);
 
@@ -89,25 +89,25 @@ class TaskExecuteNodeTest {
         org.mockito.Mockito.verify(toolExecutor,
                         org.mockito.Mockito.atLeastOnce())
                 .invoke(any(), anyString(), captor.capture());
-        assertThat(captor.getAllValues().get(0).path("orderId").asText()).isEqualTo("A1001");
+        assertThat(captor.getAllValues().get(0).path("entityId").asText()).isEqualTo("B1001");
     }
 
     @Test
     @DisplayName("确认执行 → ToolContext 携带 approved=true 与幂等键")
     void passApprovedContext() {
-        when(toolExecutor.invoke(any(), eq("query_business_data"), any(JsonNode.class)))
+        when(toolExecutor.invoke(any(), eq("read_tool"), any(JsonNode.class)))
                 .thenReturn(ToolResult.success(List.of(), "空", List.of(), 1));
         WorkflowState state = new WorkflowState(Map.of(
-                WorkflowState.QUERY, "确认执行取消订单",
+                WorkflowState.QUERY, "确认执行修改业务数据",
                 WorkflowState.MODEL, "test-model",
                 WorkflowState.USER_ID, "demo",
                 WorkflowState.CONVERSATION_ID, "c1",
                 WorkflowState.TASK_APPROVED, true,
                 WorkflowState.TASK_IDEMPOTENCY_KEY, "cfm_1",
                 WorkflowState.TASK_PLAN, List.of(
-                        Map.of("tool", "query_business_data",
-                                "args", Map.of("orderId", "A1001"),
-                                "purpose", "取消订单"))));
+                        Map.of("tool", "read_tool",
+                                "args", Map.of("entityId", "B1001"),
+                                "purpose", "修改业务数据"))));
         ArgumentCaptor<ToolContext> captor = ArgumentCaptor.forClass(ToolContext.class);
 
         node.apply(state);

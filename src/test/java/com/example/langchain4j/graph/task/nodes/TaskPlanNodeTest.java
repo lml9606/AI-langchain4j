@@ -34,7 +34,7 @@ import static org.mockito.Mockito.when;
 class TaskPlanNodeTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String TOOL = "query_business_data";
+    private static final String TOOL = "read_tool";
 
     @Mock
     private LlmGateway llmGateway;
@@ -56,7 +56,7 @@ class TaskPlanNodeTest {
                 .thenAnswer(invocation -> String.format(
                         invocation.getArgument(1), new Object[]{invocation.getArgument(2)}));
         lenient().when(toolRegistry.definitions()).thenReturn(List.of(
-                new ToolDefinition(TOOL, "查询订单或退款", "{}", List.of("orderId"),
+                new ToolDefinition(TOOL, "查询业务对象或业务记录", "{}", List.of("entityId"),
                         ToolSideEffect.READ_ONLY, 3000)));
         lenient().when(toolRegistry.find(TOOL)).thenReturn(Optional.of(agentTool));
     }
@@ -77,13 +77,13 @@ class TaskPlanNodeTest {
     void planNormal() throws Exception {
         when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(json("""
-                        {"entities":{"orderId":"A1001"},"missing":[],
-                         "steps":[{"tool":"query_business_data",
-                                   "args":{"queryName":"order_status","orderId":"A1001"},
-                                   "purpose":"查询订单状态"}]}
+                        {"entities":{"entityId":"B1001"},"missing":[],
+                         "steps":[{"tool":"read_tool",
+                                   "args":{"queryType":"status_query","entityId":"B1001"},
+                                   "purpose":"查询业务对象状态"}]}
                         """));
 
-        Map<String, Object> updates = node.apply(stateOf("帮我查订单 A1001 的状态"));
+        Map<String, Object> updates = node.apply(stateOf("帮我查业务对象 B1001 的状态"));
 
         assertThat(updates.get(WorkflowState.ERROR)).isEqualTo("");
         assertThat(updates.get(WorkflowState.TASK_CLARIFY)).isEqualTo(false);
@@ -95,16 +95,16 @@ class TaskPlanNodeTest {
     @DisplayName("计划包含写工具 → 标记待确认并保留计划，不直接执行")
     void planWriteToolRequiresConfirmation() throws Exception {
         when(agentTool.definition()).thenReturn(new ToolDefinition(
-                TOOL, "取消订单", "{}", List.of("orderId"), ToolSideEffect.WRITE, 3000));
+                TOOL, "修改业务数据", "{}", List.of("entityId"), ToolSideEffect.WRITE, 3000));
         when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(json("""
-                        {"entities":{"orderId":"A1001"},"missing":[],
-                         "steps":[{"tool":"query_business_data",
-                                   "args":{"orderId":"A1001"},
-                                   "purpose":"取消订单"}]}
+                        {"entities":{"entityId":"B1001"},"missing":[],
+                         "steps":[{"tool":"read_tool",
+                                   "args":{"entityId":"B1001"},
+                                   "purpose":"修改业务数据"}]}
                         """));
 
-        Map<String, Object> updates = node.apply(stateOf("取消订单 A1001"));
+        Map<String, Object> updates = node.apply(stateOf("修改业务数据 B1001"));
 
         assertThat(updates.get(WorkflowState.ERROR)).isEqualTo("");
         assertThat(updates.get(WorkflowState.TASK_CONFIRMATION_REQUIRED)).isEqualTo(true);
@@ -120,33 +120,33 @@ class TaskPlanNodeTest {
     @DisplayName("一次计划包含多个写工具 → 拒绝，要求拆分")
     void rejectMultipleWriteSteps() throws Exception {
         when(agentTool.definition()).thenReturn(new ToolDefinition(
-                TOOL, "取消订单", "{}", List.of("orderId"), ToolSideEffect.WRITE, 3000));
+                TOOL, "修改业务数据", "{}", List.of("entityId"), ToolSideEffect.WRITE, 3000));
         when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(json("""
-                        {"entities":{"orderId":"A1001"},"missing":[],
+                        {"entities":{"entityId":"B1001"},"missing":[],
                          "steps":[
-                           {"tool":"query_business_data","args":{"orderId":"A1001"},"purpose":"取消1"},
-                           {"tool":"query_business_data","args":{"orderId":"A1002"},"purpose":"取消2"}
+                           {"tool":"read_tool","args":{"entityId":"B1001"},"purpose":"修改1"},
+                           {"tool":"read_tool","args":{"entityId":"B1002"},"purpose":"修改2"}
                          ]}
                         """));
 
-        Map<String, Object> updates = node.apply(stateOf("取消两个订单"));
+        Map<String, Object> updates = node.apply(stateOf("修改两个业务对象"));
 
         assertThat(String.valueOf(updates.get(WorkflowState.ERROR))).contains("一次只能确认一个写操作");
     }
 
     @Test
-    @DisplayName("缺少订单号 → 生成追问，不执行工具")
+    @DisplayName("缺少必填业务参数 → 生成追问，不执行工具")
     void clarifyWhenMissingSlot() throws Exception {
         when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(json("""
-                        {"entities":{"orderId":""},"missing":["orderId"],"steps":[]}
+                        {"entities":{"entityId":""},"missing":["entityId"],"steps":[]}
                         """));
 
-        Map<String, Object> updates = node.apply(stateOf("帮我查一下订单状态"));
+        Map<String, Object> updates = node.apply(stateOf("帮我查一下业务对象状态"));
 
         assertThat(updates.get(WorkflowState.TASK_CLARIFY)).isEqualTo(true);
-        assertThat(String.valueOf(updates.get(WorkflowState.RESULT))).contains("订单号");
+        assertThat(String.valueOf(updates.get(WorkflowState.RESULT))).contains("entityId");
         assertThat((List<?>) updates.get(WorkflowState.TASK_PLAN)).isEmpty();
     }
 
@@ -155,11 +155,11 @@ class TaskPlanNodeTest {
     void rejectUnknownTool() throws Exception {
         when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(json("""
-                        {"entities":{"orderId":"A1001"},"missing":[],
+                        {"entities":{"entityId":"B1001"},"missing":[],
                          "steps":[{"tool":"delete_everything","args":{},"purpose":"危险操作"}]}
                         """));
 
-        Map<String, Object> updates = node.apply(stateOf("帮我查订单 A1001"));
+        Map<String, Object> updates = node.apply(stateOf("帮我查业务对象 B1001"));
 
         assertThat(String.valueOf(updates.get(WorkflowState.ERROR))).contains("计划为空");
     }
@@ -170,7 +170,7 @@ class TaskPlanNodeTest {
         when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(null);
 
-        Map<String, Object> updates = node.apply(stateOf("帮我查订单 A1001"));
+        Map<String, Object> updates = node.apply(stateOf("帮我查业务对象 B1001"));
 
         assertThat(String.valueOf(updates.get(WorkflowState.ERROR))).contains("任务计划生成失败");
     }
