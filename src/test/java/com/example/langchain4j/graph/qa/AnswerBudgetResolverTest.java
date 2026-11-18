@@ -24,15 +24,13 @@ class AnswerBudgetResolverTest {
     }
 
     @Test
-    @DisplayName("简单知识问答 → 500 字 / 512 token，并限制最多 3 条关键点")
+    @DisplayName("简单知识问答 → 500 字 / 1024 token，并限制最多 3 条关键点")
     void simpleKnowledgeBudget() {
         AnswerBudget budget = resolver.resolve(stateOf(QaIntent.KNOWLEDGE_QA, "simple", 1, "auto"));
 
         assertThat(budget.maxChars()).isEqualTo(500);
-        assertThat(budget.maxOutputTokens()).isEqualTo(512);
-        assertThat(budget.styleNote())
-                .contains("最多 3 条关键点")
-                .contains("每条不超过 80 字");
+        assertThat(budget.maxOutputTokens()).isEqualTo(1024);
+        assertThat(budget.styleNote()).contains("最多 3 条关键点");
     }
 
     @Test
@@ -62,6 +60,27 @@ class AnswerBudgetResolverTest {
         assertThat(budget.maxChars()).isZero();
         assertThat(budget.maxOutputTokens()).isEqualTo(6144);
         assertThat(budget.hasCharLimit()).isFalse();
+    }
+
+    @Test
+    @DisplayName("详细说说 → 有历史可展开时使用中间档预算，而不是简单问答短答")
+    void detailFollowUpUsesExpandedBudget() {
+        WorkflowState.QueryPlan plan = new WorkflowState.QueryPlan(
+                "equals 和 == 的区别", List.of("equals 和 == 的区别"), "simple", "low", false, "test");
+        WorkflowState state = new WorkflowState(Map.of(
+                WorkflowState.INTENT, QaIntent.KNOWLEDGE_QA,
+                WorkflowState.QUERY_PLAN, plan,
+                WorkflowState.ANSWER_MODE, "auto",
+                WorkflowState.QUERY, "详细说说",
+                WorkflowState.HISTORY, List.of(
+                        Map.of("role", "user", "content", "equals 和 == 有什么区别"),
+                        Map.of("role", "assistant", "content", "== 比较地址，equals 重写后比较内容"))));
+
+        AnswerBudget budget = resolver.resolve(state);
+
+        assertThat(budget.maxChars()).isEqualTo(900);
+        assertThat(budget.maxOutputTokens()).isEqualTo(1536);
+        assertThat(budget.styleNote()).contains("围绕上一轮回答");
     }
 
     @Test

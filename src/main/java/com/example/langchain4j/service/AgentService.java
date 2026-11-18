@@ -346,8 +346,9 @@ public class AgentService {
     // ---- 内部实现 ----
 
     /**
-     * 检索上下文快照截断：写入 assistant 消息 context 列（改写视图锚定用）。
-     * 空上下文（检索失败/超时降级轮）返回 null → 改写视图退回生成答案，行为与旧版一致。
+     * 检索上下文快照截断：写入 assistant 消息 context 列，仅用于问题排查与取证。
+     * 改写视图读取真实 assistant 回答，不读取该快照（快照不是对话内容，会把追问带偏）。
+     * 空上下文（检索失败/超时降级轮）返回 null。
      */
     private String snapshotContext(String context) {
         if (context == null || context.isBlank()) {

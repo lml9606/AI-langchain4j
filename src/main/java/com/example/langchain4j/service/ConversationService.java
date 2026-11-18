@@ -86,7 +86,7 @@ public class ConversationService {
      * 持久化一条消息（含检索上下文快照）。
      *
      * @param context 检索上下文快照（仅 assistant 消息：本轮的检索资料原文截断；
-     *                user 消息传 null。改写视图锚定资料原文而非生成答案，防追问带偏）
+     *                user 消息传 null。仅供排查取证，不替代真实回答参与改写）
      */
     @Transactional(rollbackFor = Exception.class)
     public Message saveMessage(String conversationId, String role, String content,
@@ -152,11 +152,9 @@ public class ConversationService {
             if (m == null || m.getContent() == null) {
                 continue;
             }
-            // assistant 消息若有检索上下文快照，用资料原文替代生成答案（指代消解锚定事实，
-            // 防上轮答案偏差带偏改写）；快照为空（存量数据/超时降级轮）退回生成答案，行为与旧版一致
-            String content = Message.ROLE_ASSISTANT.equals(m.getRole())
-                    && m.getContext() != null && !m.getContext().isBlank()
-                    ? m.getContext() : m.getContent();
+            // 改写需要上一轮回答来解析“上一轮/上面/详细说说”等指代；检索快照不是对话内容，
+            // 不能替代 assistant 回答，否则用户追问上一轮答案时会被改写成无关问题。
+            String content = m.getContent();
             history.add(Map.of(
                     "role", m.getRole() == null ? "" : m.getRole(),
                     "content", truncate(content, itemMaxLength)));

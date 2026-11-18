@@ -4,6 +4,7 @@ import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
+import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.service.PromptTemplateService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -95,6 +96,15 @@ class IntentPlanNodeTest {
         assertThat(plan.primaryQuery()).isEqualTo("jvm 内存模型");
         assertThat(plan.subQueries()).containsExactly("jvm 内存模型");
         assertThat(plan.requiresFullRetrieval()).isFalse();
+    }
+
+    @Test
+    @DisplayName("意图提示词 → 概念题不因出现技术名词被归为 code_generate")
+    void intentPromptSeparatesConceptFromCodeGeneration() {
+        assertThat(PromptTemplates.INTENT_PLAN_SYSTEM)
+                .contains("equals 和 == 有什么区别")
+                .contains("仅出现技术名词、类名、方法名或语言名不构成 code_generate")
+                .contains("无写/改/补全/调试动作一律归 knowledge_qa");
     }
 
     @Test

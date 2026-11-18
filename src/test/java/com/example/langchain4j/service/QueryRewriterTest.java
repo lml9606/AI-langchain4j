@@ -72,6 +72,23 @@ class QueryRewriterTest {
         assertThat(result.newTopic()).isTrue();
     }
 
+    @Test
+    @DisplayName("详细说说 → 原样返回时补上一轮问题锚点，并强制沿用上一话题")
+    void repairUnresolvedDetailFollowUp() throws Exception {
+        when(promptTemplateService.resolve(anyString(), anyString()))
+                .thenAnswer(invocation -> invocation.getArgument(1));
+        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(MAPPER.readTree("{\"rewritten\":\"详细说说\",\"topic\":\"\",\"newTopic\":true}"));
+
+        RewriteResult result = rewriter.rewrite("详细说说", List.of(
+                Map.of("role", "user", "content", "equals 和 == 有什么区别"),
+                Map.of("role", "assistant", "content", "== 比较地址，equals 重写后比较内容")),
+                List.of("equals"), "test-model");
+
+        assertThat(result.rewritten()).isEqualTo("equals 和 == 有什么区别，详细说说");
+        assertThat(result.newTopic()).isFalse();
+    }
+
     private List<Map<String, String>> history() {
         return List.of(Map.of("role", "user", "content", "JVM 是什么"));
     }

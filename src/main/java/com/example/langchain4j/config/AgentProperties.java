@@ -129,7 +129,7 @@ public class AgentProperties {
     @Data
     public static class AnswerBudget {
         private Profile chitchat = new Profile(120, 256);
-        private Profile knowledgeSimple = new Profile(500, 512);
+        private Profile knowledgeSimple = new Profile(500, 1024);
         private Profile knowledgeCompound = new Profile(900, 1536);
         private Profile knowledgeDeep = new Profile(2800, 4096);
         private Profile code = new Profile(0, 6144);

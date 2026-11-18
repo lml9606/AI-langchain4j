@@ -119,19 +119,25 @@ public class LlmGateway {
      */
     public JsonNode generateJsonNode(String modelName, String systemPrompt, String userPrompt,
                                      String scene, int maxOutputTokens) {
+        long start = System.currentTimeMillis();
         LlmResult result = generateJson(modelName, systemPrompt, userPrompt, maxOutputTokens);
         // 输出被 maxOutputTokens 截断 → JSON 不完整，返回 null 交给调用方降级（doGenerate 已打点 llm_truncated_total）
         if (result.truncated()) {
-            log.warn("[{}] llm output truncated, json unavailable", scene);
+            log.warn("[{}] llm output truncated, json unavailable, model={}, maxTokens={}, cost={}ms",
+                    scene, modelName, maxOutputTokens, System.currentTimeMillis() - start);
             return null;
         }
         try {
             // 提取前控制字符清洗（防裸控制字符破坏 JSON 解析，与调用方字段级清洗规则一致）
             String cleaned = result.text().replaceAll("[\\p{Cntrl}]", " ");
-            return JsonUtil.fromJson(JsonUtil.extractJsonObject(cleaned), JsonNode.class);
+            JsonNode node = JsonUtil.fromJson(JsonUtil.extractJsonObject(cleaned), JsonNode.class);
+            log.info("[{}] llm json done, model={}, maxTokens={}, cost={}ms, outputLength={}",
+                    scene, modelName, maxOutputTokens, System.currentTimeMillis() - start,
+                    result.text().length());
+            return node;
         } catch (Exception e) {
-            log.warn("[{}] json extract/parse failed, outputLength={}: {}",
-                    scene, result.text().length(), e.getMessage());
+            log.warn("[{}] json extract/parse failed, outputLength={}, cost={}ms: {}",
+                    scene, result.text().length(), System.currentTimeMillis() - start, e.getMessage());
             return null;
         }
     }

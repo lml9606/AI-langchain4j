@@ -27,7 +27,7 @@ public class Message {
     private Integer tokenUsage;
     /** 话题段归属（段号；user 落库后回填，assistant 继承同轮 user；可空=历史数据未回填） */
     private Integer segmentId;
-    /** 检索上下文快照（仅 assistant 消息：本轮的检索资料原文截断；改写视图锚定事实而非生成答案用） */
+    /** 检索上下文快照（仅 assistant 消息：本轮的检索资料原文截断；仅用于排查取证，不参与改写/生成） */
     private String context;
     /** 创建时间 */
     private OffsetDateTime createdAt;

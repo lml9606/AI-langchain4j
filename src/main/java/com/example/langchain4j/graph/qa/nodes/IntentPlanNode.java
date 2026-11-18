@@ -51,6 +51,7 @@ public class IntentPlanNode implements NodeAction<WorkflowState> {
         if (effectiveQuery == null || effectiveQuery.isBlank()) {
             return degradedPlan(state, "空查询");
         }
+        long start = System.currentTimeMillis();
         try {
             int maxSubQueries = Math.max(1, properties.getMaxSubQueries());
             String systemPrompt = promptTemplateService.resolveFormatted(
@@ -79,11 +80,13 @@ public class IntentPlanNode implements NodeAction<WorkflowState> {
             updates.put(WorkflowState.QUERY_PLAN, plan);
             updates.put(WorkflowState.SUB_QUERIES, subQueries);
             updates.put(WorkflowState.ERROR, "");
-            log.info("[intent-plan] done, intent={}, complexity={}, risk={}, primaryLength={}, subQueries={}, reasonLength={}",
-                    intent, complexity, risk, primaryQuery.length(), subQueries.size(), reason.length());
+            log.info("[intent-plan] cost={}ms, intent={}, complexity={}, risk={}, primaryLength={}, subQueries={}, reasonLength={}",
+                    System.currentTimeMillis() - start, intent, complexity, risk, primaryQuery.length(),
+                    subQueries.size(), reason.length());
             return updates;
         } catch (Exception e) {
-            log.warn("[intent-plan] llm/parse failed, degrade to default plan: {}", e.getMessage());
+            log.warn("[intent-plan] cost={}ms, llm/parse failed, degrade to default plan: {}",
+                    System.currentTimeMillis() - start, e.getMessage());
             return degradedPlan(state, "模型降级：" + e.getMessage());
         }
     }

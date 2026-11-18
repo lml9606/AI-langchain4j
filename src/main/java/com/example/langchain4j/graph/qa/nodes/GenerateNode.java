@@ -70,7 +70,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         AnswerBudget budget = answerBudgetResolver.resolve(state);
         systemPrompt = systemPrompt + lengthNote(budget);
         // 步骤3：拼装 user prompt（重试修正指令 + 有效查询 + 检索上下文）
-        String userPrompt = buildUserPrompt(state, budget);
+        String userPrompt = buildUserPrompt(state);
         // 步骤4：组装完整 messages：system + 最近 N 轮历史原文（角色消息）+ 本轮提问
         List<ChatMessage> messages = buildMessages(state, systemPrompt, userPrompt);
 
@@ -110,8 +110,8 @@ public class GenerateNode implements NodeAction<WorkflowState> {
     }
 
     /**
-     * 生成调用：知识问答按回答模式设置输出上限；代码生成/闲聊保持原有调用方式，
-     * 避免代码等长输出被问答预算误截断。
+     * 生成调用：所有意图统一使用预算中的输出 token 上限；
+     * 代码生成的字数提示为 0（不限制字数），只保留 token 硬上限。
      */
     private LlmResult generate(WorkflowState state, List<ChatMessage> messages, AnswerBudget budget) {
         return llmGateway.generate(state.model(), messages, budget.maxOutputTokens());
@@ -162,7 +162,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
     }
 
     /** 拼装用户需求、检索上下文与重试修正指令。 */
-    private String buildUserPrompt(WorkflowState state, AnswerBudget budget) {
+    private String buildUserPrompt(WorkflowState state) {
         StringBuilder sb = new StringBuilder();
         // 步骤1：校验重试时（重试计数 > 0），拼入重试修正指令（带质检失败原因 + 有效查询）
         if (state.retryCount() > 0) {
@@ -183,10 +183,6 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         // 步骤4：检索证据不充分时追加声明（防模型在资料缺失时脑补，明确回答边界）
         if (state.contextIncomplete()) {
             sb.append(promptTemplateService.resolve("CONTEXT_INCOMPLETE_NOTE", PromptTemplates.CONTEXT_INCOMPLETE_NOTE));
-        }
-        // 长度约束放在最后一条用户指令处：模型对最新指令的遵守度通常高于 system prompt 中的旧约束
-        if (budget.hasCharLimit()) {
-            sb.append("\n\n").append(lengthNote(budget));
         }
         return sb.toString();
     }
