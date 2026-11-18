@@ -107,28 +107,30 @@ class KnowledgeServiceTest {
         List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
 
         assertThat(sections).hasSize(2);
-        assertThat(sections.get(0).title()).isEqualTo("## 1.1 退款条件");
+        assertThat(sections.get(0).title()).isEqualTo("1.1 退款条件");
         assertThat(sections.get(0).body()).contains("正文A段落");
-        assertThat(sections.get(1).title()).isEqualTo("## 1.2 退款流程");
+        assertThat(sections.get(1).title()).isEqualTo("1.2 退款流程");
         assertThat(sections.get(1).body()).contains("正文C段落");
     }
 
     @Test
-    @DisplayName("父子分块：大标题直接跟子标题时，子标题内容属于大标题父块，大标题不单独成块")
+    @DisplayName("父子分块：纯容器大标题不单独成块，各子标题按完整路径成为父块")
     void splitParentsKeepsContainerHeadingWithSubheadings() {
         String content = "## 一、Java 基础\n\n### 1. HashMap 底层原理\n\n正文A。\n\n"
                 + "### 2. String、StringBuilder、StringBuffer\n\n正文B。";
 
         List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
 
-        assertThat(sections).hasSize(1);
-        assertThat(sections.get(0).title()).isEqualTo("## 一、Java 基础");
-        assertThat(sections.get(0).body()).contains("### 1. HashMap 底层原理", "正文A",
-                "### 2. String、StringBuilder、StringBuffer", "正文B");
+        assertThat(sections).hasSize(2);
+        assertThat(sections.get(0).title()).isEqualTo("一、Java 基础 > 1. HashMap 底层原理");
+        assertThat(sections.get(0).body()).startsWith("### 1. HashMap 底层原理").contains("正文A")
+                .doesNotContain("### 2. String、StringBuilder、StringBuffer", "正文B");
+        assertThat(sections.get(1).title()).isEqualTo("一、Java 基础 > 2. String、StringBuilder、StringBuffer");
+        assertThat(sections.get(1).body()).startsWith("### 2. String、StringBuilder、StringBuffer").contains("正文B");
     }
 
     @Test
-    @DisplayName("父子分块：唯一一级标题视为文档标题，父块边界落到二级标题")
+    @DisplayName("父子分块：唯一一级标题视为文档标题，子标题路径不重复包含文档标题")
     void splitParentsTreatsSingleH1AsDocumentTitle() {
         String content = "# Java 后端面试题\n\n## 一、Java 基础\n\n"
                 + "### 1. HashMap 底层原理\n\n正文A。";
@@ -136,8 +138,35 @@ class KnowledgeServiceTest {
         List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
 
         assertThat(sections).hasSize(1);
-        assertThat(sections.get(0).title()).isEqualTo("## 一、Java 基础");
-        assertThat(sections.get(0).body()).contains("# Java 后端面试题", "### 1. HashMap 底层原理", "正文A");
+        assertThat(sections.get(0).title()).isEqualTo("一、Java 基础 > 1. HashMap 底层原理");
+        assertThat(sections.get(0).body()).startsWith("### 1. HashMap 底层原理").contains("正文A")
+                .doesNotContain("# Java 后端面试题", "## 一、Java 基础");
+    }
+
+    @Test
+    @DisplayName("父子分块：容器标题自己有导语时，导语单独成块，子标题继续各自成块")
+    void splitParentsKeepsContainerOwnBody() {
+        String content = "## 一、Java 基础\n\n本章导语。\n\n### 1. HashMap 底层原理\n\n正文A。";
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
+
+        assertThat(sections).hasSize(2);
+        assertThat(sections.get(0).title()).isEqualTo("一、Java 基础");
+        assertThat(sections.get(0).body()).contains("本章导语").doesNotContain("正文A");
+        assertThat(sections.get(1).title()).isEqualTo("一、Java 基础 > 1. HashMap 底层原理");
+        assertThat(sections.get(1).body()).contains("正文A");
+    }
+
+    @Test
+    @DisplayName("父子分块：标题层级不固定，四级标题同样按完整路径成为父块")
+    void splitParentsSupportsArbitraryHeadingDepth() {
+        String content = "## A\n\n### B\n\n#### C\n\n正文C。";
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
+
+        assertThat(sections).hasSize(1);
+        assertThat(sections.get(0).title()).isEqualTo("A > B > C");
+        assertThat(sections.get(0).body()).startsWith("#### C").contains("正文C");
     }
 
     @Test
@@ -148,9 +177,9 @@ class KnowledgeServiceTest {
         List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
 
         assertThat(sections).hasSize(2);
-        assertThat(sections.get(0).title()).isEqualTo("## A");
+        assertThat(sections.get(0).title()).isEqualTo("A");
         assertThat(sections.get(0).body()).contains("# 注释不是标题", "正文A");
-        assertThat(sections.get(1).title()).isEqualTo("## B");
+        assertThat(sections.get(1).title()).isEqualTo("B");
     }
 
     @Test
@@ -173,7 +202,7 @@ class KnowledgeServiceTest {
         List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
 
         assertThat(sections).hasSize(1);
-        assertThat(sections.get(0).title()).isEqualTo("# 退款流程");
+        assertThat(sections.get(0).title()).isEqualTo("退款流程");
         assertThat(sections.get(0).body()).contains("2. 点击申请退款按钮");
     }
 
@@ -197,7 +226,7 @@ class KnowledgeServiceTest {
         List<KnowledgeService.ParentSection> sections = service.splitParents(content, 500);
 
         assertThat(sections.size()).isGreaterThan(1);
-        assertThat(sections).allMatch(s -> s.title().equals("## 退款规则"));
+        assertThat(sections).allMatch(s -> s.title().equals("退款规则"));
     }
 
     @Test
@@ -210,7 +239,7 @@ class KnowledgeServiceTest {
         assertThat(sections).hasSize(2);
         assertThat(sections.get(0).title()).isEqualTo("文档前言");
         assertThat(sections.get(0).body()).contains("导语段落");
-        assertThat(sections.get(1).title()).isEqualTo("## 1.1 正文标题");
+        assertThat(sections.get(1).title()).isEqualTo("1.1 正文标题");
     }
 
     @Test
@@ -234,6 +263,21 @@ class KnowledgeServiceTest {
         List<String> pieces = service.splitSemantic(content, 40, 0, 120);
 
         assertThat(pieces).anyMatch(piece -> piece.contains(code));
+    }
+
+    @Test
+    @DisplayName("语义切分：整行加粗标签与答案绑定，追问问题不会单独成块")
+    void semanticSplitKeepsQuestionWithAnswer() {
+        String content = "**标准答案**\n\n标准答案内容。\n\n**面试官追问**\n\n"
+                + "**追问 1：初始容量为什么是 16？**\n\n答案一。\n\n"
+                + "**追问 2：扩容怎么重新定位？**\n\n答案二。";
+
+        List<String> pieces = service.splitSemantic(content, 80, 0, 200);
+
+        assertThat(pieces).anyMatch(piece -> piece.contains("追问 1") && piece.contains("答案一"));
+        assertThat(pieces).anyMatch(piece -> piece.contains("追问 2") && piece.contains("答案二"));
+        assertThat(pieces).noneMatch(piece -> piece.trim().equals("**追问 1：初始容量为什么是 16？**"));
+        assertThat(pieces).noneMatch(piece -> piece.trim().equals("**追问 2：扩容怎么重新定位？**"));
     }
 
     @Test

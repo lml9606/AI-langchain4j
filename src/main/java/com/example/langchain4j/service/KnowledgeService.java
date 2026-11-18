@@ -68,6 +68,10 @@ public class KnowledgeService {
     private static final String TYPE_CHILD = "CHILD";
     /** 子块 content 标题前缀分隔符（方案 A：父标题拼进子块，解决父标题检索不到问题） */
     private static final String TITLE_SEPARATOR = "｜";
+    /** 父块标题路径分隔符：保留从章节到小节的层级，供检索与上下文装配使用 */
+    private static final String TITLE_PATH_SEPARATOR = " > ";
+    /** title 列宽（schema: VARCHAR(256)），超长标题路径防御性截断 */
+    private static final int MAX_TITLE_LENGTH = 256;
     /** 强结构标题行：Markdown 标题（#~######）与中文章节（第X章/节/篇/部）；Markdown 优先按层级处理 */
     private static final Pattern STRONG_TITLE_LINE = Pattern.compile(
             "^[ \\t]*(?:#{1,6}[ \\t]+\\S|第[一二三四五六七八九十百千\\d]+[章节篇部]).*",
@@ -80,6 +84,8 @@ public class KnowledgeService {
             "^[ \\t]*\\d+[、.．][ \\t]*\\S.*", Pattern.MULTILINE);
     /** Markdown 标题行：语义切分子块时作为结构边界（不依赖空行也能断开） */
     private static final Pattern MARKDOWN_HEADING_LINE = Pattern.compile("^#{1,6}[ \\t]+\\S.*");
+    /** 整行加粗标签：如 **标准答案**、**追问 1：...**；与后续答案合并，避免标签单独成块 */
+    private static final Pattern STRONG_LABEL_LINE = Pattern.compile("^\\*\\*[^*]+\\*\\*$");
 
     private final KnowledgeChunkMapper knowledgeChunkMapper;
     private final EmbeddingService embeddingService;
@@ -128,6 +134,8 @@ public class KnowledgeService {
      */
     public int importDocument(String content, String metadata, Integer chunkSize, Integer chunkOverlap,
                               String documentId, Integer version) {
+        long startedAt = System.currentTimeMillis();
+        // 0. 入口清洗与参数归一化：后续所有阶段只使用 cleaned 和 bounded 后的参数
         String cleaned = sanitize(content);
         if (cleaned.isEmpty()) {
             throw new BizException(ErrorCode.BAD_REQUEST, "content 清洗后为空");
@@ -140,12 +148,21 @@ public class KnowledgeService {
         String userId = UserContext.require();
         String resolvedDocumentId = resolveDocumentId(documentId);
         int resolvedVersion = resolveVersion(resolvedDocumentId, userId, version);
-        // 步骤1：按标题/章节切父块（同 title 长章节可拆多父块，装配时按 title 组找回）
+        log.info("[knowledge] import start, documentId={}, version={}, chars={}, parentSize={}, childSize={}, "
+                        + "overlap={}, childTokenLimit={}",
+                resolvedDocumentId, resolvedVersion, cleaned.length(), parentSize, childSize, overlap, childTokenLimit);
+
+        // 步骤1：标题树 → 父块。父块保留整段上下文但不嵌入；超长父块会继续按段落/句子续切。
+        long splitStartedAt = System.currentTimeMillis();
         List<ParentSection> sections = splitParents(cleaned, parentSize);
-        // 步骤2：逐父块切子块并嵌入（易失败的嵌入先行，失败时尚未落库零残留）
+        log.info("[knowledge] parent split done, documentId={}, version={}, parents={}, cost={}ms",
+                resolvedDocumentId, resolvedVersion, sections.size(), System.currentTimeMillis() - splitStartedAt);
+
+        // 步骤2：父块 → 语义子块 → 双向量。嵌入是易失败阶段，必须放在落库前，失败时数据库零残留。
         List<KnowledgeChunk> parents = new ArrayList<>(sections.size());
         List<KnowledgeChunk> children = new ArrayList<>();
         List<Integer> childrenPerParent = new ArrayList<>(sections.size());
+        long embedStartedAt = System.currentTimeMillis();
         for (int p = 0; p < sections.size(); p++) {
             ParentSection section = sections.get(p);
             KnowledgeChunk parent = new KnowledgeChunk();
@@ -158,13 +175,13 @@ public class KnowledgeService {
             parent.setVersion(resolvedVersion);
             parents.add(parent);
             List<String> pieces = splitChildren(section.body(), section.title(), childSize, overlap, childTokenLimit);
+            log.debug("[knowledge] parent prepared, index={}/{}, title={}, parentChars={}, children={}",
+                    p + 1, sections.size(), section.title(), section.body().length(), pieces.size());
             for (int i = 0; i < pieces.size(); i++) {
                 KnowledgeChunk child = new KnowledgeChunk();
                 String piece = pieces.get(i);
-                // 首块自带章节标题行（原文完整保留），不再重复拼前缀；后续块拼标题提升检索命中
-                String childText = piece.startsWith(section.title())
-                        ? piece
-                        : section.title() + TITLE_SEPARATOR + piece;
+                // 每个子块都带完整标题路径：既提升检索命中，也让续块脱离原文顺序后仍能定位所属小节
+                String childText = section.title() + TITLE_SEPARATOR + piece;
                 child.setContent(childText);
                 // 双向量写入：稠密（语义，BGE-M3）+ 稀疏（词权重，jieba hashing），检索端 RRF 融合
                 child.setEmbedding(embeddingService.embed(childText));
@@ -179,8 +196,16 @@ public class KnowledgeService {
             }
             childrenPerParent.add(pieces.size());
         }
+        log.info("[knowledge] children embedded, documentId={}, version={}, parents={}, children={}, cost={}ms",
+                resolvedDocumentId, resolvedVersion, parents.size(), children.size(),
+                System.currentTimeMillis() - embedStartedAt);
+
         try {
-            // 步骤3：父块逐个落库拿自增 ID，子块按父块顺序回填 parent_id 后一次批量落库
+            // 步骤3：父块逐个落库拿自增 ID；子块必须在父块之后落库，才能回填 parent_id。
+            // children 是按父块顺序连续追加的，因此用 cursor 做一次线性回填，避免额外的 Map 查找。
+            long persistStartedAt = System.currentTimeMillis();
+            log.info("[knowledge] persistence start, documentId={}, version={}, parents={}, children={}",
+                    resolvedDocumentId, resolvedVersion, parents.size(), children.size());
             int cursor = 0;
             for (int p = 0; p < parents.size(); p++) {
                 knowledgeChunkMapper.insert(parents.get(p));
@@ -192,8 +217,12 @@ public class KnowledgeService {
             if (!children.isEmpty()) {
                 knowledgeChunkMapper.insertBatch(children);
             }
+            log.info("[knowledge] persistence done, documentId={}, version={}, cost={}ms",
+                    resolvedDocumentId, resolvedVersion, System.currentTimeMillis() - persistStartedAt);
         } catch (RuntimeException e) {
             // 失败版本必须清理：否则半成品会成为 MAX(version)，把上一份完整版本遮住
+            log.error("[knowledge] document import failed, documentId={}, version={}, parents={}, children={}, reason={}",
+                    resolvedDocumentId, resolvedVersion, parents.size(), children.size(), rootMessage(e));
             cleanupFailedImport(resolvedDocumentId, resolvedVersion, userId);
             throw e;
         }
@@ -207,9 +236,9 @@ public class KnowledgeService {
             }
         }
         log.info("[knowledge] document imported, documentId={}, version={}, parents={}, children={}, "
-                        + "parentSize={}, childSize={}, childTokenLimit={}",
+                        + "parentSize={}, childSize={}, childTokenLimit={}, cost={}ms",
                 resolvedDocumentId, resolvedVersion, parents.size(), children.size(),
-                parentSize, childSize, childTokenLimit);
+                parentSize, childSize, childTokenLimit, System.currentTimeMillis() - startedAt);
         return parents.size() + children.size();
     }
 
@@ -457,7 +486,12 @@ public class KnowledgeService {
         int bodyTokenLimit = Math.max(64, maxTokens - prefixTokens - 16);
         int bodyCharLimit = Math.min(maxChars, bodyTokenLimit);
         int bodyOverlap = Math.min(overlap, bodyCharLimit / 2);
-        return splitSemantic(body, bodyCharLimit, bodyOverlap, bodyTokenLimit);
+        List<String> pieces = splitSemantic(body, bodyCharLimit, bodyOverlap, bodyTokenLimit);
+        log.debug("[knowledge] child split done, titleChars={}, bodyChars={}, bodyCharLimit={}, "
+                        + "bodyTokenLimit={}, overlap={}, children={}",
+                titlePrefix.length(), body == null ? 0 : body.length(), bodyCharLimit,
+                bodyTokenLimit, bodyOverlap, pieces.size());
+        return pieces;
     }
 
     /** 把语义单元展开为不超过预算的切片：正常单元原样保留，超大单元才回退到句子/硬切 */
@@ -474,38 +508,70 @@ public class KnowledgeService {
     }
 
     /**
-     * 结构语义单元识别：空行结束段落；Markdown 标题开新单元；围栏代码块（``` / ~~~）跨空行保持完整。
+     * 结构语义单元识别：空行结束普通段落；Markdown 标题开新单元；围栏代码块（``` / ~~~）跨空行保持完整；
+     * 整行加粗标签（标准答案/追问等）与其后答案合并，避免问题标签与答案被切到不同块。
      * 不引入额外元数据，仅用文本自身结构决定切分边界。
      */
     private List<String> semanticUnits(String content) {
         List<String> units = new ArrayList<>();
         StringBuilder block = new StringBuilder();
+        // 状态机：fence 标识当前是否在代码块内；labelBlock 标识正在吸收“标签 + 答案”；
+        // hasBody 区分“只有连续标签”和“标签后已经出现真正正文”，只有后者才允许结束当前块。
         String fence = null;
+        boolean labelBlock = false;
+        boolean hasBody = false;
         for (String line : content.split("\n", -1)) {
             String trimmed = line.trim();
             if (fence != null) {
+                // 代码块内不识别空行、标题或加粗标签，直到遇到同类围栏才整体提交。
                 block.append(line).append('\n');
                 if (trimmed.startsWith(fence)) {
                     flushSemanticUnit(block, units);
                     fence = null;
+                    labelBlock = false;
+                    hasBody = false;
                 }
                 continue;
             }
             String openedFence = fenceMarker(trimmed);
             if (openedFence != null) {
-                flushSemanticUnit(block, units);
+                // 标签后的代码示例属于答案；标签前已有正文时才断开
+                if (!labelBlock) {
+                    flushSemanticUnit(block, units);
+                }
                 block.append(line).append('\n');
+                hasBody = true;
                 fence = openedFence;
                 continue;
             }
             if (trimmed.isEmpty()) {
-                flushSemanticUnit(block, units);
+                // 标签块跨空行继续吸收答案；普通段落仍在空行处结束
+                if (labelBlock) {
+                    block.append('\n');
+                } else {
+                    flushSemanticUnit(block, units);
+                }
                 continue;
             }
-            if (MARKDOWN_HEADING_LINE.matcher(trimmed).matches() && !block.isEmpty()) {
+            if (MARKDOWN_HEADING_LINE.matcher(trimmed).matches()) {
+                // 新标题一定开启新语义单元；先提交上一块，避免标题被拼进上一段答案。
                 flushSemanticUnit(block, units);
+                labelBlock = false;
+                hasBody = false;
+                block.append(line).append('\n');
+                continue;
+            }
+            if (STRONG_LABEL_LINE.matcher(trimmed).matches()) {
+                // 连续标签（如 **面试官追问** + **追问 1**）保留在同一块；已有答案才结束上一块
+                if (!block.isEmpty() && hasBody) {
+                    flushSemanticUnit(block, units);
+                }
+                labelBlock = true;
+                block.append(line).append('\n');
+                continue;
             }
             block.append(line).append('\n');
+            hasBody = true;
         }
         flushSemanticUnit(block, units);
         return units;
@@ -716,70 +782,74 @@ public class KnowledgeService {
     }
 
     /**
-     * 父子分块第一层：按标题层级切父块（整章上下文，不嵌入）。
+     * 父子分块第一层：把标题树展开为“标题自身的直接正文”父块（整段上下文，不嵌入）。
      * <ul>
-     *   <li>Markdown 标题按 # 数量分层，选最外层章节作为父块边界：
-     *       “## 一、Java 基础”下的所有“### ...”都属于同一个父块，不会被拆成孤立大标题；</li>
-     *   <li>只有一个一级标题时视为文档标题，不参与父块边界，避免整篇退化成同一个父标题；</li>
-     *   <li>只有标题、没有正文的节并入下一节，标题文本原样保留，避免产生无检索价值的空父块；</li>
+     *   <li>父块边界不是固定 H2/H3，而是任意标题下、直到下一个标题前的直接正文；</li>
+     *   <li>“## 章节”只有标题时只作为路径，不单独成块；“### 小节”有正文时各自成父块；</li>
+     *   <li>父块 title 保存从顶级章节到当前标题的完整路径，如“一、Java 基础 &gt; 1. HashMap 底层原理”；</li>
+     *   <li>唯一的一级标题视为文档标题，不进入子标题路径；其自有导语仍保留为前言父块；</li>
+     *   <li>只有标题、没有正文且没有子标题的叶节点保留为父块，避免丢内容；</li>
      *   <li>围栏代码块中的 # 注释不当作标题；</li>
-     *   <li>无标题行 → 单一节，title 取首行（≤40 字）否则前 100 字；</li>
-     *   <li>节超父块大小 → 复用 {@link #split} 续切成多个同 title 父块
-     *       （同 title 组装配补长章节被拆散的漏）。</li>
+     *   <li>父块超预算 → 复用 {@link #split} 按段落/句子续切，续块保持同一 title 路径。</li>
      * </ul>
      */
     List<ParentSection> splitParents(String content, int parentSize) {
+        long startedAt = System.currentTimeMillis();
         List<Heading> headings = headings(content);
+        log.debug("[knowledge] parent split start, chars={}, parentSize={}, headings={}",
+                content.length(), parentSize, headings.size());
         if (headings.isEmpty()) {
+            // 没有任何可识别标题：整篇按长度硬切，所有父块共享同一个兜底标题。
             String title = deriveTitle(content);
-            return split(content, parentSize, 0).stream()
+            List<ParentSection> sections = split(content, parentSize, 0).stream()
                     .map(piece -> new ParentSection(title, piece))
                     .toList();
+            log.debug("[knowledge] parent split done without headings, title={}, parents={}, cost={}ms",
+                    title, sections.size(), System.currentTimeMillis() - startedAt);
+            return sections;
         }
-        int parentLevel = parentLevel(headings);
-        List<Heading> boundaries = headings.stream()
-                .filter(heading -> heading.level() == parentLevel)
-                .toList();
+        Heading documentTitle = documentTitle(headings);
         List<ParentSection> sections = new ArrayList<>();
-        StringBuilder pending = new StringBuilder();
-        // 标题前的正文（前言）单独成节，title 用兜底标题
-        if (boundaries.get(0).start() > 0) {
-            String preamble = content.substring(0, boundaries.get(0).start()).trim();
-            if (!preamble.isEmpty()) {
-                if (hasBodyBeyondFirstLine(preamble)) {
-                    addSections(sections, deriveTitle(preamble), preamble, parentSize);
-                } else {
-                    // 前言只有标题时不能单独成块，并入第一个正文节，标题文本不丢
-                    pending.append(preamble);
-                }
-            }
+        // 首个标题前的正文没有标题路径，用兜底标题单独保留；否则这段前言会丢失。
+        String preamble = content.substring(0, headings.get(0).start()).trim();
+        if (!preamble.isEmpty() && hasMeaningfulBody(preamble)) {
+            log.debug("[knowledge] parent preamble kept, chars={}, title={}", preamble.length(), deriveTitle(preamble));
+            addSections(sections, deriveTitle(preamble), preamble, parentSize);
         }
-        // 相邻同层标题之间为一个节；外层标题包含其下所有更深层标题
-        for (int i = 0; i < boundaries.size(); i++) {
-            int begin = boundaries.get(i).start();
-            int end = i + 1 < boundaries.size() ? boundaries.get(i + 1).start() : content.length();
-            String section = content.substring(begin, end).trim();
-            if (section.isEmpty()) {
+
+        List<Heading> path = new ArrayList<>();
+        for (int i = 0; i < headings.size(); i++) {
+            Heading heading = headings.get(i);
+            // 维护祖先链：同级/更浅标题说明上一棵子树结束，先弹栈；再压入当前标题。
+            // 例如 H2(a) -> H3(a1) -> H2(b)：处理 b 时会连续弹出 a1、a，得到新的路径 [b]。
+            while (!path.isEmpty() && path.get(path.size() - 1).level() >= heading.level()) {
+                path.remove(path.size() - 1);
+            }
+            path.add(heading);
+
+            // 当前标题的“直接正文”截止到下一个任意层级标题，不包含子标题自己的正文。
+            int end = i + 1 < headings.size() ? headings.get(i + 1).start() : content.length();
+            String body = content.substring(heading.start(), end).trim();
+            if (body.isEmpty()) {
                 continue;
             }
-            if (!hasBodyBeyondFirstLine(section)) {
-                // 只有标题的节并入下一节；连续空标题按原顺序一起挂到下一节
-                if (!pending.isEmpty()) {
-                    pending.append("\n\n");
-                }
-                pending.append(section);
+            int bodyStart = nextLineStart(content, heading.start(), end);
+            boolean hasOwnBody = hasMeaningfulBody(content.substring(bodyStart, end));
+            boolean hasChild = i + 1 < headings.size() && headings.get(i + 1).level() > heading.level();
+            // 纯容器标题只提供路径；标题本身无正文且无子节点时仍落一个父块，避免静默丢内容
+            if (!hasOwnBody && hasChild) {
+                log.debug("[knowledge] parent container skipped, level={}, title={}",
+                        heading.level(), headingPath(path, content, documentTitle));
                 continue;
             }
-            String title = extractTitle(section);
-            String body = pending.isEmpty() ? section : pending.toString() + "\n\n" + section;
-            pending.setLength(0);
+            String title = headingPath(path, content, documentTitle);
+            log.debug("[knowledge] parent section accepted, index={}/{}, level={}, ownBody={}, child={}, "
+                            + "bodyChars={}, title={}",
+                    i + 1, headings.size(), heading.level(), hasOwnBody, hasChild, body.length(), title);
             addSections(sections, title, body, parentSize);
         }
-        // 文档末尾只有标题：没有下一节可并，保留为父块，不能丢内容
-        if (!pending.isEmpty()) {
-            String leftover = pending.toString().trim();
-            addSections(sections, extractTitle(leftover), leftover, parentSize);
-        }
+        log.debug("[knowledge] parent split done, headings={}, documentTitle={}, parents={}, cost={}ms",
+                headings.size(), documentTitle != null, sections.size(), System.currentTimeMillis() - startedAt);
         return sections;
     }
 
@@ -845,30 +915,88 @@ public class KnowledgeService {
         return singleLevel;
     }
 
-    /** 选父块边界层级：最小标题层级；唯一的首个一级标题视为文档标题时跳过它 */
-    private int parentLevel(List<Heading> headings) {
-        int minLevel = headings.stream().mapToInt(Heading::level).min().orElse(1);
-        long minCount = headings.stream().filter(heading -> heading.level() == minLevel).count();
-        boolean hasDeeper = headings.stream().anyMatch(heading -> heading.level() > minLevel);
-        if (minLevel == 1 && minCount == 1 && headings.get(0).level() == 1 && hasDeeper) {
-            return headings.stream()
-                    .filter(heading -> heading.level() > 1)
-                    .mapToInt(Heading::level)
-                    .min()
-                    .orElse(1);
-        }
-        return minLevel;
+    /** 唯一且后面还有更深标题的一级标题视为文档标题，只进入正文，不进入小节路径 */
+    private Heading documentTitle(List<Heading> headings) {
+        Heading first = headings.get(0);
+        long h1Count = headings.stream().filter(heading -> heading.level() == 1).count();
+        boolean hasDeeper = headings.stream().anyMatch(heading -> heading.level() > 1);
+        return first.level() == 1 && h1Count == 1 && hasDeeper ? first : null;
     }
 
-    /** 标题行之外是否还有正文；只有标题的节需要并入下一节，避免产生空父块 */
-    private boolean hasBodyBeyondFirstLine(String text) {
-        int end = text.indexOf('\n');
-        return end >= 0 && !text.substring(end + 1).isBlank();
+    /** 生成“顶级章节 > 子章节 > 当前标题”的路径；文档标题不进入路径 */
+    private String headingPath(List<Heading> path, String content, Heading documentTitle) {
+        List<String> parts = new ArrayList<>();
+        for (Heading heading : path) {
+            if (documentTitle != null && heading.start() == documentTitle.start()) {
+                continue;
+            }
+            String text = headingText(content, heading.start());
+            if (!text.isEmpty()) {
+                parts.add(text);
+            }
+        }
+        // 当前标题就是文档标题（或没有可展示祖先）时，用自己的标题兜底
+        if (parts.isEmpty()) {
+            parts.add(headingText(content, path.get(path.size() - 1).start()));
+        }
+        String title = String.join(TITLE_PATH_SEPARATOR, parts);
+        return title.length() > MAX_TITLE_LENGTH ? title.substring(0, MAX_TITLE_LENGTH) : title;
+    }
+
+    /** 取标题行文本并去掉 Markdown 的 # 前缀，路径中保留可读标题 */
+    private String headingText(String content, int start) {
+        int end = content.indexOf('\n', start);
+        String line = (end < 0 ? content.substring(start) : content.substring(start, end)).trim();
+        int marker = 0;
+        while (marker < line.length() && line.charAt(marker) == '#') {
+            marker++;
+        }
+        return (marker > 0 ? line.substring(marker) : line).trim();
+    }
+
+    /** 标题行结束后的下一行起点；用于把标题行和它自己的正文分开 */
+    private int nextLineStart(String content, int start, int limit) {
+        int lineEnd = content.indexOf('\n', start);
+        return lineEnd < 0 || lineEnd >= limit ? limit : lineEnd + 1;
+    }
+
+    /** 是否包含可检索正文：忽略空行和 Markdown 分隔线 */
+    private boolean hasMeaningfulBody(String text) {
+        for (String line : text.split("\n", -1)) {
+            String trimmed = line.trim();
+            if (!trimmed.isEmpty() && !isHorizontalRule(trimmed)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Markdown 水平分隔线（--- / *** / ___），不作为父块正文 */
+    private boolean isHorizontalRule(String line) {
+        if (line.length() < 3) {
+            return false;
+        }
+        char first = line.charAt(0);
+        if (first != '-' && first != '*' && first != '_') {
+            return false;
+        }
+        for (int i = 1; i < line.length(); i++) {
+            if (line.charAt(i) != first) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** 按父块预算切节（超长节续切为多个同 title 父块） */
     private void addSections(List<ParentSection> sections, String title, String body, int parentSize) {
-        for (String piece : split(body, parentSize, 0)) {
+        List<String> pieces = split(body, parentSize, 0);
+        if (pieces.size() > 1) {
+            // 续块仍使用同一 title，检索命中任一续块时可由父块组装逻辑找回相邻上下文。
+            log.debug("[knowledge] parent section oversized, title={}, bodyChars={}, parentSize={}, pieces={}",
+                    title, body.length(), parentSize, pieces.size());
+        }
+        for (String piece : pieces) {
             sections.add(new ParentSection(title, piece));
         }
     }
@@ -879,14 +1007,6 @@ public class KnowledgeService {
 
     /** 标题行：start 为行首偏移，level 为 Markdown 层级（非 Markdown 标题统一为 2） */
     private record Heading(int start, int level) {
-    }
-
-    /** 节首行即标题（标题行 ≤100 字防御截断）；首行过长时退化为前 100 字 */
-    private String extractTitle(String section) {
-        int end = section.indexOf('\n');
-        String first = end < 0 ? section : section.substring(0, end);
-        String trimmed = first.trim();
-        return trimmed.length() > 100 ? trimmed.substring(0, 100) : trimmed;
     }
 
     /** 无标题兜底标题：首行（非空且 ≤40 字）优先，否则取前 100 字截断 */
