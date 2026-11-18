@@ -70,7 +70,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         AnswerBudget budget = answerBudgetResolver.resolve(state);
         systemPrompt = systemPrompt + lengthNote(budget);
         // 步骤3：拼装 user prompt（重试修正指令 + 有效查询 + 检索上下文）
-        String userPrompt = buildUserPrompt(state);
+        String userPrompt = buildUserPrompt(state, budget);
         // 步骤4：组装完整 messages：system + 最近 N 轮历史原文（角色消息）+ 本轮提问
         List<ChatMessage> messages = buildMessages(state, systemPrompt, userPrompt);
 
@@ -79,11 +79,11 @@ public class GenerateNode implements NodeAction<WorkflowState> {
             // 步骤5：调用 LLM 生成，并记录耗时与输出长度
             long start = System.currentTimeMillis();
             LlmResult result = generate(state, messages, budget);
-            log.info("[generate] cost={}ms, intent={}, complexity={}, answerMode={}, budgetChars={}, budgetTokens={}, retries={}, history={}, contextLength={}, outputLength={}, tokenUsage={}, truncated={}",
-                    System.currentTimeMillis() - start, state.intent(), state.queryPlan().complexity(),
+            log.info("[generate] cost={}ms, model={}, intent={}, complexity={}, answerMode={}, budgetChars={}, budgetTokens={}, retries={}, history={}, contextLength={}, outputLength={}, inputTokens={}, outputTokens={}, tokenUsage={}, truncated={}",
+                    System.currentTimeMillis() - start, state.model(), state.intent(), state.queryPlan().complexity(),
                     state.answerMode(), budget.maxChars(), budget.maxOutputTokens(), state.retryCount(),
                     state.history().size(), state.context().length(), result.text().length(),
-                    result.tokenUsage(), result.truncated());
+                    result.inputTokens(), result.outputTokens(), result.tokenUsage(), result.truncated());
             // 步骤5.5：输出侧审核：命中敏感词替换为拒答文案（不透出命中词，防用户绕过测试）
             String text = result.text();
             if (outputGuardService.blocked(text)) {
@@ -162,7 +162,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
     }
 
     /** 拼装用户需求、检索上下文与重试修正指令。 */
-    private String buildUserPrompt(WorkflowState state) {
+    private String buildUserPrompt(WorkflowState state, AnswerBudget budget) {
         StringBuilder sb = new StringBuilder();
         // 步骤1：校验重试时（重试计数 > 0），拼入重试修正指令（带质检失败原因 + 有效查询）
         if (state.retryCount() > 0) {
@@ -183,6 +183,10 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         // 步骤4：检索证据不充分时追加声明（防模型在资料缺失时脑补，明确回答边界）
         if (state.contextIncomplete()) {
             sb.append(promptTemplateService.resolve("CONTEXT_INCOMPLETE_NOTE", PromptTemplates.CONTEXT_INCOMPLETE_NOTE));
+        }
+        // 长度约束放在最后一条用户指令处：模型对最新指令的遵守度通常高于 system prompt 中的旧约束
+        if (budget.hasCharLimit()) {
+            sb.append("\n\n").append(lengthNote(budget));
         }
         return sb.toString();
     }

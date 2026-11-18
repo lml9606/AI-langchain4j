@@ -242,6 +242,8 @@ public class LlmGateway {
                 throw new IllegalStateException("模型返回空响应");
             }
             Integer tokens = response.tokenUsage() != null ? response.tokenUsage().totalTokenCount() : null;
+            Integer inputTokens = response.tokenUsage() != null ? response.tokenUsage().inputTokenCount() : null;
+            Integer outputTokens = response.tokenUsage() != null ? response.tokenUsage().outputTokenCount() : null;
             FinishReason finishReason = response.finishReason();
             // 输出被 maxOutputTokens 截断：结构化 JSON 大概率不完整，打点告警；
             // 不在此处抛错 —— 调用方按 truncated() 走各自 fail-open 降级（解析层与控制层职责分离）
@@ -249,7 +251,8 @@ public class LlmGateway {
                 log.warn("[llm] output truncated by maxOutputTokens, model={}", modelName);
                 metrics.recordLlmTruncated(modelName);
             }
-            return LlmResult.of(response.aiMessage().text(), tokens, finishReason);
+            return LlmResult.of(response.aiMessage().text(), tokens, finishReason,
+                    inputTokens, outputTokens);
         } catch (TimeoutException e) {
             future.cancel(true);
             throw new IllegalStateException("模型调用超时（" + timeoutSeconds + "s）", e);

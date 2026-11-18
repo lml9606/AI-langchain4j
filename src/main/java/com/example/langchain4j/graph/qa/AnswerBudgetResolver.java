@@ -14,7 +14,7 @@ import org.springframework.stereotype.Component;
 public class AnswerBudgetResolver {
 
     private static final String SIMPLE_STYLE =
-            "先给结论，再列最多 3 条关键点；不复述问题，不展开无关背景。";
+            "先给结论，最多 3 条关键点，每条不超过 80 字；不复述问题，不展开背景、示例或总结。";
     private static final String COMPOUND_STYLE =
             "按子问题逐一回答，每个子问题先给结论并最多列 2 条依据；不复述资料原文。";
     private static final String DEEP_STYLE =

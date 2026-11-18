@@ -52,7 +52,7 @@ class GenerateNodeTest {
     }
 
     @Test
-    @DisplayName("简单知识问答 → system prompt 注入 500 字约束，LLM 收到 1024 token 上限")
+    @DisplayName("简单知识问答 → system prompt 注入 500 字约束，LLM 收到 512 token 上限")
     void simpleKnowledgeUsesDynamicBudget() {
         when(llmGateway.generate(eq("test-model"), anyList(), anyInt()))
                 .thenReturn(new LlmResult("结论", 20, FinishReason.STOP));
@@ -61,11 +61,12 @@ class GenerateNodeTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<ChatMessage>> messagesCaptor = ArgumentCaptor.forClass(List.class);
-        verify(llmGateway).generate(eq("test-model"), messagesCaptor.capture(), eq(1024));
+        verify(llmGateway).generate(eq("test-model"), messagesCaptor.capture(), eq(512));
         SystemMessage system = (SystemMessage) messagesCaptor.getValue().get(0);
         assertThat(system.text())
                 .contains("总长度控制在 500 字以内")
-                .contains("最多 3 条关键点");
+                .contains("最多 3 条关键点")
+                .contains("每条不超过 80 字");
     }
 
     @Test

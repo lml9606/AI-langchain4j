@@ -24,13 +24,15 @@ class AnswerBudgetResolverTest {
     }
 
     @Test
-    @DisplayName("简单知识问答 → 500 字 / 1024 token，并限制最多 3 条关键点")
+    @DisplayName("简单知识问答 → 500 字 / 512 token，并限制最多 3 条关键点")
     void simpleKnowledgeBudget() {
         AnswerBudget budget = resolver.resolve(stateOf(QaIntent.KNOWLEDGE_QA, "simple", 1, "auto"));
 
         assertThat(budget.maxChars()).isEqualTo(500);
-        assertThat(budget.maxOutputTokens()).isEqualTo(1024);
-        assertThat(budget.styleNote()).contains("最多 3 条关键点");
+        assertThat(budget.maxOutputTokens()).isEqualTo(512);
+        assertThat(budget.styleNote())
+                .contains("最多 3 条关键点")
+                .contains("每条不超过 80 字");
     }
 
     @Test
