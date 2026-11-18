@@ -825,8 +825,8 @@ public class KnowledgeService {
         List<Heading> headings = headings(content);
         log.debug("[knowledge] parent split start, chars={}, parentSize={}, headings={}",
                 content.length(), parentSize, headings.size());
+        // 没有任何可识别标题：整篇按长度硬切，所有父块共享同一个兜底标题。
         if (headings.isEmpty()) {
-            // 没有任何可识别标题：整篇按长度硬切，所有父块共享同一个兜底标题。
             String title = deriveTitle(content);
             List<ParentSection> sections = splitSemantic(content, parentSize, 0, parentSize).stream()
                     .map(piece -> new ParentSection(title, piece))
@@ -857,13 +857,13 @@ public class KnowledgeService {
             }
             path.add(heading);
 
-            // H4 及更深标题不产生父块，但其文本和正文会被下面的 H3 父块整体包含。
+            // 比选中层更深的标题不产生父块，但其文本和正文会被所属父块整体包含。
             if (heading.level() > parentLevel) {
                 continue;
             }
 
-            // H1/H2 只取自己的直接正文，遇到下一标题即结束；
-            // L3 父块则一直扩展到下一个 H3/H2/H1，因此其下所有 H4 内容都会留在同一个父块中。
+            // 比选中层更浅的标题只取自己的直接正文，遇到下一标题即结束；
+            // 选中层标题则一直扩展到下一个同级/更浅标题，因此其下所有深层内容都会留在同一个父块中。
             int end = parentSectionEnd(headings, i, parentLevel, content.length());
             String body = content.substring(heading.start(), end).trim();
             if (body.isEmpty()) {
@@ -872,7 +872,7 @@ public class KnowledgeService {
             int bodyStart = nextLineStart(content, heading.start(), end);
             boolean hasOwnBody = hasMeaningfulBody(content.substring(bodyStart, end));
             boolean hasChild = i + 1 < headings.size() && headings.get(i + 1).level() > heading.level();
-            // H1/H2 纯容器只提供路径；L3 即使没有直接正文，也要把其下 H4 内容装进父块。
+            // 比选中层更浅的纯容器只提供路径；选中层即使没有直接正文，也要把其下深层内容装进父块。
             if (heading.level() < parentLevel && !hasOwnBody && hasChild) {
                 log.debug("[knowledge] parent container skipped, level={}, title={}",
                         heading.level(), headingPath(path, content, documentTitle));
@@ -957,22 +957,38 @@ public class KnowledgeService {
         Heading first = headings.get(0);
         long h1Count = headings.stream().filter(heading -> heading.level() == 1).count();
         boolean hasDeeper = headings.stream().anyMatch(heading -> heading.level() > 1);
+        // 唯一 H1 且后面还有更深标题时，它更像文档名而非章节：排除出父块路径，避免每个 title 都重复文档名。
         return first.level() == 1 && h1Count == 1 && hasDeeper ? first : null;
     }
 
     /**
-     * 自适应选择父块层级：按每一层小节长度的中位数与超长比例选层，不写死 H3。
-     * 先在目标区间内找最浅的合格层；都不合格时选中位数最接近目标区间的层。
+     * 自适应选择父块层级：只决定“按哪一级标题切”，不在这里实际切块。
+     * <p>
+     * 按 H2 -&gt; H3 -&gt; H4 ... 从浅到深逐层统计整篇文档：
+     * <ol>
+     *   <li>每个标题的长度 = 从标题开始到下一个同级/更浅标题之前的整段字符数，
+     *       因此包含它下面的全部子标题和正文；</li>
+     *   <li>同一层少于 2 个标题时样本不足，跳过该层；</li>
+     *   <li>中位数落在 targetMin ~ targetMax，且长度超过 parentSize 的标题占比不超过 25%，
+     *       该层才合格；</li>
+     *   <li>返回最浅的合格层，保留尽可能多的父块上下文；</li>
+     *   <li>所有层都不合格时，返回中位数离目标区间最近的一层；若所有层都样本不足，
+     *       退回最深层。</li>
+     * </ol>
+     * 目标区间只影响选层，不是父块硬约束；超长父块随后由 splitSemantic 继续切分。
      */
     private int chooseParentLevel(String content, List<Heading> headings,
                                   int targetMin, int targetMax, int parentSize) {
         int maxLevel = headings.stream().mapToInt(Heading::level).max().orElse(1);
+        // 只有 H1 或没有更深标题时，没有可选的小节层级，直接按现有层级切。
         if (maxLevel <= 1) {
             return maxLevel;
         }
         Heading documentTitle = documentTitle(headings);
         int bestLevel = -1;
         int bestDistance = Integer.MAX_VALUE;
+        // 关键：按“整篇文档的同一层标题”横向统计，不递归进入某一棵子树单独判断。
+        // H2 合格就保留整章上下文；H2 不合适才继续尝试 H3、H4。
         for (int level = 2; level <= maxLevel; level++) {
             List<Integer> sizes = new ArrayList<>();
             for (int i = 0; i < headings.size(); i++) {
@@ -983,12 +999,15 @@ public class KnowledgeService {
                 if (documentTitle != null && heading.start() == documentTitle.start()) {
                     continue;
                 }
+                // 当前候选层等于 heading.level()，parentSectionEnd 会跨过更深子标题，
+                // 因此 size 是该标题整棵子树的长度，而不只是标题后的直接正文。
                 int end = parentSectionEnd(headings, i, level, content.length());
                 int size = end - heading.start();
                 if (size > 0) {
                     sizes.add(size);
                 }
             }
+            // 单个样本无法代表整篇结构，也不能因为一个超长标题就决定下钻到更深层。
             if (sizes.size() < 2) {
                 continue;
             }
@@ -1000,9 +1019,12 @@ public class KnowledgeService {
                 }
             }
             double overRatio = overCount * 1.0 / sizes.size();
+            // 中位数判断“典型章节是否合适”，超长比例判断“长尾是否还能接受”。
+            // 从 H2 向 H3/H4 递增遍历，第一个合格层就是最浅合格层。
             if (median >= targetMin && median <= targetMax && overRatio <= PARENT_OVER_RATIO_LIMIT) {
                 return level;
             }
+            // 没有直接合格层时记录离目标区间最近的层级；距离相同保留先遇到的浅层。
             int distance = median < targetMin ? targetMin - median
                     : median > targetMax ? median - targetMax : 0;
             if (distance < bestDistance) {
@@ -1010,6 +1032,7 @@ public class KnowledgeService {
                 bestLevel = level;
             }
         }
+        // 所有层都少于 2 个样本时，退回最深层，保证最终仍有父块边界可用。
         return bestLevel > 0 ? bestLevel : maxLevel;
     }
 
@@ -1028,6 +1051,7 @@ public class KnowledgeService {
      * <p>
      * 比选中层更浅的标题只提供路径，取自己的直接正文，遇到下一标题即结束；
      * 选中层是父块边界，必须一直扩展到下一个同级或更浅标题，不能在其子标题处提前结束。
+     * 例如 parentLevel=3 时，H3 会一直包含到下一个 H3/H2/H1，其下 H4/H5 都属于该 H3 父块。
      */
     private int parentSectionEnd(List<Heading> headings, int index, int parentLevel, int contentLength) {
         Heading current = headings.get(index);

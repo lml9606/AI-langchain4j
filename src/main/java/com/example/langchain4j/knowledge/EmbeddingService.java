@@ -5,6 +5,7 @@ import com.example.langchain4j.common.exception.ErrorCode;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.output.Response;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -19,6 +20,24 @@ public class EmbeddingService {
 
     public EmbeddingService(EmbeddingModel embeddingModel) {
         this.embeddingModel = embeddingModel;
+    }
+
+    /**
+     * 启动预热：提前触发 Ollama/BGE-M3 模型加载，避免首个知识检索请求承担模型冷启动耗时。
+     * <p>
+     * 预热失败只告警、不阻断应用启动：本地模型服务可能晚于应用启动；正式检索仍会再次尝试，
+     * 并在失败时走 VectorSearchService 的单通道降级。
+     */
+    @PostConstruct
+    void warmUp() {
+        long start = System.currentTimeMillis();
+        try {
+            embeddingModel.embed("知识库检索预热");
+            log.info("[embedding] warm-up done, costMs={}", System.currentTimeMillis() - start);
+        } catch (Exception e) {
+            log.warn("[embedding] warm-up failed, first query may be slower or degraded, reason={}",
+                    e.getMessage());
+        }
     }
 
     /**

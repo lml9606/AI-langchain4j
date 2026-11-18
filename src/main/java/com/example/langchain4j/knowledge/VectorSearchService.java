@@ -27,8 +27,8 @@ public class VectorSearchService {
     private static final int DEFAULT_TOP_K = 3;
     /**
      * 稠密通道最小相似度阈值（1 - 余弦距离，越大越相似）：低于该值视为不相关直接丢弃。
-     * 0.85 是 BGE-M3 下的严格档位，优先保证客服问答精度；若评测发现召回不足，
-     * 应基于评测集下调（如 0.6~0.7），不要盲调。
+     * 0.85 是 BGE-M3 下的严格档位，优先保证客服问答精度；若验证发现召回不足，
+     * 应基于验证集下调（如 0.6~0.7），不要盲调。
      */
     private static final double DEFAULT_MIN_SCORE = 0.85;
     /** 稀疏通道最小内积阈值（已 L2 归一化即余弦）：低于该值不进融合池；稀疏余弦天然低于稠密，0.05 只滤零重叠噪声 */
@@ -69,6 +69,37 @@ public class VectorSearchService {
      * @return 相关块列表；双通道均失败时返回空列表（fail-open，由调用方降级）
      */
     public List<KnowledgeChunk> search(String query, int topK, boolean privateOnly) {
+        return searchScored(query, topK, privateOnly).stream()
+                .map(ScoredChunk::chunk)
+                .toList();
+    }
+
+    /**
+     * 检索并返回结构化结果：上下文 + 命中数 + RRF 最高分。
+     * 供证据优先链路判断是否需要升级完整检索；普通调用仍可使用 {@link #searchContext}。
+     */
+    public KnowledgeRetrievalResult retrieve(String query, int topK, boolean privateOnly) {
+        return retrieve(query, topK, privateOnly, properties.getRetrieval().getContextBudget());
+    }
+
+    /**
+     * 按指定上下文预算检索：复合问题按子问题分配预算时使用，避免单个子问题挤占全部上下文。
+     *
+     * @param contextBudget 本次检索装配置信上下文字符上限
+     */
+    public KnowledgeRetrievalResult retrieve(String query, int topK, boolean privateOnly,
+                                             int contextBudget) {
+        List<ScoredChunk> hits = searchScored(query, topK, privateOnly);
+        if (hits.isEmpty()) {
+            return KnowledgeRetrievalResult.empty();
+        }
+        List<KnowledgeChunk> chunks = hits.stream().map(ScoredChunk::chunk).toList();
+        return new KnowledgeRetrievalResult(
+                buildContext(assemble(chunks, contextBudget)), hits.size(), hits.get(0).score());
+    }
+
+    /** 带融合分的检索：内部复用同一套双通道召回与 RRF 融合。 */
+    private List<ScoredChunk> searchScored(String query, int topK, boolean privateOnly) {
         if (query == null || query.isBlank()) {
             return List.of();
         }
@@ -79,7 +110,7 @@ public class VectorSearchService {
         List<KnowledgeChunk> dense = denseSearch(query, userId, privateOnly);
         List<KnowledgeChunk> sparse = sparseSearch(query, userId, privateOnly);
         // 步骤2：RRF 融合去重排序并截断返回
-        List<KnowledgeChunk> fused = fuse(dense, sparse, k);
+        List<ScoredChunk> fused = fuse(dense, sparse, k);
         log.info("[vector] search done, queryLength={}, topK={}, privateOnly={}, dense={}, sparse={}, fused={}, costMs={}",
                 query.length(), k, privateOnly, dense.size(), sparse.size(), fused.size(),
                 System.currentTimeMillis() - start);
@@ -121,15 +152,15 @@ public class VectorSearchService {
      * RRF 融合：score = Σ 1/(k + rank)，rank 从 1 起，两路分数叠加后降序取 topK。
      * 单路为空时退化为另一路的 topK 截断（不融合，行为等价单通道检索）。
      */
-    private List<KnowledgeChunk> fuse(List<KnowledgeChunk> dense, List<KnowledgeChunk> sparse, int topK) {
+    private List<ScoredChunk> fuse(List<KnowledgeChunk> dense, List<KnowledgeChunk> sparse, int topK) {
         if (dense.isEmpty() && sparse.isEmpty()) {
             return List.of();
         }
         if (dense.isEmpty()) {
-            return sparse.size() > topK ? sparse.subList(0, topK) : sparse;
+            return rankOnly(sparse, topK);
         }
         if (sparse.isEmpty()) {
-            return dense.size() > topK ? dense.subList(0, topK) : dense;
+            return rankOnly(dense, topK);
         }
         Map<Long, Double> scores = new LinkedHashMap<>();
         Map<Long, KnowledgeChunk> byId = new LinkedHashMap<>();
@@ -138,8 +169,24 @@ public class VectorSearchService {
         return scores.entrySet().stream()
                 .sorted(Map.Entry.<Long, Double>comparingByValue().reversed())
                 .limit(topK)
-                .map(e -> byId.get(e.getKey()))
+                .map(e -> new ScoredChunk(byId.get(e.getKey()), e.getValue()))
                 .toList();
+    }
+
+    /** 单通道结果没有融合分：按排名折算同一量纲的 RRF 分，保证证据评估可比较。 */
+    private List<ScoredChunk> rankOnly(List<KnowledgeChunk> chunks, int topK) {
+        List<ScoredChunk> result = new ArrayList<>();
+        int rank = 1;
+        for (KnowledgeChunk chunk : chunks) {
+            if (result.size() >= topK) {
+                break;
+            }
+            if (chunk != null && chunk.getId() != null) {
+                result.add(new ScoredChunk(chunk, 1.0 / (RRF_K + rank)));
+            }
+            rank++;
+        }
+        return result;
     }
 
     /** 单路累加 RRF 分：rank 从 1 递增；两路同命中同一 id 时分数叠加（共同认可的信号被放大） */
@@ -178,11 +225,7 @@ public class VectorSearchService {
      * @param privateOnly 仅检索本人知识（visibility=private）
      */
     public String searchContext(String query, int topK, boolean privateOnly) {
-        List<KnowledgeChunk> hits = search(query, topK, privateOnly);
-        if (hits.isEmpty()) {
-            return "";
-        }
-        return buildContext(assemble(hits));
+        return retrieve(query, topK, privateOnly).context();
     }
 
     /**
@@ -197,11 +240,21 @@ public class VectorSearchService {
      * 父块查询失败降级为子块原文（fail-open，不阻断主流程）。
      */
     public List<KnowledgeChunk> assemble(List<KnowledgeChunk> hits) {
+        return assemble(hits, properties.getRetrieval().getContextBudget());
+    }
+
+    /**
+     * 带显式预算的父子分块装配：复合问题每个子查询使用独立预算。
+     *
+     * @param hits          命中的子块
+     * @param contextBudget 本次装配总字符预算
+     */
+    public List<KnowledgeChunk> assemble(List<KnowledgeChunk> hits, int contextBudget) {
         if (hits == null || hits.isEmpty()) {
             return List.of();
         }
         String userId = UserContext.get();
-        int budget = Math.max(1, properties.getRetrieval().getContextBudget());
+        int budget = Math.max(1, contextBudget);
         int maxParents = Math.max(1, properties.getRetrieval().getMaxParents());
         int perParentBudget = properties.getRetrieval().getParentContextBudget();
         List<KnowledgeChunk> assembled = new ArrayList<>();
@@ -392,6 +445,10 @@ public class VectorSearchService {
 
     /** 父块装配结果：key 为逻辑章节去重键，text 为实际放入上下文的文本 */
     private record ParentContext(String key, String text) {
+    }
+
+    /** 带融合分的命中块：score 仅用于本轮证据强弱评估，不写入实体。 */
+    private record ScoredChunk(KnowledgeChunk chunk, double score) {
     }
 
     /** 拼接检索上下文；无结果返回空串，供 prompt 组装降级 */

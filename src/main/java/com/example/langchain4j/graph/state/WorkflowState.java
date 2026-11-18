@@ -15,6 +15,7 @@ import java.util.Map;
  * 每个节点看到的是“前序节点完成后”的快照，天然支持 checkpoint 回放与并发安全。
  * 继承框架的 {@link AgentState}，数据存放在其内部 Map 中。
  */
+@SuppressWarnings({"deprecation", "removal"})
 public class WorkflowState extends AgentState {
 
     // ---- 状态字段名常量：节点写入 Map 与访问器取值共用同一 key，避免字符串漂移 ----
@@ -28,7 +29,7 @@ public class WorkflowState extends AgentState {
     public static final String SUMMARY = "summary";
     /** 本轮实际使用的模型名（入图时由服务层解析，节点调用 LLM 时按此路由） */
     public static final String MODEL = "model";
-    /** 意图分类结果（IntentNode 写入：code_generate/knowledge_qa/reject；LLM 失败降级为 knowledge_qa） */
+    /** 意图分类结果（IntentPlanNode 写入：code_generate/knowledge_qa/task/chitchat/reject） */
     public static final String INTENT = "intent";
     /** 意图判断依据（正常为 LLM 输出的分类理由；降级时为"模型降级"/"解析降级"） */
     public static final String INTENT_REASON = "intentReason";
@@ -40,19 +41,29 @@ public class WorkflowState extends AgentState {
     public static final String RETRY_COUNT = "retryCount";
     /** 质检状态子对象（ValidateNode 写入；Router 路由、GenerateNode 重试指令、RetrievalNode 重查模式读取） */
     public static final String VALIDATION = "validation";
-    /** 本轮待检索查询列表（EntryNode 每轮种入默认单查询；DecomposeNode 在知识问答意图下覆盖为分解结果；code_generate 跳过分解保持默认） */
+    /** 本轮待检索查询列表（EntryNode 每轮种入默认单查询；IntentPlanNode 在知识问答意图下覆盖为规划子查询） */
     public static final String SUB_QUERIES = "subQueries";
-    /** 多跳状态子对象（HopCheckNode 写入；Router 路由、RetrievalNode 多跳模式读取；EntryNode 每轮归零） */
+    /** 旧版多跳状态子对象：仅为历史 checkpoint 兼容保留，新链路不再写入。 */
     public static final String HOP = "hop";
-    /** 上下文不完整标记（多跳超限仍信息不足时标记 true，生成端据此在 prompt 中声明信息可能不全） */
+    /** 上下文不完整标记（完整检索后证据仍不充分时标记 true，生成端据此声明回答边界） */
     public static final String CONTEXT_INCOMPLETE = "contextIncomplete";
+    /** 结构化查询规划（IntentPlanNode 写入：主查询/子查询/复杂度/风险/是否需要完整检索） */
+    public static final String QUERY_PLAN = "queryPlan";
+    /** 检索证据评估（探针/完整检索节点写入：命中数/最高分/关键词覆盖率/置信度/是否充分） */
+    public static final String RETRIEVAL_EVIDENCE = "retrievalEvidence";
+    /** 检索阶段（retrieval_probe / retrieval_full / requery；路由据此判断是否还需要升级检索） */
+    public static final String RETRIEVAL_DEPTH = "retrievalDepth";
+    /** 证据支撑置信度（ValidateNode 写入：回答是否被检索资料支撑） */
+    public static final String GROUNDING_CONFIDENCE = "groundingConfidence";
+    /** 最终置信度 = min(检索证据置信度, 证据支撑置信度)，供响应透出 */
+    public static final String FINAL_CONFIDENCE = "finalConfidence";
     /** 检索根因标记（EntryNode 归零；写入点与取值见 ROOT_CAUSE_* 常量注释；透出到响应与审计表供用户区分与数据闭环） */
     public static final String ROOT_CAUSE = "rootCause";
     /** 根因取值：问题太复杂（并列复合问题，分解后子查询分别命中召回，用户问法本身没问题） */
     public static final String ROOT_CAUSE_COMPLEX_QUERY = "COMPLEX_QUERY";
     /** 根因取值：表述不当（首轮检索证据链不足或全空，换问法补查后命中，用户问法需更具体） */
     public static final String ROOT_CAUSE_EXPRESSION_ISSUE = "EXPRESSION_ISSUE";
-    /** 根因取值：知识缺失（首轮检索为空，或多跳补查超限仍信息不足，知识库确实没有相关资料） */
+    /** 根因取值：知识缺失（探针与完整检索均为空，知识库确实没有相关资料） */
     public static final String ROOT_CAUSE_KNOWLEDGE_MISSING = "KNOWLEDGE_MISSING";
     /** 错误标记（成功路径清空，Generate 失败写入原因；Router 发现非空即转兜底） */
     public static final String ERROR = "error";
@@ -64,15 +75,15 @@ public class WorkflowState extends AgentState {
     public static final String TOKEN_USAGE = "tokenUsage";
     /** 流程完成标记（FinalizeNode 写入 true，透出到响应） */
     public static final String DONE = "done";
-    /** 当前用户 ID（服务层入图时注入；resume_task 等需要数据归属的节点使用） */
+    /** 当前用户 ID（服务层入图时注入；需要按用户隔离数据的节点使用） */
     public static final String USER_ID = "userId";
-    /** 当前会话 ID（服务层入图时注入；resume_task 触发简历优化后回写完成通知用） */
+    /** 当前会话 ID（服务层入图时注入；需要回写会话或审计记录的节点使用） */
     public static final String CONVERSATION_ID = "conversationId";
-    /** 回答模式（服务层归一后入图：auto/deep；deep 放宽多跳上限与检索候选数） */
+    /** 回答模式（服务层归一后入图：auto/deep；deep 放宽检索候选数并强制完整质检） */
     public static final String ANSWER_MODE = "answerMode";
     /** 检索可见范围（服务层归一后入图：all/private；private 仅检索本人库） */
     public static final String VISIBILITY = "visibility";
-    /** 任务实体槽位（TaskPlanNode 写入：orderId/queryName 等，缺失时为空值） */
+    /** 任务实体槽位（TaskPlanNode 写入：工具调用所需的业务实体槽位，缺失时为空值） */
     public static final String TASK_ENTITIES = "taskEntities";
     /** 任务缺失槽位（TaskPlanNode 写入：非空时本轮转为追问，不调用工具） */
     public static final String TASK_MISSING = "taskMissing";
@@ -143,6 +154,62 @@ public class WorkflowState extends AgentState {
         }
     }
 
+    /**
+     * 查询规划子对象：一次结构化调用同时产出意图判断与检索计划。
+     * <p>
+     * requiresFullRetrieval 由复杂度/子查询数推导，不在路由层重复判断；模型不输出该字段，
+     * 避免把“是否需要检索”交给模型自由裁量。
+     */
+    public record QueryPlan(String primaryQuery, List<String> subQueries, String complexity,
+                            String risk, boolean requiresFullRetrieval, String reason) {
+
+        static final String KEY_PRIMARY_QUERY = "primaryQuery";
+        static final String KEY_SUB_QUERIES = "subQueries";
+        static final String KEY_COMPLEXITY = "complexity";
+        static final String KEY_RISK = "risk";
+        static final String KEY_REQUIRES_FULL_RETRIEVAL = "requiresFullRetrieval";
+        static final String KEY_REASON = "reason";
+
+        public QueryPlan {
+            primaryQuery = primaryQuery == null ? "" : primaryQuery;
+            subQueries = subQueries == null ? List.of() : List.copyOf(subQueries);
+            complexity = complexity == null ? "simple" : complexity;
+            risk = risk == null ? "low" : risk;
+            reason = reason == null ? "" : reason;
+        }
+
+        public static QueryPlan empty() {
+            return new QueryPlan("", List.of(), "simple", "low", false, "");
+        }
+    }
+
+    /**
+     * 检索证据子对象：全部由检索结果与查询词覆盖计算，不采信模型自报置信度。
+     * confidence 只用于分层质检与响应展示，阈值必须通过验证集校准。
+     */
+    public record RetrievalEvidence(int hitCount, double topScore, double keywordCoverage,
+                                    double confidence, boolean sufficient, String reason) {
+
+        static final String KEY_HIT_COUNT = "hitCount";
+        static final String KEY_TOP_SCORE = "topScore";
+        static final String KEY_KEYWORD_COVERAGE = "keywordCoverage";
+        static final String KEY_CONFIDENCE = "confidence";
+        static final String KEY_SUFFICIENT = "sufficient";
+        static final String KEY_REASON = "reason";
+
+        public RetrievalEvidence {
+            hitCount = Math.max(0, hitCount);
+            topScore = Math.max(0.0, topScore);
+            keywordCoverage = Math.max(0.0, Math.min(1.0, keywordCoverage));
+            confidence = Math.max(0.0, Math.min(1.0, confidence));
+            reason = reason == null ? "" : reason;
+        }
+
+        public static RetrievalEvidence empty() {
+            return new RetrievalEvidence(0, 0.0, 0.0, 0.0, false, "无检索结果");
+        }
+    }
+
     public WorkflowState(Map<String, Object> initData) {
         super(migrateLegacyFields(initData));
     }
@@ -192,8 +259,7 @@ public class WorkflowState extends AgentState {
      * 每轮重置的跨轮计数字段：EntryNode 在每轮入口调用（与自身更新合并返回），
      * 归零 retryCount/hop 子对象/rootCause，防断点恢复重入时上一轮残留影响本轮。
      * <p>
-     * hop 子对象整体归零（含 sufficient 复位为 false：新轮次无多跳判定，旧版平铺实现未归零 sufficient，
-     * 嵌套化后一并复位语义更干净 —— 该标记只在 HopCheckNode 之后被路由读取，entry 复位不影响其消费）。
+     * hop 子对象整体归零（兼容历史 checkpoint；新链路不再使用多跳判断）。
      * 新增跨轮计数字段时必须同步补充到此处 —— EntryNode 只需引用本方法，无需逐字段修改。
      *
      * @return 归零增量（不可变 Map，调用方合并进自身更新）
@@ -205,6 +271,13 @@ public class WorkflowState extends AgentState {
         reset.put(RETRY_COUNT, 0);
         reset.put(HOP, Hop.of(0, "", false));
         reset.put(ROOT_CAUSE, "");
+        // 证据优先链路每轮重置：规划、探针证据、检索阶段、上下文完整性与置信度不能跨轮残留
+        reset.put(QUERY_PLAN, QueryPlan.empty());
+        reset.put(RETRIEVAL_EVIDENCE, RetrievalEvidence.empty());
+        reset.put(RETRIEVAL_DEPTH, "");
+        reset.put(CONTEXT_INCOMPLETE, false);
+        reset.put(GROUNDING_CONFIDENCE, 0.0);
+        reset.put(FINAL_CONFIDENCE, 0.0);
         // 步骤3：任务链路字段归零（防止断点恢复重入时残留上一轮计划/证据）
         reset.put(TASK_ENTITIES, Map.of());
         reset.put(TASK_MISSING, List.of());
@@ -333,7 +406,7 @@ public class WorkflowState extends AgentState {
     }
 
     /**
-     * 本轮待检索查询列表（entry 种入默认单查询，decompose 覆盖为分解结果）。
+     * 本轮待检索查询列表（由 intent_plan 产出主查询/子查询；旧 checkpoint 可能为空）。
      * 仅旧 checkpoint（改造前无种入）可能为空，检索端已防御回退为原查询单查。
      * 防御 checkpoint 反序列化后的类型漂移：只接受 List 且逐项转字符串、过滤空白。
      */
@@ -376,7 +449,57 @@ public class WorkflowState extends AgentState {
                 boolOf(value(LEGACY_HOP_SUFFICIENT).orElse(null), false));
     }
 
-    /** 上下文不完整标记（多跳超限时标记 true，生成端据此声明信息可能不全）；缺省 false */
+    /** 本轮结构化查询规划；缺失时返回默认单查询计划。 */
+    public QueryPlan queryPlan() {
+        Object v = value(QUERY_PLAN).orElse(null);
+        if (v instanceof QueryPlan plan) {
+            return plan;
+        }
+        if (v instanceof Map<?, ?> m) {
+            String primary = strOf(m.get(QueryPlan.KEY_PRIMARY_QUERY));
+            return new QueryPlan(
+                    primary,
+                    stringsOf(m.get(QueryPlan.KEY_SUB_QUERIES)),
+                    strOf(m.get(QueryPlan.KEY_COMPLEXITY)),
+                    strOf(m.get(QueryPlan.KEY_RISK)),
+                    boolOf(m.get(QueryPlan.KEY_REQUIRES_FULL_RETRIEVAL), false),
+                    strOf(m.get(QueryPlan.KEY_REASON)));
+        }
+        return QueryPlan.empty();
+    }
+
+    /** 本轮检索证据评估；缺失时返回空证据。 */
+    public RetrievalEvidence retrievalEvidence() {
+        Object v = value(RETRIEVAL_EVIDENCE).orElse(null);
+        if (v instanceof RetrievalEvidence evidence) {
+            return evidence;
+        }
+        if (v instanceof Map<?, ?> m) {
+            return new RetrievalEvidence(
+                    intOf(m.get(RetrievalEvidence.KEY_HIT_COUNT), 0),
+                    doubleOf(m.get(RetrievalEvidence.KEY_TOP_SCORE), 0.0),
+                    doubleOf(m.get(RetrievalEvidence.KEY_KEYWORD_COVERAGE), 0.0),
+                    doubleOf(m.get(RetrievalEvidence.KEY_CONFIDENCE), 0.0),
+                    boolOf(m.get(RetrievalEvidence.KEY_SUFFICIENT), false),
+                    strOf(m.get(RetrievalEvidence.KEY_REASON)));
+        }
+        return RetrievalEvidence.empty();
+    }
+
+    /** 检索阶段：retrieval_probe / retrieval_full / requery；缺省空串。 */
+    public String retrievalDepth() {
+        return value(RETRIEVAL_DEPTH, "");
+    }
+
+    public double groundingConfidence() {
+        return doubleOf(value(GROUNDING_CONFIDENCE).orElse(null), 0.0);
+    }
+
+    public double finalConfidence() {
+        return doubleOf(value(FINAL_CONFIDENCE).orElse(null), 0.0);
+    }
+
+    /** 上下文不完整标记（证据不足时标记 true，生成端据此声明信息可能不全）；缺省 false */
     public boolean contextIncomplete() {
         // 步骤1：取出原始值（缺省 false）
         // 步骤2：统一转为字符串后解析布尔，防御类型漂移
@@ -582,5 +705,32 @@ public class WorkflowState extends AgentState {
         } catch (NumberFormatException ignored) {
             return def;
         }
+    }
+
+    /** 浮点解析：数字直接取；字符串漂移尝试解析；失败回默认。 */
+    private static double doubleOf(Object v, double def) {
+        if (v instanceof Number number) {
+            return number.doubleValue();
+        }
+        try {
+            return Double.parseDouble(String.valueOf(v).trim());
+        } catch (NumberFormatException ignored) {
+            return def;
+        }
+    }
+
+    /** 字符串列表归一：过滤 null/空白，兼容 checkpoint 反序列化后的 List 形态。 */
+    private static List<String> stringsOf(Object v) {
+        if (!(v instanceof List<?> list)) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>(list.size());
+        for (Object item : list) {
+            String text = strOf(item).trim();
+            if (!text.isEmpty()) {
+                result.add(text);
+            }
+        }
+        return result;
     }
 }

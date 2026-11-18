@@ -13,8 +13,8 @@ import java.util.Map;
  * 守卫节点：图入口的防御性校验。
  * 1. 空输入直接标记错误（走兜底），不进入 LLM；
  * 2. 长度截断 + 控制字符清理（基础 prompt 注入防护）；
- * 3. 初始化重试计数与多跳计数；
- * 4. 种入默认子查询列表（DecomposeNode 在知识问答意图下覆盖为分解结果，code_generate 跳过分解保持默认）。
+ * 3. 初始化重试计数与证据链路状态；
+ * 4. 种入默认子查询列表（IntentPlanNode 在知识问答意图下覆盖为规划结果）。
  */
 @Slf4j
 @Component
@@ -49,7 +49,7 @@ public class EntryNode implements NodeAction<WorkflowState> {
         log.info("[entry] accepted, queryLength={}, source={}, truncated={}",
                 originalLength, state.rewrittenQuery().isBlank() ? "raw" : "rewritten", truncated);
         // 步骤5：返回增量更新：清洗后的输入 + 种入默认子查询（用清洗后 query 与改写句的有效组合；
-        //        DecomposeNode 随后覆盖为分解结果，code_generate 跳过分解即用默认单查询）+ 跨轮计数归零 + 清空错误标记
+        //        IntentPlanNode 随后覆盖为规划子查询）+ 跨轮计数归零 + 清空错误标记
         Map<String, Object> updates = new LinkedHashMap<>();
         updates.put(WorkflowState.QUERY, cleaned);
         updates.put(WorkflowState.SUB_QUERIES,

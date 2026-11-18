@@ -2,6 +2,8 @@ package com.example.langchain4j.knowledge;
 
 import com.huaban.analysis.jieba.JiebaSegmenter;
 import com.huaban.analysis.jieba.SegToken;
+import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -22,6 +24,7 @@ import java.util.Set;
  * （FlagEmbedding/TEI）；"分词 + 统计权重"是同一形态（维度=词、值=权重）的轻量落地。
  * 未引入 IDF 全局统计：需维护 term 文档频次表（双写+并发更新），当前知识库规模下 log-TF 足够区分。
  */
+@Slf4j
 @Component
 public class SparseEmbeddingService {
 
@@ -36,6 +39,22 @@ public class SparseEmbeddingService {
 
     /** jieba 分词器（字典只读、内部无会话状态，可多线程共用；首次分词会加载内置词典） */
     private final JiebaSegmenter segmenter = new JiebaSegmenter();
+
+    /**
+     * 启动预热：首次调用 jieba 会加载内置词典（本机约 2 秒），提前在启动阶段完成，
+     * 避免首个检索请求把“模型加载 + 词典加载”叠加后超过工具超时。
+     */
+    @PostConstruct
+    void warmUp() {
+        long start = System.currentTimeMillis();
+        try {
+            segmenter.process("知识库检索预热", JiebaSegmenter.SegMode.SEARCH);
+            log.info("[sparse-embedding] warm-up done, costMs={}", System.currentTimeMillis() - start);
+        } catch (Exception e) {
+            log.warn("[sparse-embedding] warm-up failed, first query may be slower, reason={}",
+                    e.getMessage());
+        }
+    }
 
     /**
      * 文本 → sparsevec 文本（如 {12:0.6800,530:0.4200}/1048576）。

@@ -1,5 +1,8 @@
 package com.example.langchain4j.graph.qa.nodes;
 
+import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.graph.qa.EvidenceAssessor;
+import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
@@ -9,61 +12,96 @@ import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 /**
- * 质量校验节点：对生成结果做两层质量门禁。
- * <ul>
- *   <li>规则层（零成本）：非空、最小长度、无模型自曝错误 —— 防硬错误；</li>
- *   <li>LLM 质检层（仅知识问答意图）：判断回答是否基于参考资料/是否答非所问 —— 防幻觉软错误，
- *       质检发现与资料矛盾（grounding）时由路由转回检索节点重查（Corrective RAG）。</li>
- * </ul>
- * 校验失败写入失败类型与原因，由路由决定回生成重试/回检索重查/兜底（有限重试环）。
+ * 分层质量校验：
+ * <ol>
+ *   <li>规则层（始终执行）：空回答、过短、模型自曝错误；</li>
+ *   <li>证据层（知识问答）：引用标记 + 回答对资料的词面支撑度；</li>
+ *   <li>LLM 质检（按需）：仅在高风险、低证据、deep、重试轮、上下文不完整或引用/支撑不足时调用。</li>
+ * </ol>
+ * 这样既保留防幻觉能力，又避免每个简单问题都多付一次 3~4 秒的 LLM 质检。
  */
 @Slf4j
 @Component
 public class ValidateNode implements NodeAction<WorkflowState> {
 
     private static final int MIN_RESULT_LENGTH = 5;
-    /** 质检失败原因截断长度：防 LLM 输出超长原因占用状态与日志 */
     private static final int MAX_REASON_LENGTH = 200;
 
-    /** 失败类型：规则层格式问题（路由回生成重试） */
     public static final String ISSUE_FORMAT = "format";
-    /** 失败类型：LLM 质检发现编造/与资料矛盾（路由回检索重查） */
     public static final String ISSUE_GROUNDING = "grounding";
 
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
+    private final EvidenceAssessor evidenceAssessor;
+    private final AgentProperties properties;
 
-    /** 注入 LLM 与提示词服务。 */
-    public ValidateNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService) {
+    public ValidateNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService,
+                        EvidenceAssessor evidenceAssessor, AgentProperties properties) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
+        this.evidenceAssessor = evidenceAssessor;
+        this.properties = properties;
     }
 
-    /** 先做规则校验，再对知识问答执行 LLM 质检，并写入校验结果。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
-        // 步骤1：规则层门禁（非空/最小长度/无模型自曝错误），失败 → 格式问题，回生成重试
-        //        闲聊意图放宽：寒暄回复本就短（如“你好！”），只拦空输出，防重试环白烧 token
         if (!isValid(state.result(), state.intent())) {
             return fail(state, ISSUE_FORMAT, "输出为空、过于简短或格式错误");
         }
-        // 步骤2：LLM 质检层 —— 仅知识问答意图启用（有检索上下文可对照；代码生成难自动校验，跳过省一次调用）
-        if (IntentNode.INTENT_KNOWLEDGE_QA.equals(state.intent())) {
-            QaResult qa = llmCheck(state);
-            if (!qa.valid()) {
-                return fail(state, qa.issue(), qa.reason());
-            }
+        if (!QaIntent.isKnowledge(state.intent())) {
+            return pass(state, 1.0);
         }
-        // 步骤3：两层都过 → 写入通过标记，路由转收尾节点
-        log.info("[validate] passed, intent={}, retryCount={}, resultLength={}",
-                state.intent(), state.retryCount(), state.result().length());
-        return Map.of(WorkflowState.VALIDATION, WorkflowState.Validation.of(true, "", ""));
+        if (state.context().isBlank()) {
+            return fail(state, ISSUE_GROUNDING, "知识问答缺少检索证据");
+        }
+
+        double support = evidenceAssessor.answerSupport(state.result(), state.context());
+        boolean hasCitation = state.result().contains("【参考资料")
+                || state.result().contains("根据现有资料无法确定");
+        if (!shouldLlmCheck(state, support, hasCitation)) {
+            log.info("[validate] passed by rules, retryCount={}, support={}, citation={}, confidence={}",
+                    state.retryCount(), String.format(Locale.ROOT, "%.2f", support),
+                    hasCitation, state.retrievalEvidence().confidence());
+            return pass(state, Math.min(1.0, 0.75 + 0.25 * support));
+        }
+
+        QaResult qa = llmCheck(state);
+        if (!qa.valid()) {
+            return fail(state, qa.issue(), qa.reason());
+        }
+        log.info("[validate] passed by llm, retryCount={}, support={}, citation={}",
+                state.retryCount(), String.format(Locale.ROOT, "%.2f", support), hasCitation);
+        return pass(state, 0.9);
     }
 
-    /** 校验失败：重试计数 +1，写入失败类型与原因，交由路由判断回生成/回检索/兜底 */
+    /** 质检升级条件：只在高风险/低证据/深链路/重试或引用支撑不足时调用 LLM。 */
+    private boolean shouldLlmCheck(WorkflowState state, double support, boolean hasCitation) {
+        return "deep".equals(state.answerMode())
+                || state.retryCount() > 0
+                || "high".equalsIgnoreCase(state.queryPlan().risk())
+                || !state.retrievalEvidence().sufficient()
+                || state.contextIncomplete()
+                || !hasCitation
+                || support < properties.getRetrieval().getMinAnswerSupport();
+    }
+
+    /** 通过：写入质检结果、证据支撑置信度与最终置信度（取检索/支撑两者较小值）。 */
+    private Map<String, Object> pass(WorkflowState state, double groundingConfidence) {
+        double grounding = Math.max(0.0, Math.min(1.0, groundingConfidence));
+        double retrieval = state.retrievalEvidence().confidence();
+        double finalConfidence = retrieval <= 0.0 ? grounding : Math.min(retrieval, grounding);
+        Map<String, Object> updates = new LinkedHashMap<>();
+        updates.put(WorkflowState.VALIDATION, WorkflowState.Validation.of(true, "", ""));
+        updates.put(WorkflowState.GROUNDING_CONFIDENCE, grounding);
+        updates.put(WorkflowState.FINAL_CONFIDENCE, finalConfidence);
+        return updates;
+    }
+
     private Map<String, Object> fail(WorkflowState state, String issue, String reason) {
         int retries = state.retryCount() + 1;
         log.warn("[validate] failed, intent={}, issue={}, retryCount={}, resultLength={}",
@@ -73,21 +111,17 @@ public class ValidateNode implements NodeAction<WorkflowState> {
                 WorkflowState.VALIDATION, WorkflowState.Validation.of(false, issue, truncate(reason)));
     }
 
-    /** LLM 质检：输入用户需求 + 参考资料 + 候选回答，输出 {valid, issue, reason}；质检调用失败时放行（漏判优于误杀） */
     private QaResult llmCheck(WorkflowState state) {
         String userPrompt = "用户需求：\n" + state.effectiveQuery()
                 + "\n\n参考资料：\n" + state.context()
                 + "\n\n候选回答：\n" + state.result();
         try {
-            // 网关封装：json_object 约束 + 截断感知 + 提取解析；截断/解析失败返回 null → 直接放行（fail-open：漏判优于误杀）
-            // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
             JsonNode node = llmGateway.generateJsonNode(state.model(),
                     promptTemplateService.resolve("VALIDATE_LLM_SYSTEM", PromptTemplates.VALIDATE_LLM_SYSTEM),
                     userPrompt, "validate");
             if (node == null) {
                 return QaResult.pass();
             }
-            // valid 字段缺失视为放行（fail-open：漏判优于误杀）；issue 只认 grounding，其余回生成
             boolean valid = node.hasNonNull("valid") ? node.get("valid").asBoolean(false) : true;
             if (valid) {
                 return QaResult.pass();
@@ -99,13 +133,11 @@ public class ValidateNode implements NodeAction<WorkflowState> {
                     issue, reason == null ? 0 : reason.length());
             return new QaResult(false, issue, reason);
         } catch (Exception e) {
-            // 质检 LLM 失败：fail-open 放行，不因质检故障阻断主流程
             log.warn("[validate] llm check degraded, pass: {}", e.getMessage());
             return QaResult.pass();
         }
     }
 
-    /** 失败原因截断：防 LLM 输出超长原因占用状态与日志（MAX_REASON_LENGTH 上限） */
     private String truncate(String text) {
         if (text == null) {
             return "";
@@ -113,23 +145,18 @@ public class ValidateNode implements NodeAction<WorkflowState> {
         return text.length() <= MAX_REASON_LENGTH ? text : text.substring(0, MAX_REASON_LENGTH);
     }
 
-    /** 规则层校验：非空、最小长度且不包含模型自曝错误话术。 */
     private boolean isValid(String result, String intent) {
-        // 规则1：空/空白结果直接判无效
         if (result == null || result.isBlank()) {
             return false;
         }
-        // 规则2：去空白后长度低于最小阈值判无效（防模型只吐几个字）；闲聊意图只要求非空（回复天然短）
         String trimmed = result.trim();
-        if (!IntentNode.INTENT_CHITCHAT.equals(intent) && trimmed.length() < MIN_RESULT_LENGTH) {
+        if (!QaIntent.CHITCHAT.equals(intent) && trimmed.length() < MIN_RESULT_LENGTH) {
             return false;
         }
-        // 规则3：模型自曝异常的输出（中/英道歉话术）视为无效
         return !trimmed.contains("抱歉，我暂时无法")
                 && !trimmed.contains("I apologize");
     }
 
-    /** LLM 质检结果（valid=true 时 issue/reason 为空串） */
     private record QaResult(boolean valid, String issue, String reason) {
         static QaResult pass() {
             return new QaResult(true, "", "");

@@ -8,7 +8,7 @@ import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.request.ChatRequest;
 import com.example.langchain4j.dto.request.ConfirmRequest;
 import com.example.langchain4j.dto.response.ChatResponse;
-import com.example.langchain4j.graph.qa.nodes.IntentNode;
+import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.guard.RateLimiter;
 import com.example.langchain4j.guard.SessionLock;
@@ -57,7 +57,7 @@ public class AgentService {
     private static final int GENERATION_CANDIDATE_LIMIT = 40;
     /** 检索上下文快照截断上限（改写视图 itemMaxLength=800，存 1200 留余量） */
     private static final int CONTEXT_SNAPSHOT_MAX = 1200;
-    /** 回答模式：深度链路（多跳上限与检索候选数放宽） */
+    /** 回答模式：深度链路（检索候选数放宽、强制完整质检） */
     private static final String ANSWER_MODE_DEEP = "deep";
     /** 检索可见范围：仅本人知识库 */
     private static final String VISIBILITY_PRIVATE = "private";
@@ -258,8 +258,8 @@ public class AgentService {
         inputs.put(WorkflowState.MODEL, action.model());
         inputs.put(WorkflowState.USER_ID, userId);
         inputs.put(WorkflowState.CONVERSATION_ID, action.conversationId());
-        // 置信度透出依赖 intent=task；确认图不跑 IntentNode，这里显式补齐
-        inputs.put(WorkflowState.INTENT, IntentNode.INTENT_TASK);
+        // 置信度透出依赖 intent=task；确认图不跑 IntentPlanNode，这里显式补齐
+        inputs.put(WorkflowState.INTENT, QaIntent.TASK);
         inputs.put(WorkflowState.TASK_PLAN, action.plan());
         inputs.put(WorkflowState.TASK_APPROVED, true);
         inputs.put(WorkflowState.TASK_IDEMPOTENCY_KEY, action.confirmationId());
@@ -417,14 +417,26 @@ public class AgentService {
         return value instanceof Number number ? number.longValue() : 0L;
     }
 
-    /** 置信度只对任务链路有意义；知识问答等既有链路返回 null，避免误读为低置信 */
+    /** 任务链路返回工具置信度；知识问答返回检索证据与质检合并后的置信度。 */
     private Double confidence(WorkflowState state) {
-        return IntentNode.INTENT_TASK.equals(state.intent()) ? state.taskConfidence() : null;
+        if (QaIntent.TASK.equals(state.intent())) {
+            return state.taskConfidence();
+        }
+        if (QaIntent.KNOWLEDGE_QA.equals(state.intent()) && state.finalConfidence() > 0.0) {
+            return state.finalConfidence();
+        }
+        return null;
     }
 
-    /** 置信度说明与 confidence 同步：非任务轮为空串 */
+    /** 置信度说明与 confidence 同步：知识问答返回检索证据指标，其他轮为空串。 */
     private String confidenceReason(WorkflowState state) {
-        return IntentNode.INTENT_TASK.equals(state.intent()) ? state.taskConfidenceReason() : "";
+        if (QaIntent.TASK.equals(state.intent())) {
+            return state.taskConfidenceReason();
+        }
+        if (QaIntent.KNOWLEDGE_QA.equals(state.intent())) {
+            return state.retrievalEvidence().reason();
+        }
+        return "";
     }
 
     @SuppressWarnings("unchecked")
@@ -455,7 +467,7 @@ public class AgentService {
      * 锁内准备并执行图（同步路径）：保存用户消息 → 双视图装配 → 改写 → 图执行。
      *
      * @param conversationId 会话 ID（threadId）
-     * @param userId         当前用户 ID（resume_task 等需要数据归属的节点使用）
+     * @param userId         当前用户 ID（需要按用户隔离数据的节点使用）
      * @param query          原始用户输入
      * @param model          本轮模型名（已解析）
      * @return 图执行最终状态
@@ -593,12 +605,12 @@ public class AgentService {
             WorkflowState state = future.get(timeoutSeconds, TimeUnit.SECONDS);
             if (state == null) {
                 auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED,
-                        query, null, "图执行未返回状态", null);
+                        query, null, "图执行未返回状态", System.currentTimeMillis() - start);
                 throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行未返回结果");
             }
             metrics.recordGraphDuration(System.currentTimeMillis() - start);
             auditService.audit(conversationId, "workflow", GraphExecution.STATUS_SUCCESS,
-                    query, state.result(), null, null, state.rootCause());
+                    query, state.result(), null, System.currentTimeMillis() - start, state.rootCause());
             return state;
         } catch (TimeoutException e) {
             // 超时即中止：取消后台任务（中断工作线程，尽力而为）。
@@ -607,7 +619,7 @@ public class AgentService {
                 // 超时即中止：取消后台任务，返回降级应答而非报错 ——
                 // 本轮 user + 降级 assistant 照常落库，历史一问一答完整，用户可直接重发。
                 auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED,
-                        query, null, "执行超时已中止", null);
+                        query, null, "执行超时已中止", System.currentTimeMillis() - start);
                 log.warn("[agent] execution timeout after {}s, thread={}, task cancelled, return fallback answer",
                         timeoutSeconds, conversationId);
                 return new WorkflowState(Map.of(
@@ -624,7 +636,7 @@ public class AgentService {
                 log.info("[agent] execution completed just after timeout, thread={}", conversationId);
                 metrics.recordGraphDuration(System.currentTimeMillis() - start);
                 auditService.audit(conversationId, "workflow", GraphExecution.STATUS_SUCCESS,
-                        query, completed.result(), null, null, completed.rootCause());
+                        query, completed.result(), null, System.currentTimeMillis() - start, completed.rootCause());
                 return completed;
             } catch (ExecutionException ex) {
                 Throwable cause = ex.getCause() == null ? ex : ex.getCause();
@@ -632,7 +644,8 @@ public class AgentService {
                     throw biz;
                 }
                 log.error("[agent] graph execution failed, thread={}", conversationId, cause);
-                auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query, null, rootMessage(cause), null);
+                auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED,
+                        query, null, rootMessage(cause), System.currentTimeMillis() - start);
                 throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行失败: " + rootMessage(cause));
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
@@ -647,7 +660,8 @@ public class AgentService {
                 throw biz;
             }
             log.error("[agent] graph execution failed, thread={}", conversationId, cause);
-            auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query, null, rootMessage(cause), null);
+            auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED,
+                    query, null, rootMessage(cause), System.currentTimeMillis() - start);
             throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行失败: " + rootMessage(cause));
         }
     }

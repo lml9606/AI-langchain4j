@@ -50,19 +50,13 @@ public class AgentProperties {
     /** 校验重试上限（图内重试环次数） */
     private int maxValidateRetries = 3;
 
-    /** 多跳检索上限（不含首轮；HopCheck 判定信息不足时最多再检索 maxHops 轮，防成本失控） */
-    private int maxHops = 2;
-
-    /** 问题分解子查询上限（DecomposeNode 白名单校验，超限只取前 N 个） */
+    /** 查询规划子查询上限（IntentPlanNode 白名单校验，超限只取前 N 个） */
     private int maxSubQueries = 3;
 
     /** 多轮上下文（短期记忆）配置 */
     private History history = new History();
 
-    /** 简历优化工作流配置 */
-    private Resume resume = new Resume();
-
-    /** 工具运行时配置（只读工具 + HTTP/SQL Provider 的最小配置） */
+    /** 工具运行时配置（只读/写工具白名单、超时、确认与执行线程池） */
     private Tool tool = new Tool();
 
     /** 单次图执行整体超时（秒）；超时即中止本轮：取消后台任务并返回降级应答，一问一答照常闭环，用户可直接重发 */
@@ -96,34 +90,6 @@ public class AgentProperties {
         private int summaryMaxLength = 4000;
     }
 
-    /**
-     * 简历优化配置：输入上限、输出预算、目标岗位数量与校验重试上限。
-     * <p>
-     * 输出预算必须独立于 {@link Llm#getMaxOutputTokens()}：后者 1024 只适合短 JSON 节点，
-     * 整份简历改稿通常需要数千 token，共用一个值会稳定截断。
-     */
-    @Data
-    public static class Resume {
-        /** 简历原文最大字符数，超出截尾并在提示词中明示 */
-        private int maxInputChars = 20_000;
-        /** 首次生成的输出 token 上限 */
-        private int maxOutputTokens = 8_192;
-        /** 输出被截断时的重试 token 上限 */
-        private int retryMaxOutputTokens = 12_288;
-        /** 定向优化单次最多参与的目标岗位数（超过 representativeCount 时走聚合画像） */
-        private int maxTargetJobs = 10;
-        /** 单个岗位 JD 参与提示词的最大字符数 */
-        private int maxTargetJdChars = 1_200;
-        /** 岗位数超过该值时走聚合画像 + 代表 JD 策略 */
-        private int representativeCount = 5;
-        /** 校验失败后的图内重试上限 */
-        private int maxRetries = 2;
-        /** 变更点清单最大条数 */
-        private int maxChanges = 20;
-        /** 单次简历优化整体超时（秒） */
-        private int timeoutSeconds = 180;
-    }
-
     @Data
     public static class Executor {
         private int corePoolSize = 4;
@@ -150,11 +116,38 @@ public class AgentProperties {
         private int maxRetries = 3;
         /** 结构化输出（generateJson）最大输出 token 数：JSON 节点输出短小，1024 足够；触顶即截断（finishReason=LENGTH） */
         private int maxOutputTokens = 1024;
+        /** 自然语言回答预算：按意图/复杂度/模式动态选择字数与输出 token 上限 */
+        private AnswerBudget answerBudget = new AnswerBudget();
         /** 默认模型名：前端不传 model 参数时使用；必须是注册表已注册的模型 */
         private String defaultModel = "deepseek-flash";
         /** 千问模型名（与 langchain4j.community.dashscope.chat-model.model-name 保持一致） */
         private String qwenModelName = "qwen-max";
         private CircuitBreaker circuitBreaker = new CircuitBreaker();
+    }
+
+    /** 生成回答预算：maxChars=0 表示不追加字数提示，只使用 maxOutputTokens 硬上限。 */
+    @Data
+    public static class AnswerBudget {
+        private Profile chitchat = new Profile(120, 256);
+        private Profile knowledgeSimple = new Profile(500, 1024);
+        private Profile knowledgeCompound = new Profile(900, 1536);
+        private Profile knowledgeDeep = new Profile(2800, 4096);
+        private Profile code = new Profile(0, 6144);
+    }
+
+    /** 单个回答预算档位：maxChars 控制提示词目标长度，maxOutputTokens 是供应商侧硬上限。 */
+    @Data
+    public static class Profile {
+        private int maxChars;
+        private int maxOutputTokens;
+
+        public Profile() {
+        }
+
+        public Profile(int maxChars, int maxOutputTokens) {
+            this.maxChars = maxChars;
+            this.maxOutputTokens = maxOutputTokens;
+        }
     }
 
     @Data
@@ -185,11 +178,20 @@ public class AgentProperties {
      */
     @Data
     public static class Knowledge {
-        /** 父块硬上限（字符）：父块在语义切分后仍不得超过该值，超过则继续按段落/软标题续切 */
+        /**
+         * 父块硬上限（字符）：任何父块都不得超过该值；超长章节会继续按软标题/段落/句子续切。
+         * 与 targetMax 不同，这是硬约束，不是选层目标。
+         */
         private int parentChunkSize = 2000;
-        /** 父块目标区间下限（字符）：自适应选层时优先选择中位数落在此区间内的标题层级 */
+        /**
+         * 父块选层目标下限（字符）：统计某一层所有标题的整棵子树长度，中位数低于该值时该层不直接合格。
+         * 它不是父块的最小硬长度，小章节不会为了达到该值而强制合并。
+         */
         private int parentTargetMin = 800;
-        /** 父块目标区间上限（字符）：与 parentTargetMin 共同决定父块层级，避免写死 H3 */
+        /**
+         * 父块选层目标上限（字符）：与 parentTargetMin 共同决定父块标题层级，避免写死 H3。
+         * 选层时从 H2 向更深层尝试，优先保留上下文更完整的浅层父块。
+         */
         private int parentTargetMax = 2000;
         /** 子块大小（字符）：父块内按段落切分的最小检索单元，嵌入进向量库供检索 */
         private int chunkSize = 400;
@@ -234,6 +236,24 @@ public class AgentProperties {
         private int maxParents = 3;
         /** 单个父块组的预算上限（字符）：0 表示不单独限制，仅受 contextBudget 约束 */
         private int parentContextBudget = 2000;
+        /** 轻量探针检索候选数：只用于判断证据是否充分，不直接承担完整召回 */
+        private int probeTopK = 3;
+        /** 完整检索候选数（auto）：证据不足/复杂问题时升级 */
+        private int fullTopK = 6;
+        /** 完整检索候选数（deep）：复杂问题允许更宽召回 */
+        private int deepTopK = 8;
+        /** 复合问题单个子查询的上下文预算：每个子问题公平拿到一份，避免第一个子问题吃掉全部上下文 */
+        private int compoundPerQueryContextBudget = 2200;
+        /** 复合问题合并后的总上下文预算：高于所有子查询预算之和时按实际内容返回，低于时做最后截断保护 */
+        private int compoundContextBudget = 8000;
+        /** 证据充分最低置信度：需用验证集校准，不建议盲目下调 */
+        private double minEvidenceConfidence = 0.45;
+        /** 查询词最低覆盖率：防止仅靠一条弱命中就跳过完整检索 */
+        private double minKeywordCoverage = 0.20;
+        /** RRF 最高分归一化尺度：两通道 rank1 约为 2/(60+1)，用于折算 0~1 分数信号 */
+        private double rrfScoreScale = 0.033;
+        /** 回答关键结论引用比例低于该值时升级 LLM 质检（按验证集校准） */
+        private double minAnswerSupport = 0.12;
     }
 
     @Data
@@ -250,7 +270,7 @@ public class AgentProperties {
      */
     @Data
     public static class Lock {
-        /** 锁租约（秒）：必须大于 executionTimeoutSeconds 与 resume.timeoutSeconds，否则任务未结束锁先过期 */
+        /** 锁租约（秒）：必须大于 executionTimeoutSeconds，否则任务未结束锁先过期 */
         private int leaseSeconds = 300;
     }
 
@@ -271,8 +291,6 @@ public class AgentProperties {
         private int maxStepsPerTask = 3;
         /** 工具执行线程池 */
         private ExecutorConfig executor = new ExecutorConfig();
-        /** HTTP 只读工具配置 */
-        private Http http = new Http();
         /** 写操作人工确认配置 */
         private Confirmation confirmation = new Confirmation();
 
@@ -282,15 +300,6 @@ public class AgentProperties {
             private int maxPoolSize = 8;
             private int queueCapacity = 100;
             private int keepAliveSeconds = 60;
-        }
-
-        @Data
-        public static class Http {
-            /** 工具目标服务地址；本地默认指向应用内的 mock 接口 */
-            private String baseUrl = "http://localhost:8081";
-            /** 允许访问的域名白名单，防 SSRF */
-            private List<String> allowedHosts = List.of("localhost", "127.0.0.1");
-            private int timeoutMs = 3000;
         }
 
         @Data

@@ -83,7 +83,7 @@ public class LlmGateway {
     }
 
     /**
-     * JSON 模式 + 自定义输出预算：整份简历改稿等长输出场景使用。
+     * JSON 模式 + 自定义输出预算：需要较长结构化输出的调用场景使用。
      * 不覆盖全局 {@code agent.llm.max-output-tokens}（短 JSON 节点仍用全局值）。
      *
      * @param maxOutputTokens 本次调用的输出 token 上限
@@ -105,7 +105,7 @@ public class LlmGateway {
      * @param modelName    模型名（路由到注册表对应 ChatModel）
      * @param systemPrompt 系统提示词（可为空）
      * @param userPrompt   用户提示词
-     * @param scene        场景标识（如 hop-check/decompose），仅用于日志定位
+     * @param scene        场景标识（如 intent-plan/validate），仅用于日志定位
      * @return 解析出的 JSON 节点；截断或提取解析失败返回 null
      */
     public JsonNode generateJsonNode(String modelName, String systemPrompt, String userPrompt, String scene) {
@@ -115,7 +115,7 @@ public class LlmGateway {
 
     /**
      * JSON 结构化输出 + 自定义输出预算：截断感知 + 提取解析一步到位。
-     * 供简历优化等需要长输出的结构化场景使用。
+     * 供需要长输出的结构化场景使用。
      */
     public JsonNode generateJsonNode(String modelName, String systemPrompt, String userPrompt,
                                      String scene, int maxOutputTokens) {
@@ -149,6 +149,14 @@ public class LlmGateway {
     /** 使用已完成的消息列表生成文本。 */
     public LlmResult generate(String modelName, List<ChatMessage> messages) {
         return generate(modelName, messages, null, null);
+    }
+
+    /**
+     * 使用已完成的消息列表生成文本，并限制本次输出 token。
+     * 供知识问答主生成使用：普通问答不需要无限长输出，限制长度可显著降低总耗时。
+     */
+    public LlmResult generate(String modelName, List<ChatMessage> messages, int maxOutputTokens) {
+        return generate(modelName, messages, null, maxOutputTokens);
     }
 
     /** 核心生成逻辑：模型路由、重试、熔断、超时与 Token 统计。 */
@@ -212,15 +220,20 @@ public class LlmGateway {
                 ? properties.getLlm().getMaxOutputTokens()
                 : maxOutputTokens;
         CompletableFuture<ChatResponse> future = CompletableFuture.supplyAsync(() -> {
-            if (responseFormat == null) {
+            // 无结构化输出且未指定输出上限：保持原有纯 chat 调用，避免改变其他调用点行为
+            if (responseFormat == null && maxOutputTokens == null) {
                 return chatModel.chat(messages);
+            }
+            var parameters = ChatRequestParameters.builder();
+            // JSON 调用即使未显式传 maxOutputTokens，也要沿用全局输出预算；
+            // 否则 response_format 分支反而绕过了 agent.llm.max-output-tokens 的防护。
+            parameters.maxOutputTokens(outputLimit);
+            if (responseFormat != null) {
+                parameters.responseFormat(responseFormat);
             }
             return chatModel.chat(ChatRequest.builder()
                     .messages(messages)
-                    .parameters(ChatRequestParameters.builder()
-                            .responseFormat(responseFormat)
-                            .maxOutputTokens(outputLimit)
-                            .build())
+                    .parameters(parameters.build())
                     .build());
         }, llmExecutor);
         try {

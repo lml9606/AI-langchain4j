@@ -42,7 +42,8 @@ public class KnowledgeSearchTool implements AgentTool {
                         + "\"topK\":{\"type\":\"integer\",\"description\":\"返回条数，1-5\",\"default\":3}}}",
                 List.of("query"),
                 ToolSideEffect.READ_ONLY,
-                3000);
+                // 本地 BGE-M3 单次嵌入本机约 2s；留足冷启动、DB 查询与网络抖动余量，避免误报 TIMEOUT
+                8000);
     }
 
     @Override

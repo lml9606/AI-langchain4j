@@ -1,7 +1,7 @@
 package com.example.langchain4j.graph.qa.edges;
 
 import com.example.langchain4j.config.AgentProperties;
-import com.example.langchain4j.graph.qa.nodes.IntentNode;
+import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.qa.nodes.ValidateNode;
 import com.example.langchain4j.graph.state.WorkflowState;
 import lombok.extern.slf4j.Slf4j;
@@ -16,114 +16,114 @@ import org.springframework.stereotype.Component;
 @Component
 public class Router {
 
-    // ---- 路由 key：条件边返回的通道名，与 AgentGraphBuilder 中的 mapping 一一对应 ----
-    /** entry 校验通过 → 意图识别 */
-    public static final String TO_INTENT = "to_intent";
-    /** intent 有效意图 → 知识检索；validate 质检发现与资料矛盾（grounding）→ 回检索重查 */
-    public static final String TO_RETRIEVAL = "to_retrieval";
-    /** intent 为知识问答 → 问题分解（拆并列复合问题） */
-    public static final String TO_DECOMPOSE = "to_decompose";
-    /** retrieval 有上下文且知识问答意图 → 多跳判断（上下文完备性评估） */
-    public static final String TO_HOP_CHECK = "to_hop_check";
-    /** validate 失败且未达重试上限 → 回生成节点（有限重试环） */
+    /** entry 校验通过 → 意图与检索规划 */
+    public static final String TO_INTENT_PLAN = "to_intent_plan";
+    /** 知识问答/代码生成 → 轻量检索探针 */
+    public static final String TO_RETRIEVAL_PROBE = "to_retrieval_probe";
+    /** 证据不足/复杂问题/质检重查 → 完整检索 */
+    public static final String TO_RETRIEVAL_FULL = "to_retrieval_full";
+    /** validate 失败且未达重试上限 → 回生成节点 */
     public static final String TO_GENERATE = "to_generate";
-    /** generate 成功 → 质量校验 */
+    /** generate 成功 → 分层质量校验 */
     public static final String TO_VALIDATE = "to_validate";
     /** 校验失败/LLM 异常/reject → 兜底节点 */
     public static final String TO_FALLBACK = "to_fallback";
     /** validate 通过 → 收尾节点 */
     public static final String TO_FINALIZE = "to_finalize";
-    /** 检索无结果（换问法补查仍空/代码生成查空）→ 转人工节点 */
+    /** 完整检索仍无证据 → 转人工节点 */
     public static final String TO_HANDOFF = "to_handoff";
-    /** intent 为简历优化 → 简历任务触发节点（落草稿 + 提交后台异步执行，对话轮照常闭环） */
-    public static final String TO_RESUME_TASK = "to_resume_task";
-    /** intent 为任务型请求 → 任务规划节点（抽槽位 + 生成工具计划） */
+    /** intent 为任务型请求 → 任务规划节点 */
     public static final String TO_TASK_PLAN = "to_task_plan";
     /** 计划可执行 → 工具执行节点 */
     public static final String TO_TASK_EXECUTE = "to_task_execute";
-    /** 计划包含写工具 → 确认节点（生成一次性 confirmationId，不执行工具） */
+    /** 计划包含写工具 → 确认节点 */
     public static final String TO_TASK_CONFIRM = "to_task_confirm";
 
     private final AgentProperties properties;
 
-    /** 注入 Agent 配置，用于重试和多跳上限判断。 */
     public Router(AgentProperties properties) {
         this.properties = properties;
     }
 
-    /** 统一记录路由决策并返回下一跳 key，避免各分支重复写日志。 */
+    /** 统一记录路由决策与证据信号，便于排查“为什么走了快/慢链路”。 */
     private String route(String stage, WorkflowState state, String target) {
-        log.info("[route] stage={}, intent={}, error={}, target={}",
-                stage, state.intent(),
+        WorkflowState.RetrievalEvidence evidence = state.retrievalEvidence();
+        log.info("[route] stage={}, intent={}, depth={}, planFull={}, evidenceConfidence={}, sufficient={}, error={}, target={}",
+                stage, state.intent(), state.retrievalDepth(), state.queryPlan().requiresFullRetrieval(),
+                evidence.confidence(), evidence.sufficient(),
                 state.error() != null && !state.error().isBlank(), target);
         return target;
     }
 
-    /** 守卫节点后：输入校验失败（空输入）直接兜底，跳过意图识别，省一次 LLM 调用 */
+    /** 守卫节点后：空输入直接兜底，其他进入意图与规划。 */
     public EdgeAction<WorkflowState> afterEntry() {
+        return state -> state.error() != null && !state.error().isBlank()
+                ? route("entry", state, TO_FALLBACK)
+                : route("entry", state, TO_INTENT_PLAN);
+    }
+
+    /** 意图规划后：按意图分流；知识问答与代码生成进入检索探针。 */
+    public EdgeAction<WorkflowState> afterIntentPlan() {
         return state -> {
-            // 步骤1：error 非空说明守卫校验失败（如空输入）→ 直接兜底
             if (state.error() != null && !state.error().isBlank()) {
-                return route("entry", state, TO_FALLBACK);
+                return route("intent-plan", state, TO_FALLBACK);
             }
-            // 步骤2：校验通过 → 进入意图识别
-            return route("entry", state, TO_INTENT);
+            if (QaIntent.CODE_GENERATE.equals(state.intent())
+                    || QaIntent.KNOWLEDGE_QA.equals(state.intent())) {
+                return route("intent-plan", state, TO_RETRIEVAL_PROBE);
+            }
+            if (QaIntent.TASK.equals(state.intent())) {
+                return route("intent-plan", state, TO_TASK_PLAN);
+            }
+            if (QaIntent.CHITCHAT.equals(state.intent())) {
+                return route("intent-plan", state, TO_GENERATE);
+            }
+            return route("intent-plan", state, TO_FALLBACK);
         };
     }
 
-    /** 意图节点后：知识问答 → 问题分解（拆并列复合问题）；代码生成 → 直接检索（无需分解）；简历优化 → 触发节点；闲聊 → 直接生成（不检索）；reject/异常 → 兜底 */
-    public EdgeAction<WorkflowState> afterIntent() {
+    /** 探针后：证据充分且计划简单 → 直接生成；否则最多升级一次完整检索。 */
+    public EdgeAction<WorkflowState> afterRetrievalProbe() {
         return state -> {
-            // 步骤1：error 非空（理论不常见，意图节点已降级）→ 兜底
-            if (state.error() != null && !state.error().isBlank()) {
-                return route("intent", state, TO_FALLBACK);
+            if (!QaIntent.KNOWLEDGE_QA.equals(state.intent())) {
+                // 代码生成不依赖知识库命中：有资料可参考，无资料也直接生成。
+                return route("retrieval-probe", state, TO_GENERATE);
             }
-            // 步骤2：代码生成意图 → 直接检索（无需分解，检索上下文对代码意图参考价值低）
-            if (IntentNode.INTENT_CODE_GENERATE.equals(state.intent())) {
-                return route("intent", state, TO_RETRIEVAL);
-            }
-            // 步骤3：简历优化意图 → 触发节点（查档案 + 落草稿 + 提交后台异步执行，不进入检索/生成链路）
-            if (IntentNode.INTENT_RESUME_OPTIMIZE.equals(state.intent())) {
-                return route("intent", state, TO_RESUME_TASK);
-            }
-            // 步骤3.5：任务型请求 → 任务规划（可能缺参追问，也可能直接生成工具计划）
-            if (IntentNode.INTENT_TASK.equals(state.intent())) {
-                return route("intent", state, TO_TASK_PLAN);
-            }
-            // 步骤4：闲聊意图 → 直接生成（寒暄不检索、不分解，也不走转人工；无上下文由生成端闲聊 prompt 兑住）
-            if (IntentNode.INTENT_CHITCHAT.equals(state.intent())) {
-                return route("intent", state, TO_GENERATE);
-            }
-            // 步骤5：知识问答意图 → 问题分解节点（拆并列复合问题，单问题原样放行）
-            if (IntentNode.INTENT_KNOWLEDGE_QA.equals(state.intent())) {
-                return route("intent", state, TO_DECOMPOSE);
-            }
-            // 步骤6：reject（非法内容）或未知意图 → 兜底拒绝回答
-            return route("intent", state, TO_FALLBACK);
+            boolean needsFull = state.context().isBlank()
+                    || "deep".equals(state.answerMode())
+                    || state.queryPlan().requiresFullRetrieval()
+                    || !state.retrievalEvidence().sufficient();
+            return route("retrieval-probe", state, needsFull ? TO_RETRIEVAL_FULL : TO_GENERATE);
         };
     }
 
-    /** 任务规划后：缺参追问 → 直接收尾；规划失败 → 兜底；含写工具 → 确认；只读计划 → 执行工具 */
+    /** 完整检索后：仍无证据 → 转人工；有证据（即使不完整）→ 生成并声明边界。 */
+    public EdgeAction<WorkflowState> afterRetrievalFull() {
+        return state -> {
+            if (QaIntent.KNOWLEDGE_QA.equals(state.intent()) && state.context().isBlank()) {
+                return route("retrieval-full", state, TO_HANDOFF);
+            }
+            return route("retrieval-full", state, TO_GENERATE);
+        };
+    }
+
+    /** 任务规划后：缺参追问 → 直接收尾；规划失败 → 兜底；含写工具 → 确认；只读计划 → 执行工具。 */
     public EdgeAction<WorkflowState> afterTaskPlan() {
         return state -> {
-            // 步骤1：缺参追问已生成答案，直接收尾（不再调用工具）
             if (state.taskClarify()) {
                 return route("task-plan", state, TO_FINALIZE);
             }
-            // 步骤2：规划失败（模型输出为空/无可用步骤）→ 兜底
             if (state.error() != null && !state.error().isBlank()) {
                 return route("task-plan", state, TO_FALLBACK);
             }
-            // 步骤3：含写工具 → 生成确认令牌，等待用户确认后再执行
             if (state.taskConfirmationRequired()) {
                 return route("task-plan", state, TO_TASK_CONFIRM);
             }
-            // 步骤4：纯只读计划 → 执行工具
             return route("task-plan", state, TO_TASK_EXECUTE);
         };
     }
 
-    /** 确认节点后：令牌创建失败 → 兜底；成功 → 收尾并把 pendingAction 透出到响应 */
+    /** 确认节点后：令牌创建失败 → 兜底；成功 → 收尾并把 pendingAction 透出到响应。 */
     public EdgeAction<WorkflowState> afterTaskConfirm() {
         return state -> {
             if (state.error() != null && !state.error().isBlank()) {
@@ -133,79 +133,29 @@ public class Router {
         };
     }
 
-    /**
-     * 检索节点后：知识问答 → 多跳判断（首轮空上下文也进，给换问法补查机会）；代码生成 → 空转人工/有资料直接生成。
-     * <p>
-     * 根因职责说明：条件边只能返回路由 key（框架 EdgeAction 返回 String，不能写状态），
-     * 因此「首轮检索为空」的知识缺失预判（KNOWLEDGE_MISSING）由 RetrievalNode 首轮写入，
-     * 换问法补查命中后由 HopCheckNode 覆盖为表述不当（EXPRESSION_ISSUE）；
-     * 「空资料不许进生成」的最终闸门在 afterHopCheck（足够但上下文仍空 → 转人工）。
-     */
-    public EdgeAction<WorkflowState> afterRetrieval() {
-        return state -> {
-            // 步骤1：知识问答意图 → 多跳判断（首轮空上下文也进：换问法补查可能挽救，仍空由 afterHopCheck 闸门转人工）
-            if (IntentNode.INTENT_KNOWLEDGE_QA.equals(state.intent())) {
-                return route("retrieval", state, TO_HOP_CHECK);
-            }
-            // 步骤2：代码生成空上下文 → 转人工（无改写补查环节，不进入 LLM 生成）
-            if (state.context() == null || state.context().isBlank()) {
-                return route("retrieval", state, TO_HANDOFF);
-            }
-            // 步骤3：代码生成有资料 → 直接生成（无需多跳补全）
-            return route("retrieval", state, TO_GENERATE);
-        };
-    }
-
-    /**
-     * 多跳判断节点后：足够但上下文仍空 → 转人工（空资料不许进生成）；足够 → 生成；不足且未达上限 → 回检索（多跳环）。
-     * 空上下文闸门兑住两类误判：换问法补查全部失败，或判断 LLM fail-open 在空上下文上误判足够。
-     */
-    public EdgeAction<WorkflowState> afterHopCheck() {
-        return state -> {
-            // 步骤1：足够但上下文仍空（补查失败/fail-open 误判）→ 转人工，空资料不许进生成
-            if (state.hop().sufficient() && (state.context() == null || state.context().isBlank())) {
-                return route("hop-check", state, TO_HANDOFF);
-            }
-            // 步骤2：HopCheckNode 写入的显式判定标记（足够/超限 → 生成，路由只读标记避免逻辑重复）
-            if (state.hop().sufficient()) {
-                return route("hop-check", state, TO_GENERATE);
-            }
-            // 步骤3：不足且未达上限 → 回检索节点，用下一跳查询补查
-            return route("hop-check", state, TO_RETRIEVAL);
-        };
-    }
-
-    /** 生成节点后：异常走兜底，正常走校验 */
+    /** 生成节点后：异常走兜底，正常走分层校验。 */
     public EdgeAction<WorkflowState> afterGenerate() {
         return state -> {
-            // 步骤1：error 非空说明 LLM 生成失败 → 兜底
             if (state.error() != null && !state.error().isBlank()) {
                 return route("generate", state, TO_FALLBACK);
             }
-            // 步骤2：生成成功 → 进入质量校验
             return route("generate", state, TO_VALIDATE);
         };
     }
 
-    /** 校验节点后：通过→收尾；失败且未达上限→重试生成；超限→兜底 */
+    /** 校验节点后：通过→收尾；grounding 失败→完整重查；格式失败→重生成；超限→兜底。 */
     public EdgeAction<WorkflowState> afterValidate() {
         return state -> {
-            // 步骤1：读取 ValidateNode 写入的显式判定标记（路由只读标记，避免逻辑重复）
             if (state.validation().validated()) {
                 return route("validate", state, TO_FINALIZE);
             }
-            // 步骤2：校验失败但重试次数未达上限 → 按失败原因分路由
             int maxRetries = Math.max(1, properties.getMaxValidateRetries());
             if (state.retryCount() < maxRetries) {
-                // 2.1：质检发现回答与资料矛盾/编造（grounding）→ 回检索节点
-                //      （RetrievalNode 会用失败原因改写 query 重新检索，换一批上下文再生成）
                 if (ValidateNode.ISSUE_GROUNDING.equals(state.validation().issue())) {
-                    return route("validate", state, TO_RETRIEVAL);
+                    return route("validate", state, TO_RETRIEVAL_FULL);
                 }
-                // 2.2：其余失败（格式问题等）→ 回生成节点重试
                 return route("validate", state, TO_GENERATE);
             }
-            // 步骤3：重试次数超限 → 放弃重试，兜底收尾
             return route("validate", state, TO_FALLBACK);
         };
     }

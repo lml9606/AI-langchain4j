@@ -1,6 +1,9 @@
 package com.example.langchain4j.graph.qa.nodes;
 
+import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.graph.qa.EvidenceAssessor;
 import com.example.langchain4j.graph.state.WorkflowState;
+import com.example.langchain4j.knowledge.KnowledgeRetrievalResult;
 import com.example.langchain4j.knowledge.VectorSearchService;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
@@ -10,222 +13,178 @@ import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * 知识检索节点：pgvector 语义检索，为生成节点提供上下文。
+ * 完整检索节点：只由证据路由按需升级进入，负责多子查询召回与证据重评。
  * <p>
- * 三种模式（按状态字段组合判别）：
+ * 两种模式：
  * <ul>
- *   <li>首轮检索：遍历本轮子查询各自检索（并列复合问题分别召回），按子问题分组标注合并；未分解时为 entry 种入的默认单查询；</li>
- *   <li>多跳检索：HopCheck 判定信息不足路由回来，用下一跳查询（hop.pendingQuery）检索并把新上下文追加合并（保留证据链）；</li>
- *   <li>纠错重查：质检发现回答与资料矛盾（grounding）路由回来，先让 LLM 根据失败原因改写 query 再检索，替换原上下文。</li>
+ *   <li>按计划检索：遍历 IntentPlanNode 产出的主查询/子查询，分别召回后合并上下文；</li>
+ *   <li>纠错重查：质检发现回答与资料矛盾时，根据失败原因改写查询后替换上下文。</li>
  * </ul>
- * 根因判定（仅首轮可判定，多跳/重查轮不覆盖）：首轮上下文为空 → 知识缺失预判（KNOWLEDGE_MISSING，
- * 非终局——换问法补查命中由 HopCheckNode 覆盖为表述不当）；真正发生分解且命中 → 问题复杂（COMPLEX_QUERY）；
- * 未分解单查命中 → 无根因。
- * <p>
- * 防御策略：检索失败（DB/向量服务不可用）返回空上下文，不阻断主流程。
+ * 与旧链路不同：不再由 HopCheck 反复调用 LLM 判断多跳，完整检索最多执行一次；
+ * 检索后立即用 {@link EvidenceAssessor} 做结构化评估，路由据此生成或转人工。
  */
 @Slf4j
 @Component
 public class RetrievalNode implements NodeAction<WorkflowState> {
 
-    /** 上下文总长度上限：多跳追加时防上下文膨胀撑爆生成窗口 */
-    private static final int MAX_CONTEXT_LENGTH = 16000;
-    /** 检索候选数：auto 模式默认 */
-    private static final int AUTO_TOP_K = 3;
-    /** 检索候选数：deep 模式放宽（更全召回，配合多跳上限翻倍） */
-    private static final int DEEP_TOP_K = 6;
-
     private final VectorSearchService vectorSearchService;
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
+    private final EvidenceAssessor evidenceAssessor;
+    private final AgentProperties properties;
 
-    /** 注入混合检索、LLM 与提示词服务。 */
     public RetrievalNode(VectorSearchService vectorSearchService, LlmGateway llmGateway,
-                         PromptTemplateService promptTemplateService) {
+                         PromptTemplateService promptTemplateService,
+                         EvidenceAssessor evidenceAssessor,
+                         AgentProperties properties) {
         this.vectorSearchService = vectorSearchService;
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
+        this.evidenceAssessor = evidenceAssessor;
+        this.properties = properties;
     }
 
-    /** 按首轮/多跳/纠错重查三种模式检索，并写回上下文与根因。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
-        // 步骤1：记录开始时间，用于统计检索耗时
         long start = System.currentTimeMillis();
-        // 步骤2：按状态字段组合分派检索模式并判定根因（见 resolveContext）
-        RetrievalResult result = resolveContext(state);
-        // 步骤3：记录检索耗时与上下文长度，便于观测检索质量
-        log.info("[retrieval] cost={}ms, requery={}, hops={}, subQueries={}, topK={}, visibility={}, contextLength={}, rootCause={}",
-                System.currentTimeMillis() - start, !state.validation().issue().isBlank(),
-                state.hop().count(), state.subQueries().size(), topK(state), state.visibility(),
-                result.context().length(), result.rootCause());
-        // 步骤4：返回增量更新：检索上下文与根因写入状态，供生成/路由节点使用
+        boolean requery = ValidateNode.ISSUE_GROUNDING.equals(state.validation().issue());
+        List<String> queries = requery
+                ? List.of(resolveSearchQuery(state))
+                : retrievalQueries(state);
+        int topK = topK(state);
+        int perQueryBudget = perQueryContextBudget(queries.size());
+        int totalBudget = totalContextBudget(queries.size());
+
+        StringBuilder merged = new StringBuilder();
+        int hitCount = 0;
+        double topScore = 0.0;
+        int matchedQueries = 0;
+        for (String query : queries) {
+            KnowledgeRetrievalResult part = vectorSearchService.retrieve(
+                    query, topK, privateOnly(state), perQueryBudget);
+            hitCount += part.hitCount();
+            topScore = Math.max(topScore, part.topScore());
+            if (!part.hasContext()) {
+                continue;
+            }
+            if (queries.size() > 1) {
+                if (!merged.isEmpty()) {
+                    merged.append('\n');
+                }
+                merged.append("【子问题 ").append(matchedQueries + 1).append("：")
+                      .append(query).append("】\n");
+            }
+            if (!merged.isEmpty() && !merged.toString().endsWith("\n")) {
+                merged.append('\n');
+            }
+            merged.append(part.context());
+            matchedQueries++;
+        }
+
+        String context = merged.length() > totalBudget
+                ? merged.substring(0, totalBudget) : merged.toString();
+        WorkflowState.RetrievalEvidence evidence = evidenceAssessor.assess(
+                state.effectiveQuery(), new KnowledgeRetrievalResult(context, hitCount, topScore));
+        String rootCause = resolveRootCause(state, context, queries.size());
+
         Map<String, Object> updates = new LinkedHashMap<>();
-        updates.put(WorkflowState.CONTEXT, result.context());
-        updates.put(WorkflowState.ROOT_CAUSE, result.rootCause());
+        updates.put(WorkflowState.CONTEXT, context);
+        updates.put(WorkflowState.RETRIEVAL_EVIDENCE, evidence);
+        updates.put(WorkflowState.RETRIEVAL_DEPTH, requery ? "requery" : "full");
+        updates.put(WorkflowState.CONTEXT_INCOMPLETE, !context.isBlank() && !evidence.sufficient());
+        updates.put(WorkflowState.ROOT_CAUSE, rootCause);
+        log.info("[retrieval-full] cost={}ms, requery={}, queries={}, matchedQueries={}, topK={}, perQueryBudget={}, totalBudget={}, visibility={}, contextLength={}, hits={}, confidence={}, sufficient={}, rootCause={}",
+                System.currentTimeMillis() - start, requery, queries.size(), matchedQueries, topK,
+                perQueryBudget, totalBudget, state.visibility(), context.length(), hitCount, evidence.confidence(),
+                evidence.sufficient(), rootCause);
         return updates;
     }
 
-    /**
-     * 分派检索模式并产出上下文与根因：
-     * <ul>
-     *   <li>纠错重查（grounding）→ 替换上下文，根因沿用；</li>
-     *   <li>多跳检索（hop.pendingQuery）→ 追加合并，根因沿用（HopCheckNode 负责补查类根因）；</li>
-     *   <li>首轮检索 → 遍历子查询合并，同时判定根因（知识缺失/问题复杂，仅首轮可判定）。</li>
-     * </ul>
-     */
-    private RetrievalResult resolveContext(WorkflowState state) {
-        if (ValidateNode.ISSUE_GROUNDING.equals(state.validation().issue())) {
-            // 纠错重查：原上下文已证与回答矛盾，替换而非追加
-            return new RetrievalResult(requery(state), state.rootCause());
+    /** 完整检索查询集合：优先使用规划的多个子查询；空规划回退有效查询。 */
+    private List<String> retrievalQueries(WorkflowState state) {
+        Set<String> queries = new LinkedHashSet<>();
+        for (String query : state.subQueries()) {
+            if (query != null && !query.isBlank()) {
+                queries.add(query.trim());
+            }
         }
-        if (!state.hop().pendingQuery().isBlank()) {
-            // 多跳检索：用下一跳查询检索，追加到已有上下文（回答需要完整证据链）
-            return new RetrievalResult(appendHop(state), state.rootCause());
+        if (queries.isEmpty()) {
+            String primary = state.queryPlan().primaryQuery();
+            queries.add(primary.isBlank() ? state.effectiveQuery() : primary);
         }
-        // 首轮检索：遍历子查询（分解后的独立查询点）各自召回合并；同时判定根因
-        String context = firstRound(state);
-        return new RetrievalResult(context, resolveFirstRoundRootCause(state, context));
+        return List.copyOf(queries);
     }
 
-    /** 检索产物：检索到的上下文 + 检索根因（多跳/重查轮根因沿用，仅首轮判定） */
-    private record RetrievalResult(String context, String rootCause) {
-    }
-
-    /**
-     * 首轮检索根因判定（仅首轮可判定这两类根因，多跳/重查轮不覆盖）：
-     * <ul>
-     *   <li>上下文为空 → 知识缺失预判（所有子查询均未召回；非终局——进 hop_check 换问法补查，
-     *       命中则覆盖为表述不当，仍空才转人工）；</li>
-     *   <li>真正发生分解（子查询数 &gt;1 或单子查询与原查询不同）且命中 → 问题复杂（问法本身没问题，是复合问题）；</li>
-     *   <li>未分解单查命中 → 无根因（正常命中，返回空串）。</li>
-     * </ul>
-     */
-    private String resolveFirstRoundRootCause(WorkflowState state, String context) {
-        // 步骤1：首轮检索为空 → 知识缺失
+    /** 根因：完整检索仍为空 → 知识缺失；多子查询命中 → 问题复杂；普通命中不写根因。 */
+    private String resolveRootCause(WorkflowState state, String context, int queryCount) {
         if (context == null || context.isBlank()) {
             return WorkflowState.ROOT_CAUSE_KNOWLEDGE_MISSING;
         }
-        // 步骤2：分解真实发生且命中 → 问题复杂
-        if (reallyDecomposed(state)) {
+        if (queryCount > 1 || state.queryPlan().requiresFullRetrieval()) {
             return WorkflowState.ROOT_CAUSE_COMPLEX_QUERY;
         }
-        // 步骤3：未分解单查命中 → 无根因
+        // 探针为空时曾预写 KNOWLEDGE_MISSING；完整检索已命中后必须清掉，否则会把成功路径误报为知识缺失。
         return "";
     }
 
-    /** 是否真正拆分（排除 DecomposeNode 降级的单查询：降级时子查询与有效查询完全相同，等同未分解） */
-    private boolean reallyDecomposed(WorkflowState state) {
-        List<String> subs = state.subQueries();
-        // 步骤1：多个子查询必然是真实拆分
-        if (subs.size() > 1) {
-            return true;
-        }
-        // 步骤2：单子查询且与原查询不同才算拆分；相同即为降级单查询
-        return subs.size() == 1 && !subs.get(0).equals(state.effectiveQuery());
-    }
-
-    /**
-     * 首轮检索：遍历本轮子查询（entry 种入默认单查询，decompose 覆盖为分解结果），
-     * 各自召回后按子问题分组标注合并（生成模型可对号入座）。
-     */
-    private String firstRound(WorkflowState state) {
-        List<String> subQueries = state.subQueries();
-        // 步骤1：防御旧 checkpoint（改造前 entry 未种入默认值）：空列表回退为原查询单查
-        if (subQueries.isEmpty()) {
-            subQueries = List.of(state.effectiveQuery());
-        }
-        // 步骤2：每个子问题独立召回，父子装配父块整章上下文，按子问题分组标注
-        StringBuilder sb = new StringBuilder();
-        int index = 1;
-        int matched = 0;
-        for (String subQuery : subQueries) {
-            String part = vectorSearchService.searchContext(subQuery, topK(state), privateOnly(state));
-            if (part.isBlank()) {
-                continue;
-            }
-            sb.append("【子问题 ").append(index).append("：").append(subQuery).append("】\n").append(part);
-            index++;
-            matched++;
-        }
-        log.info("[retrieval] first round done, subQueries={}, matched={}, contextLength={}",
-                subQueries.size(), matched, sb.length());
-        return sb.toString();
-    }
-
-    /**
-     * 多跳检索：用下一跳查询（HopCheck 针对缺失信息点生成）检索，新上下文追加到已有上下文之后。
-     * 追加以保留前几跳资料 —— 回答依赖完整证据链，替换会丢掉前面的信息；
-     * 总长设上限，防多跳上下文膨胀。
-     */
-    private String appendHop(WorkflowState state) {
-        String part = vectorSearchService.searchContext(state.hop().pendingQuery(), topK(state), privateOnly(state));
-        // 步骤1：本跳无新结果 → 保持原上下文（多跳判断会再次评估，超限后进生成）
-        if (part.isBlank()) {
-            return state.context();
-        }
-        // 步骤2：追加合并（空基线直接作为新上下文，避免前导换行）+ 总长截断防御
-        String merged = state.context().isBlank() ? part : state.context() + "\n" + part;
-        log.info("[retrieval] hop merged, hop={}, addedLength={}, totalLength={}",
-                state.hop().count(), part.length(), merged.length());
-        return merged.length() > MAX_CONTEXT_LENGTH ? merged.substring(0, MAX_CONTEXT_LENGTH) : merged;
-    }
-
-    /** 纠错重查：根据质检失败原因让 LLM 改写 query 再检索，替换原上下文（原上下文已证与回答矛盾） */
-    private String requery(WorkflowState state) {
-        String searchQuery = resolveSearchQuery(state);
-        return vectorSearchService.searchContext(searchQuery, topK(state), privateOnly(state));
-    }
-
-    /** 本轮检索候选数：deep 模式放宽（更全召回，适合复杂问题），auto 模式用默认值 */
+    /** auto 使用完整检索候选数，deep 放宽。 */
     private int topK(WorkflowState state) {
-        return "deep".equals(state.answerMode()) ? DEEP_TOP_K : AUTO_TOP_K;
+        AgentProperties.Retrieval retrieval = properties.getRetrieval();
+        return Math.max(1, "deep".equals(state.answerMode())
+                ? retrieval.getDeepTopK() : retrieval.getFullTopK());
     }
 
-    /** 本轮检索可见范围：visibility=private 仅检索本人库，否则公共库 + 本人库 */
+    /** 复合问题每个子查询独立预算；单查询沿用常规上下文预算。 */
+    private int perQueryContextBudget(int queryCount) {
+        AgentProperties.Retrieval retrieval = properties.getRetrieval();
+        int budget = queryCount > 1
+                ? retrieval.getCompoundPerQueryContextBudget()
+                : retrieval.getContextBudget();
+        return Math.max(1, budget);
+    }
+
+    /** 多子查询合并后的总预算，防止子查询数量增加后上下文线性膨胀。 */
+    private int totalContextBudget(int queryCount) {
+        AgentProperties.Retrieval retrieval = properties.getRetrieval();
+        int budget = queryCount > 1
+                ? retrieval.getCompoundContextBudget()
+                : retrieval.getContextBudget();
+        return Math.max(1, budget);
+    }
+
     private boolean privateOnly(WorkflowState state) {
         return "private".equals(state.visibility());
     }
 
     /**
-     * 选择检索 query：重查模式（质检 grounding 失败）时根据失败原因让 LLM 改写 query，
-     * 更聚焦矛盾点；改写失败或非重查场景降级为有效查询（不阻断主流程）。
-     *
-     * @param state 当前状态（含质检失败类型/原因）
-     * @return 实际用于向量检索的 query
+     * 纠错重查查询：根据质检失败原因让 LLM 改写，失败时回退有效查询。
      */
     private String resolveSearchQuery(WorkflowState state) {
-        if (!ValidateNode.ISSUE_GROUNDING.equals(state.validation().issue())) {
-            return state.effectiveQuery();
-        }
         String userPrompt = "原查询：\n" + state.effectiveQuery()
                 + "\n\n质检失败原因：\n" + state.validation().reason();
         try {
-            // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
             String refined = llmGateway.generate(state.model(),
                     promptTemplateService.resolve("REQUERY_SYSTEM", PromptTemplates.REQUERY_SYSTEM),
                     userPrompt).text();
             String cleaned = clean(refined);
             if (!cleaned.isBlank()) {
-                log.info("[retrieval] requery refined, queryLength={}, refinedLength={}",
+                log.info("[retrieval-full] requery refined, queryLength={}, refinedLength={}",
                         state.effectiveQuery().length(), cleaned.length());
                 return cleaned;
             }
         } catch (Exception e) {
-            log.warn("[retrieval] requery llm failed, fallback to original query: {}", e.getMessage());
+            log.warn("[retrieval-full] requery llm failed, fallback to original query: {}", e.getMessage());
         }
         return state.effectiveQuery();
     }
 
-    /** 控制字符清洗 + 首尾空白去除（与入口清洗规则一致） */
     private String clean(String text) {
-        if (text == null) {
-            return "";
-        }
-        return text.replaceAll("[\\p{Cntrl}]", " ").trim();
+        return text == null ? "" : text.replaceAll("[\\p{Cntrl}]", " ").trim();
     }
 }

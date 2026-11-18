@@ -85,6 +85,19 @@ class VectorSearchServiceTest {
     }
 
     @Test
+    @DisplayName("显式上下文预算 → 覆盖默认 budget，供复合问题按子查询调用")
+    void assembleWithExplicitBudget() {
+        KnowledgeChunk orphan = new KnowledgeChunk();
+        orphan.setId(1L);
+        orphan.setContent("预算".repeat(200));
+
+        List<KnowledgeChunk> result = service.assemble(List.of(orphan), 120);
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getContent()).hasSize(120);
+    }
+
+    @Test
     @DisplayName("命中子块 → 取父块整章（同 title 组仅单父块）")
     void assembleSingleParent() {
         KnowledgeChunk hit = hit(10L, 5L);

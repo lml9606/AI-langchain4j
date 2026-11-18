@@ -22,7 +22,7 @@ public class ChatRequest {
     private String model;
 
     /**
-     * 回答模式：auto（标准链路，默认）/ deep（深度链路：多跳上限与检索候选数翻倍，适合复杂问题）；
+     * 回答模式：auto（标准链路，默认）/ deep（深度链路：放宽检索候选数并强制完整质检，适合复杂问题）；
      * 非法值由服务层归一为 auto。
      */
     @Size(max = 16, message = "answerMode 长度不能超过 16")

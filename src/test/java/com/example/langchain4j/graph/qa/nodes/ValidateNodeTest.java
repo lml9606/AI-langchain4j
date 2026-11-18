@@ -1,5 +1,8 @@
 package com.example.langchain4j.graph.qa.nodes;
 
+import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.graph.qa.EvidenceAssessor;
+import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.service.PromptTemplateService;
@@ -16,6 +19,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -30,12 +34,14 @@ class ValidateNodeTest {
     private LlmGateway llmGateway;
     @Mock
     private PromptTemplateService promptTemplateService;
+    @Mock
+    private EvidenceAssessor evidenceAssessor;
 
     private ValidateNode node;
 
     @BeforeEach
     void setUp() {
-        node = new ValidateNode(llmGateway, promptTemplateService);
+        node = new ValidateNode(llmGateway, promptTemplateService, evidenceAssessor, new AgentProperties());
         // 配置化解析默认兑底；规则层直接拒绝的用例不经过 LLM（lenient 容忍未使用的桩）
         lenient().when(promptTemplateService.resolve(anyString(), anyString()))
                 .thenAnswer(invocation -> invocation.getArgument(1));
@@ -49,6 +55,19 @@ class ValidateNodeTest {
                 WorkflowState.CONTEXT, "参考资料"));
     }
 
+    private WorkflowState groundedStateOf(String result) {
+        return new WorkflowState(Map.of(
+                WorkflowState.RESULT, result,
+                WorkflowState.INTENT, QaIntent.KNOWLEDGE_QA,
+                WorkflowState.QUERY, "JVM 内存模型",
+                WorkflowState.CONTEXT, "JVM 内存模型包含堆、栈、方法区。",
+                WorkflowState.QUERY_PLAN, new WorkflowState.QueryPlan(
+                        "JVM 内存模型", java.util.List.of("JVM 内存模型"),
+                        "simple", "low", false, "simple"),
+                WorkflowState.RETRIEVAL_EVIDENCE, new WorkflowState.RetrievalEvidence(
+                        2, 0.03, 0.8, 0.8, true, "ok")));
+    }
+
     private WorkflowState.Validation validationOf(Map<String, Object> updates) {
         return (WorkflowState.Validation) updates.get(WorkflowState.VALIDATION);
     }
@@ -56,7 +75,7 @@ class ValidateNodeTest {
     @Test
     @DisplayName("规则层：空结果 → 格式问题，回生成重试")
     void ruleLayerRejectsEmptyResult() {
-        Map<String, Object> updates = node.apply(stateOf("", IntentNode.INTENT_CODE_GENERATE));
+        Map<String, Object> updates = node.apply(stateOf("", QaIntent.CODE_GENERATE));
 
         WorkflowState.Validation validation = validationOf(updates);
         assertThat(validation.validated()).isFalse();
@@ -72,7 +91,7 @@ class ValidateNodeTest {
                         "{\"valid\":false,\"issue\":\"grounding\",\"reason\":\"回答与参考资料矛盾\"}"));
 
         Map<String, Object> updates =
-                node.apply(stateOf("这是一段足够长的正常回答内容", IntentNode.INTENT_KNOWLEDGE_QA));
+                node.apply(stateOf("这是一段足够长的正常回答内容", QaIntent.KNOWLEDGE_QA));
 
         WorkflowState.Validation validation = validationOf(updates);
         assertThat(validation.validated()).isFalse();
@@ -86,7 +105,7 @@ class ValidateNodeTest {
                 .thenReturn(null);
 
         Map<String, Object> updates =
-                node.apply(stateOf("这是一段足够长的正常回答内容", IntentNode.INTENT_KNOWLEDGE_QA));
+                node.apply(stateOf("这是一段足够长的正常回答内容", QaIntent.KNOWLEDGE_QA));
 
         assertThat(validationOf(updates).validated()).isTrue();
     }
@@ -98,10 +117,26 @@ class ValidateNodeTest {
                 .thenReturn(MAPPER.readTree("{\"valid\":true}"));
 
         Map<String, Object> updates =
-                node.apply(stateOf("这是一段足够长的正常回答内容", IntentNode.INTENT_KNOWLEDGE_QA));
+                node.apply(stateOf("这是一段足够长的正常回答内容", QaIntent.KNOWLEDGE_QA));
 
         WorkflowState.Validation validation = validationOf(updates);
         assertThat(validation.validated()).isTrue();
         assertThat(validation.issue()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("高证据 + 低风险 + 有引用 → 只走规则层，跳过多余 LLM 质检")
+    void skipLlmWhenEvidenceAndCitationAreStrong() {
+        when(evidenceAssessor.answerSupport(
+                "JVM 内存模型包含堆和栈【参考资料 1】", "JVM 内存模型包含堆、栈、方法区。"))
+                .thenReturn(0.8);
+
+        Map<String, Object> updates = node.apply(
+                groundedStateOf("JVM 内存模型包含堆和栈【参考资料 1】"));
+
+        WorkflowState.Validation validation = (WorkflowState.Validation) updates.get(WorkflowState.VALIDATION);
+        assertThat(validation.validated()).isTrue();
+        assertThat(updates.get(WorkflowState.FINAL_CONFIDENCE)).isEqualTo(0.8);
+        verifyNoInteractions(llmGateway);
     }
 }

@@ -125,4 +125,5 @@ public class QueryRewriter {
         }
         return text.replaceAll("[\\p{Cntrl}]", " ").trim();
     }
+
 }

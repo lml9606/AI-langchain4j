@@ -7,7 +7,7 @@ import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.request.ConfirmRequest;
 import com.example.langchain4j.dto.response.ChatResponse;
-import com.example.langchain4j.graph.qa.nodes.IntentNode;
+import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.guard.RateLimiter;
 import com.example.langchain4j.guard.SessionLock;
@@ -94,7 +94,7 @@ class AgentServiceConfirmTest {
                 promptTemplateService, confirmationService);
         UserContext.set("demo", "USER");
         lenient().when(taskConfirmGraph.invoke(anyMap(), any(RunnableConfig.class)))
-                .thenReturn(Optional.of(completedState("订单 A1001 已取消")));
+                .thenReturn(Optional.of(completedState("业务对象 B1001 已取消")));
     }
 
     @AfterEach
@@ -111,12 +111,12 @@ class AgentServiceConfirmTest {
 
     private ConfirmationService.PendingAction action() {
         List<Map<String, Object>> plan = List.of(Map.of(
-                "tool", "cancel_order",
-                "args", Map.of("orderId", "A1001", "reason", "不想要了"),
-                "purpose", "取消订单"));
+                "tool", "write_tool",
+                "args", Map.of("entityId", "B1001", "reason", "不想要了"),
+                "purpose", "修改业务数据"));
         return new ConfirmationService.PendingAction(
-                "cfm_1", "demo", "c1", "model-x", "cancel_order", plan,
-                "即将执行：取消订单。", "WRITE",
+                "cfm_1", "demo", "c1", "model-x", "write_tool", plan,
+                "即将执行：修改业务数据。", "WRITE",
                 System.currentTimeMillis() + 60_000);
     }
 
@@ -125,7 +125,7 @@ class AgentServiceConfirmTest {
                 WorkflowState.RESULT, result,
                 WorkflowState.FALLBACK, false,
                 WorkflowState.DONE, true,
-                WorkflowState.INTENT, IntentNode.INTENT_TASK,
+                WorkflowState.INTENT, QaIntent.TASK,
                 WorkflowState.TASK_CONFIDENCE, 0.92,
                 WorkflowState.TASK_CONFIDENCE_REASON, "工具证据充分",
                 WorkflowState.TASK_TRACE, List.of(),
@@ -165,12 +165,12 @@ class AgentServiceConfirmTest {
 
         ChatResponse response = service.confirm(request(true));
 
-        assertThat(response.getResult()).isEqualTo("订单 A1001 已取消");
+        assertThat(response.getResult()).isEqualTo("业务对象 B1001 已取消");
         assertThat(response.getConfidence()).isEqualTo(0.92);
         verify(conversationService).saveMessage(eq("c1"), eq(Message.ROLE_USER),
                 contains("确认执行"), eq("model-x"), isNull());
         verify(conversationService).saveMessage(eq("c1"), eq(Message.ROLE_ASSISTANT),
-                eq("订单 A1001 已取消"), eq("model-x"), isNull(), isNull());
+                eq("业务对象 B1001 已取消"), eq("model-x"), isNull(), isNull());
         verifyNoInteractions(agentGraph);
 
         ArgumentCaptor<Map<String, Object>> inputsCaptor = ArgumentCaptor.forClass(Map.class);

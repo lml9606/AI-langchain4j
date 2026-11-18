@@ -2,6 +2,9 @@ package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.guard.OutputGuardService;
+import com.example.langchain4j.graph.qa.AnswerBudget;
+import com.example.langchain4j.graph.qa.AnswerBudgetResolver;
+import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.LlmResult;
@@ -39,13 +42,16 @@ public class GenerateNode implements NodeAction<WorkflowState> {
     private final LlmGateway llmGateway;
     private final OutputGuardService outputGuardService;
     private final PromptTemplateService promptTemplateService;
+    private final AnswerBudgetResolver answerBudgetResolver;
 
     /** 注入 LLM、输出安全审核与提示词服务。 */
     public GenerateNode(LlmGateway llmGateway, OutputGuardService outputGuardService,
-                        PromptTemplateService promptTemplateService) {
+                        PromptTemplateService promptTemplateService,
+                        AnswerBudgetResolver answerBudgetResolver) {
         this.llmGateway = llmGateway;
         this.outputGuardService = outputGuardService;
         this.promptTemplateService = promptTemplateService;
+        this.answerBudgetResolver = answerBudgetResolver;
     }
 
     /** 按意图组装 Prompt、调用模型生成回答，并执行输出安全审核。 */
@@ -60,6 +66,9 @@ public class GenerateNode implements NodeAction<WorkflowState> {
             systemPrompt = systemPrompt + promptTemplateService.resolveFormatted(
                     "SUMMARY_BLOCK", PromptTemplates.SUMMARY_BLOCK, summary);
         }
+        // 步骤2.5：按意图 + 复杂度 + 回答模式选择动态预算；复杂问题多答、简单问题短答。
+        AnswerBudget budget = answerBudgetResolver.resolve(state);
+        systemPrompt = systemPrompt + lengthNote(budget);
         // 步骤3：拼装 user prompt（重试修正指令 + 有效查询 + 检索上下文）
         String userPrompt = buildUserPrompt(state);
         // 步骤4：组装完整 messages：system + 最近 N 轮历史原文（角色消息）+ 本轮提问
@@ -69,9 +78,10 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         try {
             // 步骤5：调用 LLM 生成，并记录耗时与输出长度
             long start = System.currentTimeMillis();
-            LlmResult result = llmGateway.generate(state.model(), messages);
-            log.info("[generate] cost={}ms, intent={}, retries={}, history={}, contextLength={}, outputLength={}, tokenUsage={}, truncated={}",
-                    System.currentTimeMillis() - start, state.intent(), state.retryCount(),
+            LlmResult result = generate(state, messages, budget);
+            log.info("[generate] cost={}ms, intent={}, complexity={}, answerMode={}, budgetChars={}, budgetTokens={}, retries={}, history={}, contextLength={}, outputLength={}, tokenUsage={}, truncated={}",
+                    System.currentTimeMillis() - start, state.intent(), state.queryPlan().complexity(),
+                    state.answerMode(), budget.maxChars(), budget.maxOutputTokens(), state.retryCount(),
                     state.history().size(), state.context().length(), result.text().length(),
                     result.tokenUsage(), result.truncated());
             // 步骤5.5：输出侧审核：命中敏感词替换为拒答文案（不透出命中词，防用户绕过测试）
@@ -99,6 +109,24 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         return updates;
     }
 
+    /**
+     * 生成调用：知识问答按回答模式设置输出上限；代码生成/闲聊保持原有调用方式，
+     * 避免代码等长输出被问答预算误截断。
+     */
+    private LlmResult generate(WorkflowState state, List<ChatMessage> messages, AnswerBudget budget) {
+        return llmGateway.generate(state.model(), messages, budget.maxOutputTokens());
+    }
+
+    /** 追加动态长度约束；代码生成 budgetChars=0，不注入字数限制。 */
+    private String lengthNote(AnswerBudget budget) {
+        if (!budget.hasCharLimit()) {
+            return "";
+        }
+        return promptTemplateService.resolveFormatted(
+                "ANSWER_LENGTH_NOTE", PromptTemplates.ANSWER_LENGTH_NOTE,
+                budget.styleNote(), budget.maxChars());
+    }
+
     /** 组装 messages：system + 历史原文（user/assistant 角色）+ 本轮 user 提问 */
     private List<ChatMessage> buildMessages(WorkflowState state, String systemPrompt, String userPrompt) {
         List<ChatMessage> messages = new ArrayList<>();
@@ -122,11 +150,11 @@ public class GenerateNode implements NodeAction<WorkflowState> {
     /** 按意图选择系统提示词模板。 */
     private String selectSystemPrompt(String intent) {
         // 步骤1：代码生成意图 → 代码专用模板（提示词走配置化解析，DB 覆盖优先）
-        if (IntentNode.INTENT_CODE_GENERATE.equals(intent)) {
+        if (QaIntent.CODE_GENERATE.equals(intent)) {
             return promptTemplateService.resolve("CODE_GENERATE_SYSTEM", PromptTemplates.CODE_GENERATE_SYSTEM);
         }
         // 步骤2：闲聊意图 → 闲聊模板（无检索上下文，引导用户说出需求）
-        if (IntentNode.INTENT_CHITCHAT.equals(intent)) {
+        if (QaIntent.CHITCHAT.equals(intent)) {
             return promptTemplateService.resolve("CHITCHAT_SYSTEM", PromptTemplates.CHITCHAT_SYSTEM);
         }
         // 步骤3：其余（含默认意图）→ 知识问答模板
@@ -152,7 +180,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         if (context != null && !context.isBlank()) {
             sb.append("\n\n").append(context);
         }
-        // 步骤4：多跳超限仍信息不足时追加声明（防模型在资料缺失时脑补，明确回答边界）
+        // 步骤4：检索证据不充分时追加声明（防模型在资料缺失时脑补，明确回答边界）
         if (state.contextIncomplete()) {
             sb.append(promptTemplateService.resolve("CONTEXT_INCOMPLETE_NOTE", PromptTemplates.CONTEXT_INCOMPLETE_NOTE));
         }
