@@ -24,20 +24,6 @@ import java.util.Set;
 @Service
 public class VectorSearchService {
 
-    private static final int DEFAULT_TOP_K = 3;
-    /**
-     * 稠密通道最小相似度阈值（1 - 余弦距离，越大越相似）：低于该值视为不相关直接丢弃。
-     * 0.85 是 BGE-M3 下的严格档位，优先保证客服问答精度；若验证发现召回不足，
-     * 应基于验证集下调（如 0.6~0.7），不要盲调。
-     */
-    private static final double DEFAULT_MIN_SCORE = 0.85;
-    /** 稀疏通道最小内积阈值（已 L2 归一化即余弦）：低于该值不进融合池；稀疏余弦天然低于稠密，0.05 只滤零重叠噪声 */
-    private static final double SPARSE_MIN_SCORE = 0.05;
-    /** RRF 融合常数：经典取值 60，rank 从 1 起，决定低排名项对融合分的贡献衰减速度 */
-    private static final int RRF_K = 60;
-    /** 单路候选池大小：先宽召回再融合截断，避免单路 topK 截断丢掉融合后可排前的项 */
-    private static final int FUSION_POOL = 10;
-
     private final KnowledgeChunkMapper knowledgeChunkMapper;
     private final EmbeddingService embeddingService;
     private final SparseEmbeddingService sparseEmbeddingService;
@@ -119,14 +105,16 @@ public class VectorSearchService {
 
     /** 使用默认条数和默认可见范围检索知识块。 */
     public List<KnowledgeChunk> search(String query) {
-        return search(query, DEFAULT_TOP_K);
+        return search(query, properties.getRetrieval().getDefaultTopK());
     }
 
     /** 稠密通道：BGE-M3 嵌入 + pgvector 余弦检索；嵌入/DB 故障降级为空列表（fail-open，不拖累稀疏通道） */
     private List<KnowledgeChunk> denseSearch(String query, String userId, boolean privateOnly) {
         try {
             float[] queryVector = embeddingService.embed(query);
-            return knowledgeChunkMapper.searchSimilar(queryVector, FUSION_POOL, DEFAULT_MIN_SCORE, userId, privateOnly);
+            return knowledgeChunkMapper.searchSimilar(queryVector,
+                    properties.getRetrieval().getFusionPool(),
+                    properties.getRetrieval().getDenseMinScore(), userId, privateOnly);
         } catch (Exception e) {
             log.warn("[vector] dense search degraded, queryLength={}, reason={}", query.length(), e.getMessage());
             return List.of();
@@ -141,7 +129,9 @@ public class VectorSearchService {
                 // 查询无有效词（纯标点/停用词）：本通道无召回信号，交给稠密通道
                 return List.of();
             }
-            return knowledgeChunkMapper.searchSparse(querySparse, FUSION_POOL, SPARSE_MIN_SCORE, userId, privateOnly);
+            return knowledgeChunkMapper.searchSparse(querySparse,
+                    properties.getRetrieval().getFusionPool(),
+                    properties.getRetrieval().getSparseMinScore(), userId, privateOnly);
         } catch (Exception e) {
             log.warn("[vector] sparse search degraded, queryLength={}, reason={}", query.length(), e.getMessage());
             return List.of();
@@ -176,13 +166,14 @@ public class VectorSearchService {
     /** 单通道结果没有融合分：按排名折算同一量纲的 RRF 分，保证证据评估可比较。 */
     private List<ScoredChunk> rankOnly(List<KnowledgeChunk> chunks, int topK) {
         List<ScoredChunk> result = new ArrayList<>();
+        int rrfK = properties.getRetrieval().getRrfK();
         int rank = 1;
         for (KnowledgeChunk chunk : chunks) {
             if (result.size() >= topK) {
                 break;
             }
             if (chunk != null && chunk.getId() != null) {
-                result.add(new ScoredChunk(chunk, 1.0 / (RRF_K + rank)));
+                result.add(new ScoredChunk(chunk, 1.0 / (rrfK + rank)));
             }
             rank++;
         }
@@ -191,12 +182,13 @@ public class VectorSearchService {
 
     /** 单路累加 RRF 分：rank 从 1 递增；两路同命中同一 id 时分数叠加（共同认可的信号被放大） */
     private void accumulate(Map<Long, Double> scores, Map<Long, KnowledgeChunk> byId, List<KnowledgeChunk> chunks) {
+        int rrfK = properties.getRetrieval().getRrfK();
         int rank = 1;
         for (KnowledgeChunk chunk : chunks) {
             if (chunk == null || chunk.getId() == null) {
                 continue;
             }
-            scores.put(chunk.getId(), scores.getOrDefault(chunk.getId(), 0.0) + 1.0 / (RRF_K + rank));
+            scores.put(chunk.getId(), scores.getOrDefault(chunk.getId(), 0.0) + 1.0 / (rrfK + rank));
             byId.putIfAbsent(chunk.getId(), chunk);
             rank++;
         }
@@ -204,9 +196,9 @@ public class VectorSearchService {
 
     /**
      * 检索并父子装配上下文：命中子块 → 按 parent_id 取父块整章（同 title 相邻组拼接补长章节漏），
-     * 装配结果按预算截断后沿用【参考资料 N】标注拼接；无结果返回空串供 prompt 组装降级。
+     * 装配结果按预算截断后用空行分隔拼接；无结果返回空串供 prompt 组装降级。
      *
-     * @param topK 检索命中数（默认 {@link #DEFAULT_TOP_K}）
+     * @param topK 检索命中数（默认取 agent.retrieval.default-top-k）
      */
     public String searchContext(String query, int topK) {
         return searchContext(query, topK, false);
@@ -214,14 +206,14 @@ public class VectorSearchService {
 
     /** 使用默认条数和默认可见范围检索并组装上下文。 */
     public String searchContext(String query) {
-        return searchContext(query, DEFAULT_TOP_K, false);
+        return searchContext(query, properties.getRetrieval().getDefaultTopK(), false);
     }
 
     /**
      * 检索并父子装配上下文：命中子块 → 按 parent_id 取父块整章（同 title 相邻组拼接补长章节漏），
-     * 装配结果按预算截断后沿用【参考资料 N】标注拼接；无结果返回空串供 prompt 组装降级。
+     * 装配结果按预算截断后用空行分隔拼接；无结果返回空串供 prompt 组装降级。
      *
-     * @param topK        检索命中数（默认 {@link #DEFAULT_TOP_K}）
+     * @param topK        检索命中数（默认取 agent.retrieval.default-top-k）
      * @param privateOnly 仅检索本人知识（visibility=private）
      */
     public String searchContext(String query, int topK, boolean privateOnly) {
@@ -462,9 +454,8 @@ public class VectorSearchService {
             if (chunk == null || chunk.getContent() == null) {
                 continue;
             }
-            sb.append("【参考资料 ").append(i + 1).append("】")
-              .append(chunk.getContent()).append('\n');
+            sb.append(chunk.getContent()).append("\n\n");
         }
-        return sb.toString();
+        return sb.toString().trim();
     }
 }

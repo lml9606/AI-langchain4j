@@ -38,10 +38,12 @@ public final class PromptTemplates {
             2. 单一检索点：subQueries 输出 [primaryQuery]，complexity=simple；
             3. 多个独立实体/并列问句/需要分别核对的约束：拆成最多 %d 个可独立检索的子查询，
                complexity=compound；
-            4. 非 knowledge_qa 意图：subQueries 输出 [primaryQuery]，complexity=simple；
-            5. risk=high：资金、账户、权限、不可逆操作或安全敏感；risk=medium：多条件业务规则；
+            4. 用户要求展开、详细说明、继续上一轮回答时，primaryQuery 必须带上上一轮主题，
+               complexity=compound；
+            5. 非 knowledge_qa 意图：subQueries 输出 [primaryQuery]，complexity=simple；
+            6. risk=high：资金、账户、权限、不可逆操作或安全敏感；risk=medium：多条件业务规则；
                其他为 low；
-            6. 不要输出 confidence 字段。只输出 JSON，不要解释或代码围栏。
+            7. 不要输出 confidence 字段。只输出 JSON，不要解释或代码围栏。
             """;
 
     /** 代码生成 */
@@ -59,7 +61,8 @@ public final class PromptTemplates {
             要求：
             1. 如果提供了参考资料，必须严格基于参考资料回答，不得编造；
             2. 参考资料不足时明确说明"根据现有资料无法确定"；
-            3. 每个关键结论末尾标注来源，如【参考资料 1】；不得伪造不存在的引用编号；
+            3. 参考资料只作为回答依据，不要在正文中输出【参考资料 N】、[1] 等引用编号；
+               也不要额外生成“参考依据/来源”段落；
             4. 回答简洁、结构化，使用 Markdown 格式；
             5. 历史对话用于理解指代和延续上下文；用户要求展开、修改或继续上一轮回答时，
                必须基于上一轮回答继续说明，不能另起无关话题。
@@ -165,8 +168,10 @@ public final class PromptTemplates {
                无历史或无法判断时 newTopic=false，topic 填空字符串。
             2. 指代消解：把用户最新输入改写成不依赖历史也能理解的完整句子
                （把“它/这个/那个/上面/第二个”等替换为具体所指），不得改变用户原意；
-               追问类输入必须把上一轮用户问题或助手回答的主题显式写进 rewritten，
-               不能只输出“详细说说”本身；
+               指代对象可能来自用户此前发言，也可能来自助手此前回答；
+               必须结合带角色的历史消息，以最近一次明确出现的实体为准；
+               无法唯一确定指代对象时，保留原句、newTopic=false，不得猜测或编造；
+               追问类输入必须把被追问的主题显式写进 rewritten，不能只输出“详细说说”本身；
                若最新输入本身已完整、无需历史即可理解，原样输出。
             3. 结构保留：原句中的每个并列实体/并列问句必须逐一显式保留，
                不得合并、省略或概括（下游要按并列结构拆分检索）。

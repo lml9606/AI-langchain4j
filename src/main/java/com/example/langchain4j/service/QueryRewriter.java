@@ -1,5 +1,6 @@
 package com.example.langchain4j.service;
 
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.Message;
@@ -26,21 +27,16 @@ import java.util.Map;
 @Service
 public class QueryRewriter {
 
-    /** 改写输出长度防御系数：输出超过原句 3 倍 + 200 字视为异常（大概率带了解释或废话） */
-    private static final int OUTPUT_LENGTH_SLACK = 200;
-    /** 明确要求展开上一轮内容的追问标记：这类输入必须继承上一轮话题，不能被当成新话题。 */
-    private static final List<String> DETAIL_FOLLOW_UP_MARKERS = List.of(
-            "详细说说", "详细讲", "详细一点", "展开说说", "展开讲", "展开一下",
-            "具体说说", "具体讲", "具体点", "再多说", "再说说", "继续说",
-            "举个例子", "深入说说", "深入讲");
-
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
+    private final AgentProperties properties;
 
     /** 注入 LLM 网关与提示词服务。 */
-    public QueryRewriter(LlmGateway llmGateway, PromptTemplateService promptTemplateService) {
+    public QueryRewriter(LlmGateway llmGateway, PromptTemplateService promptTemplateService,
+                         AgentProperties properties) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
+        this.properties = properties;
     }
 
     /**
@@ -82,24 +78,14 @@ public class QueryRewriter {
             //        字段缺失/类型错（如 newTopic 为字符串）不致整体失败：asText/asBoolean 对任何类型都安全
             // rewritten 防御：空或异常冗长（模型可能带解释废话）→ 降级原句
             String rewritten = clean(node.path("rewritten").asText(""));
-            if (rewritten.isEmpty() || rewritten.length() > cleaned.length() * 3 + OUTPUT_LENGTH_SLACK) {
+            if (rewritten.isEmpty()
+                    || rewritten.length() > cleaned.length() * 3 + properties.getLimits().getRewriteOutputSlack()) {
                 log.warn("[rewrite] invalid rewritten length={}, fallback to original query", rewritten.length());
                 rewritten = cleaned;
             }
             // topic 防御：清洗后为空则视为未判断，由调用方段解析兜底
             String topic = clean(node.path("topic").asText(""));
             boolean newTopic = node.path("newTopic").asBoolean(false);
-            if (isDetailFollowUp(cleaned)) {
-                // 保底：明确的“展开/详细说说”绝不应新建话题段；模型漏判时强制留在上一段
-                newTopic = false;
-                // 模型原样返回追问语（没有完成指代消解）时，用上一轮用户问题补锚点，避免检索跑偏
-                if (rewritten.equals(cleaned)) {
-                    String anchor = lastUserQuestion(history);
-                    if (!anchor.isBlank()) {
-                        rewritten = anchor + "，" + cleaned;
-                    }
-                }
-            }
             log.info("[rewrite] done, queryLength={}, rewrittenLength={}, topicPresent={}, newTopic={}, history={}, costMs={}",
                     cleaned.length(), rewritten.length(), !topic.isBlank(),
                     newTopic, history.size(),
@@ -141,37 +127,6 @@ public class QueryRewriter {
             return "";
         }
         return text.replaceAll("[\\p{Cntrl}]", " ").trim();
-    }
-
-    /** 是否为明确要求展开上一轮内容的追问（如“详细说说”“展开讲讲”）。 */
-    private boolean isDetailFollowUp(String text) {
-        if (text == null || text.isBlank()) {
-            return false;
-        }
-        for (String marker : DETAIL_FOLLOW_UP_MARKERS) {
-            if (text.contains(marker)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** 取历史中最后一条用户问题，作为追问无法解析指代时的检索锚点。 */
-    private String lastUserQuestion(List<Map<String, String>> history) {
-        if (history == null) {
-            return "";
-        }
-        for (int i = history.size() - 1; i >= 0; i--) {
-            Map<String, String> item = history.get(i);
-            if (item == null || !Message.ROLE_USER.equals(item.get("role"))) {
-                continue;
-            }
-            String content = item.get("content");
-            if (content != null && !content.isBlank()) {
-                return content.trim();
-            }
-        }
-        return "";
     }
 
 }

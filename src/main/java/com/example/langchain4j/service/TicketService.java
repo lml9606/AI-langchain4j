@@ -2,6 +2,7 @@ package com.example.langchain4j.service;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.repository.entity.Ticket;
 import com.example.langchain4j.repository.mapper.TicketMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -23,13 +24,12 @@ import java.util.concurrent.ThreadLocalRandom;
 @Service
 public class TicketService {
 
-    private static final int DEFAULT_LIMIT = 50;
-    private static final int MAX_LIMIT = 200;
-
     private final TicketMapper ticketMapper;
+    private final AgentProperties properties;
 
-    public TicketService(TicketMapper ticketMapper) {
+    public TicketService(TicketMapper ticketMapper, AgentProperties properties) {
         this.ticketMapper = ticketMapper;
+        this.properties = properties;
     }
 
     /**
@@ -70,18 +70,18 @@ public class TicketService {
 
     /** 我的工单 */
     public List<Ticket> myTickets(String userId, int limit) {
-        int bounded = Math.min(Math.max(limit, 1), MAX_LIMIT);
+        int bounded = Math.min(Math.max(limit, 1), properties.getLimits().getMaxTicketLimit());
         List<Ticket> list = ticketMapper.selectByUserId(userId, bounded);
         return list == null ? List.of() : list;
     }
 
     public List<Ticket> myTickets(String userId) {
-        return myTickets(userId, DEFAULT_LIMIT);
+        return myTickets(userId, properties.getLimits().getDefaultTicketLimit());
     }
 
     /** 运营视角：按状态列工单（status 为空 = 全部） */
     public List<Ticket> listByStatus(String status, int limit) {
-        int bounded = Math.min(Math.max(limit, 1), MAX_LIMIT);
+        int bounded = Math.min(Math.max(limit, 1), properties.getLimits().getMaxTicketLimit());
         List<Ticket> list = ticketMapper.selectByStatus(status, bounded);
         return list == null ? List.of() : list;
     }

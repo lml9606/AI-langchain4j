@@ -125,14 +125,14 @@ class ValidateNodeTest {
     }
 
     @Test
-    @DisplayName("高证据 + 低风险 + 有引用 → 只走规则层，跳过多余 LLM 质检")
-    void skipLlmWhenEvidenceAndCitationAreStrong() {
+    @DisplayName("高证据 + 低风险 + 高支撑 → 只走规则层，跳过多余 LLM 质检")
+    void skipLlmWhenEvidenceIsStrong() {
         when(evidenceAssessor.answerSupport(
-                "JVM 内存模型包含堆和栈【参考资料 1】", "JVM 内存模型包含堆、栈、方法区。"))
+                "JVM 内存模型包含堆和栈", "JVM 内存模型包含堆、栈、方法区。"))
                 .thenReturn(0.8);
 
         Map<String, Object> updates = node.apply(
-                groundedStateOf("JVM 内存模型包含堆和栈【参考资料 1】"));
+                groundedStateOf("JVM 内存模型包含堆和栈"));
 
         WorkflowState.Validation validation = (WorkflowState.Validation) updates.get(WorkflowState.VALIDATION);
         assertThat(validation.validated()).isTrue();

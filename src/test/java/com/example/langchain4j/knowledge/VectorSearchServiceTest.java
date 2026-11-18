@@ -315,4 +315,16 @@ class VectorSearchServiceTest {
         assertThat(result).hasSize(1);
         assertThat(result.get(0).getContent()).isEqualTo("片段一\n\n片段二");
     }
+
+    @Test
+    @DisplayName("上下文拼接 → 不输出【参考资料 N】编号，只用空行分隔")
+    void buildContextHasNoReferenceMarkers() {
+        KnowledgeChunk first = parent(1L, "## 标题A", "第一段资料");
+        KnowledgeChunk second = parent(2L, "## 标题B", "第二段资料");
+
+        String context = service.buildContext(List.of(first, second));
+
+        assertThat(context).isEqualTo("第一段资料\n\n第二段资料");
+        assertThat(context).doesNotContain("参考资料");
+    }
 }

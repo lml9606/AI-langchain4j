@@ -1,5 +1,6 @@
 package com.example.langchain4j.graph.task.nodes;
 
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.guard.OutputGuardService;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
@@ -37,7 +38,7 @@ class TaskAnswerNodeTest {
 
     @BeforeEach
     void setUp() {
-        node = new TaskAnswerNode(llmGateway, outputGuardService, promptTemplateService);
+        node = new TaskAnswerNode(llmGateway, outputGuardService, promptTemplateService, new AgentProperties());
         lenient().when(promptTemplateService.resolve(anyString(), anyString()))
                 .thenAnswer(invocation -> invocation.getArgument(1));
         lenient().when(outputGuardService.blocked(anyString())).thenReturn(false);

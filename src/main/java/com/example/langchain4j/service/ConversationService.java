@@ -3,6 +3,7 @@ package com.example.langchain4j.service;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.util.TokenEstimator;
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.repository.entity.Conversation;
 import com.example.langchain4j.repository.entity.Message;
 import com.example.langchain4j.repository.mapper.ConversationMapper;
@@ -25,16 +26,15 @@ import java.util.UUID;
 @Service
 public class ConversationService {
 
-    private static final int TITLE_MAX_LENGTH = 30;
-    private static final int DEFAULT_MESSAGE_LIMIT = 50;
-    private static final int MAX_MESSAGE_LIMIT = 200;
-
     private final ConversationMapper conversationMapper;
     private final MessageMapper messageMapper;
+    private final AgentProperties properties;
 
-    public ConversationService(ConversationMapper conversationMapper, MessageMapper messageMapper) {
+    public ConversationService(ConversationMapper conversationMapper, MessageMapper messageMapper,
+                               AgentProperties properties) {
         this.conversationMapper = conversationMapper;
         this.messageMapper = messageMapper;
+        this.properties = properties;
     }
 
     /**
@@ -50,8 +50,7 @@ public class ConversationService {
             Conversation existing = conversationMapper.selectByConversationId(conversationId);
             if (existing != null) {
                 if (!userId.equals(existing.getUserId())) {
-                    log.warn("[conversation] forbid cross-user access, conversation={}, user={}",
-                            conversationId, userId);
+                    log.warn("[conversation] forbid cross-user access, conversation={}, user={}", conversationId, userId);
                     throw new BizException(ErrorCode.FORBIDDEN, "无权访问该会话");
                 }
                 return existing.getConversationId();
@@ -121,7 +120,7 @@ public class ConversationService {
 
     /** 查询会话历史消息（倒序取 limit 条） */
     public List<Message> listMessages(String conversationId, int limit) {
-        int bounded = Math.min(Math.max(limit, 1), MAX_MESSAGE_LIMIT);
+        int bounded = Math.min(Math.max(limit, 1), properties.getLimits().getMaxMessageLimit());
         List<Message> messages = messageMapper.selectByConversationId(conversationId, bounded);
         if (messages == null) {
             return List.of();
@@ -130,7 +129,7 @@ public class ConversationService {
     }
 
     public List<Message> listMessages(String conversationId) {
-        return listMessages(conversationId, DEFAULT_MESSAGE_LIMIT);
+        return listMessages(conversationId, properties.getLimits().getDefaultMessageLimit());
     }
 
     /**
@@ -140,7 +139,7 @@ public class ConversationService {
      * 对话流（可能跨话题），与生成视图（当前话题段内原文）是两条独立路径，互不混用。
      */
     public List<Map<String, String>> rewriteHistoryView(String conversationId, int limit, int itemMaxLength) {
-        int bounded = Math.min(Math.max(limit, 1), MAX_MESSAGE_LIMIT);
+        int bounded = Math.min(Math.max(limit, 1), properties.getLimits().getMaxMessageLimit());
         // 多取一条：最近 N+1 条的最后一条即当前刚保存的用户消息，取完排除，避免与 query 重复注入
         List<Message> messages = messageMapper.selectRecentByConversationId(conversationId, bounded + 1);
         if (messages == null || messages.isEmpty()) {
@@ -172,7 +171,7 @@ public class ConversationService {
     public List<Map<String, String>> generationHistoryView(String conversationId, int segmentId,
                                                            int maxTokens, int itemMaxLength,
                                                            int candidateLimit) {
-        int bounded = Math.min(Math.max(candidateLimit, 1), MAX_MESSAGE_LIMIT);
+        int bounded = Math.min(Math.max(candidateLimit, 1), properties.getLimits().getMaxMessageLimit());
         List<Message> messages = messageMapper.selectRecentBySegment(conversationId, segmentId, bounded);
         if (messages == null || messages.isEmpty()) {
             return List.of();
@@ -213,8 +212,7 @@ public class ConversationService {
     public void requireOwnership(String conversationId, String userId) {
         Conversation conversation = getConversation(conversationId);
         if (!userId.equals(conversation.getUserId())) {
-            log.warn("[conversation] forbid cross-user access, conversation={}, user={}",
-                    conversationId, userId);
+            log.warn("[conversation] forbid cross-user access, conversation={}, user={}", conversationId, userId);
             throw new BizException(ErrorCode.FORBIDDEN, "无权访问该会话");
         }
     }
@@ -225,10 +223,11 @@ public class ConversationService {
             return "新会话";
         }
         String cleaned = firstQuery.replaceAll("[\\p{Cntrl}]", " ").trim();
-        if (cleaned.length() <= TITLE_MAX_LENGTH) {
+        int titleMaxLength = properties.getLimits().getConversationTitleMaxLength();
+        if (cleaned.length() <= titleMaxLength) {
             return cleaned;
         }
-        return cleaned.substring(0, TITLE_MAX_LENGTH) + "...";
+        return cleaned.substring(0, titleMaxLength) + "...";
     }
 
     /** 历史单条消息超长截断（保留头部，防御超长历史撑爆上下文窗口） */

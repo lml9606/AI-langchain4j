@@ -1,6 +1,7 @@
 package com.example.langchain4j.service;
 
 import com.example.langchain4j.common.util.JsonUtil;
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.repository.entity.GraphExecution;
 import com.example.langchain4j.repository.mapper.GraphExecutionMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -19,13 +20,12 @@ import java.util.UUID;
 @Service
 public class AuditService {
 
-    /** 审计 JSON 最大长度：超出截断，防单条记录撑爆 DB 字段 */
-    private static final int MAX_AUDIT_JSON_LENGTH = 4000;
-
     private final GraphExecutionMapper graphExecutionMapper;
+    private final AgentProperties properties;
 
-    public AuditService(GraphExecutionMapper graphExecutionMapper) {
+    public AuditService(GraphExecutionMapper graphExecutionMapper, AgentProperties properties) {
         this.graphExecutionMapper = graphExecutionMapper;
+        this.properties = properties;
     }
 
     /**
@@ -77,9 +77,10 @@ public class AuditService {
 
     /** 审计 JSON 超长截断（保留头部 + 截断标记），防单条审计记录撑爆 DB 字段 */
     private String truncate(String json) {
-        if (json == null || json.length() <= MAX_AUDIT_JSON_LENGTH) {
+        int maxLength = properties.getLimits().getAuditJsonMaxLength();
+        if (json == null || json.length() <= maxLength) {
             return json;
         }
-        return json.substring(0, MAX_AUDIT_JSON_LENGTH) + "...[truncated]";
+        return json.substring(0, maxLength) + "...[truncated]";
     }
 }

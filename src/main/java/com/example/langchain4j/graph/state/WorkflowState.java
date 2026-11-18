@@ -1,5 +1,6 @@
 package com.example.langchain4j.graph.state;
 
+import com.example.langchain4j.common.constant.ChatOptions;
 import org.bsc.langgraph4j.state.AgentState;
 
 import java.util.ArrayList;
@@ -553,14 +554,14 @@ public class WorkflowState extends AgentState {
 
     /** 回答模式：服务层归一后注入，非法值不会出现在图内；缺省 auto（旧 checkpoint 兼容） */
     public String answerMode() {
-        String mode = value(ANSWER_MODE, "auto");
-        return "deep".equalsIgnoreCase(mode) ? "deep" : "auto";
+        String mode = value(ANSWER_MODE, ChatOptions.ANSWER_MODE_AUTO);
+        return ChatOptions.normalizeAnswerMode(mode, ChatOptions.ANSWER_MODE_AUTO);
     }
 
     /** 检索可见范围：服务层归一后注入；缺省 all（旧 checkpoint 兼容） */
     public String visibility() {
-        String scope = value(VISIBILITY, "all");
-        return "private".equalsIgnoreCase(scope) ? "private" : "all";
+        String scope = value(VISIBILITY, ChatOptions.VISIBILITY_ALL);
+        return ChatOptions.normalizeVisibility(scope, ChatOptions.VISIBILITY_ALL);
     }
 
     /** 任务实体槽位：checkpoint 反序列化后可能为 Map，统一转成字符串键值对 */

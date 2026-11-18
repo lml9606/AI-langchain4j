@@ -1,6 +1,7 @@
 package com.example.langchain4j.graph.task.nodes;
 
 import com.example.langchain4j.common.util.JsonUtil;
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.tool.api.ToolContext;
 import com.example.langchain4j.tool.api.ToolEvidence;
@@ -27,18 +28,17 @@ import java.util.Set;
 @Component
 public class TaskExecuteNode implements NodeAction<WorkflowState> {
 
-    private static final int MAX_TRACE = 8;
-    private static final int MAX_EVIDENCE = 8;
-    private static final int MAX_SUMMARY = 500;
     /** 观察判定：这些错误继续执行后续步骤也没有意义，直接停止，避免浪费调用配额 */
     private static final Set<String> FATAL_ERRORS =
             Set.of("FORBIDDEN_WRITE", "CONFIRMATION_REQUIRED", "UNKNOWN_TOOL", "RATE_LIMITED", "TIMEOUT");
 
     private final ToolExecutor toolExecutor;
+    private final AgentProperties properties;
 
     /** 注入统一工具执行器。 */
-    public TaskExecuteNode(ToolExecutor toolExecutor) {
+    public TaskExecuteNode(ToolExecutor toolExecutor, AgentProperties properties) {
         this.toolExecutor = toolExecutor;
+        this.properties = properties;
     }
 
     /** 按计划顺序调用工具，收集调用轨迹与证据；致命错误时提前停止。 */
@@ -53,7 +53,7 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
 
         // 步骤1：按计划顺序执行；每一步的结构化结果都写入 trace，成功步骤同时抽取证据
         for (Map<String, Object> step : state.taskPlan()) {
-            if (trace.size() >= MAX_TRACE) {
+            if (trace.size() >= properties.getLimits().getTaskTraceMaxEntries()) {
                 break;
             }
             String tool = String.valueOf(step.get("tool"));
@@ -66,7 +66,7 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
             traceItem.put("args", rawArgs == null ? Map.of() : rawArgs);
             traceItem.put("purpose", step.get("purpose"));
             traceItem.put("success", result.success());
-            traceItem.put("summary", truncate(result.summary(), MAX_SUMMARY));
+            traceItem.put("summary", truncate(result.summary(), properties.getLimits().getTaskSummaryMaxLength()));
             traceItem.put("errorCode", result.errorCode());
             traceItem.put("costMs", result.costMs());
             trace.add(traceItem);
@@ -79,14 +79,14 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
 
             if (result.success()) {
                 for (ToolEvidence item : result.evidence()) {
-                    if (evidence.size() >= MAX_EVIDENCE) {
+                    if (evidence.size() >= properties.getLimits().getTaskEvidenceMaxEntries()) {
                         break;
                     }
                     Map<String, Object> evidenceItem = new LinkedHashMap<>();
                     evidenceItem.put("type", item.type());
                     evidenceItem.put("sourceId", item.sourceId());
                     evidenceItem.put("title", item.title());
-                    evidenceItem.put("snippet", truncate(item.snippet(), MAX_SUMMARY));
+                    evidenceItem.put("snippet", truncate(item.snippet(), properties.getLimits().getTaskSummaryMaxLength()));
                     evidenceItem.put("score", item.score());
                     evidence.add(evidenceItem);
                 }

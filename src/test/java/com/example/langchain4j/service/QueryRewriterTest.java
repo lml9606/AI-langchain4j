@@ -1,5 +1,6 @@
 package com.example.langchain4j.service;
 
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.service.model.RewriteResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -7,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -15,6 +17,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -33,7 +36,7 @@ class QueryRewriterTest {
 
     @BeforeEach
     void setUp() {
-        rewriter = new QueryRewriter(llmGateway, promptTemplateService);
+        rewriter = new QueryRewriter(llmGateway, promptTemplateService, new AgentProperties());
     }
 
     @Test
@@ -73,19 +76,24 @@ class QueryRewriterTest {
     }
 
     @Test
-    @DisplayName("详细说说 → 原样返回时补上一轮问题锚点，并强制沿用上一话题")
-    void repairUnresolvedDetailFollowUp() throws Exception {
+    @DisplayName("追问指代来自助手回答 → 模型输入包含双方历史并由模型完成消解")
+    void rewriteReferentFromAssistantAnswer() throws Exception {
         when(promptTemplateService.resolve(anyString(), anyString()))
                 .thenAnswer(invocation -> invocation.getArgument(1));
         when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
-                .thenReturn(MAPPER.readTree("{\"rewritten\":\"详细说说\",\"topic\":\"\",\"newTopic\":true}"));
+                .thenReturn(MAPPER.readTree("{\"rewritten\":\"ArrayList 的扩容机制是什么\",\"topic\":\"Java 集合\",\"newTopic\":false}"));
 
-        RewriteResult result = rewriter.rewrite("详细说说", List.of(
-                Map.of("role", "user", "content", "equals 和 == 有什么区别"),
-                Map.of("role", "assistant", "content", "== 比较地址，equals 重写后比较内容")),
-                List.of("equals"), "test-model");
+        RewriteResult result = rewriter.rewrite("它的扩容机制呢", List.of(
+                Map.of("role", "user", "content", "List 和 ArrayList 有什么区别"),
+                Map.of("role", "assistant", "content", "ArrayList 默认容量是 10，扩容为原来的 1.5 倍")),
+                List.of("Java 集合"), "test-model");
 
-        assertThat(result.rewritten()).isEqualTo("equals 和 == 有什么区别，详细说说");
+        ArgumentCaptor<String> userPrompt = ArgumentCaptor.forClass(String.class);
+        verify(llmGateway).generateJsonNode(anyString(), anyString(), userPrompt.capture(), anyString());
+        assertThat(userPrompt.getValue())
+                .contains("[用户] List 和 ArrayList 有什么区别")
+                .contains("[助手] ArrayList 默认容量是 10，扩容为原来的 1.5 倍");
+        assertThat(result.rewritten()).isEqualTo("ArrayList 的扩容机制是什么");
         assertThat(result.newTopic()).isFalse();
     }
 

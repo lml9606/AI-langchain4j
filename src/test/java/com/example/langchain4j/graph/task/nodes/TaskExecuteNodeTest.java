@@ -1,5 +1,6 @@
 package com.example.langchain4j.graph.task.nodes;
 
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.tool.api.ToolContext;
 import com.example.langchain4j.tool.api.ToolEvidence;
@@ -36,7 +37,7 @@ class TaskExecuteNodeTest {
 
     @BeforeEach
     void setUp() {
-        node = new TaskExecuteNode(toolExecutor);
+        node = new TaskExecuteNode(toolExecutor, new AgentProperties());
     }
 
     private WorkflowState stateWithPlan() {

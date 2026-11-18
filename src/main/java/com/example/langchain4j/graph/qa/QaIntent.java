@@ -14,7 +14,8 @@ public final class QaIntent {
     public static final String TASK = "task";
     public static final String CHITCHAT = "chitchat";
     public static final String REJECT = "reject";
-    public static final String DEFAULT = KNOWLEDGE_QA;
+    /** 分类失败/未知值兜底：走简单对话，不检索、不调用工具，风险最低。 */
+    public static final String DEFAULT = CHITCHAT;
 
     private static final Set<String> VALID = Set.of(
             CODE_GENERATE, KNOWLEDGE_QA, TASK, CHITCHAT, REJECT);
@@ -22,7 +23,7 @@ public final class QaIntent {
     private QaIntent() {
     }
 
-    /** 模型输出白名单校验：未知值统一降级为知识问答，避免脏值打断主链路。 */
+    /** 模型输出白名单校验：未知值统一降级为简单对话，避免误检索或误调工具。 */
     public static String normalize(String intent) {
         String value = intent == null ? "" : intent.trim();
         return VALID.contains(value) ? value : DEFAULT;

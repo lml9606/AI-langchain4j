@@ -29,15 +29,6 @@ import java.util.List;
 @Service
 public class SummaryService {
 
-    /** 摘要输入单条消息截断长度：压缩只看要点，全文输入浪费 token */
-    private static final int MAX_INPUT_ITEM_LENGTH = 2000;
-    /** 单次任务最多处理的批次数：防异常情况下任务无限循环 */
-    private static final int MAX_TASK_LOOPS = 3;
-    /** 摘要输出最短长度下限：低于视为异常输出（LLM 返回垃圾），拒绝采纳防覆盖丢要点 */
-    private static final int MIN_REFINED_LENGTH = 50;
-    /** 缩水比例：重写结果短于已有摘要的 1/N 视为异常（正常重写合并新增后不应显著变短） */
-    private static final int MIN_RETAIN_RATIO = 3;
-
     private final SummaryMapper summaryMapper;
     private final MessageMapper messageMapper;
     private final LlmGateway llmGateway;
@@ -98,7 +89,7 @@ public class SummaryService {
     private void summarizeLoop(String conversationId, int segmentId) {
         int maxMessages = properties.getHistory().getSummaryMaxMessagesPerRun();
         int maxLength = properties.getHistory().getSummaryMaxLength();
-        for (int loop = 0; loop < MAX_TASK_LOOPS; loop++) {
+        for (int loop = 0; loop < properties.getHistory().getSummaryMaxTaskLoops(); loop++) {
             ConversationSummary latest = findSegment(conversationId, segmentId);
             if (latest == null || latest.getStartMessageId() == null) {
                 return;
@@ -149,7 +140,7 @@ public class SummaryService {
      * 输出为去重后的完整摘要，由调用方做超长防御截断。
      *
      * @param segment  当前段记录（取其已有摘要 content 作为重写上下文）
-     * @param messages 本批待压缩消息（正序，单条超 {@link #MAX_INPUT_ITEM_LENGTH} 字截断）
+     * @param messages 本批待压缩消息（正序，单条超配置上限字截断）
      * @return 重写后的完整摘要文本（控制字符已清洗）；LLM 失败时返回空串
      */
     private String generateRefined(ConversationSummary segment, List<Message> messages) {
@@ -159,8 +150,9 @@ public class SummaryService {
                 continue;
             }
             String content = m.getContent();
-            if (content.length() > MAX_INPUT_ITEM_LENGTH) {
-                content = content.substring(0, MAX_INPUT_ITEM_LENGTH) + "...[截断]";
+            int maxItemLength = properties.getHistory().getSummaryMaxInputItemLength();
+            if (content.length() > maxItemLength) {
+                content = content.substring(0, maxItemLength) + "...[截断]";
             }
             sb.append(Message.ROLE_USER.equals(m.getRole()) ? "[用户] " : "[助手] ")
               .append(content).append('\n');
@@ -186,11 +178,11 @@ public class SummaryService {
      * @return true=异常输出应拒绝采纳；false=通过校验可覆盖
      */
     private boolean isSuspicious(String refined, String existing) {
-        if (refined.length() < MIN_REFINED_LENGTH) {
+        if (refined.length() < properties.getHistory().getSummaryMinRefinedLength()) {
             return true;
         }
         return existing != null && !existing.isBlank()
-                && refined.length() < existing.length() / MIN_RETAIN_RATIO;
+                && refined.length() < existing.length() / properties.getHistory().getSummaryMinRetainRatio();
     }
 
     /**

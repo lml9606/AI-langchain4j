@@ -1,6 +1,7 @@
 package com.example.langchain4j.graph.task.nodes;
 
 import com.example.langchain4j.common.exception.BizException;
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.guard.OutputGuardService;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
@@ -25,20 +26,20 @@ import java.util.Map;
 @Component
 public class TaskAnswerNode implements NodeAction<WorkflowState> {
 
-    private static final int MAX_EVIDENCE = 5;
-    private static final int MAX_SNIPPET = 300;
-
     private final LlmGateway llmGateway;
     private final OutputGuardService outputGuardService;
     private final PromptTemplateService promptTemplateService;
+    private final AgentProperties properties;
 
     /** 注入 LLM、输出安全审核与提示词服务。 */
     public TaskAnswerNode(LlmGateway llmGateway,
                           OutputGuardService outputGuardService,
-                          PromptTemplateService promptTemplateService) {
+                          PromptTemplateService promptTemplateService,
+                          AgentProperties properties) {
         this.llmGateway = llmGateway;
         this.outputGuardService = outputGuardService;
         this.promptTemplateService = promptTemplateService;
+        this.properties = properties;
     }
 
     /** 基于工具轨迹和证据生成回答，计算置信度并统一追加参考依据。 */
@@ -118,12 +119,12 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
         } else {
             int index = 1;
             for (Map<String, Object> item : evidence) {
-                if (index > MAX_EVIDENCE) {
+                if (index > maxEvidence()) {
                     break;
                 }
                 builder.append('[').append(index++).append("] ")
                         .append(item.get("title")).append("：")
-                        .append(truncate(String.valueOf(item.get("snippet")), MAX_SNIPPET))
+                        .append(truncate(String.valueOf(item.get("snippet")), maxSnippet()))
                         .append('\n');
             }
         }
@@ -136,11 +137,11 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
                                        List<Map<String, Object>> evidence) {
         if (!evidence.isEmpty()) {
             return "已查询到相关业务数据，关键结果如下：\n\n"
-                    + truncate(String.valueOf(evidence.get(0).get("snippet")), MAX_SNIPPET);
+                    + truncate(String.valueOf(evidence.get(0).get("snippet")), maxSnippet());
         }
         if (!trace.isEmpty()) {
             return "本次查询未返回有效数据。\n\n"
-                    + truncate(String.valueOf(trace.get(0).get("summary")), MAX_SNIPPET);
+                    + truncate(String.valueOf(trace.get(0).get("summary")), maxSnippet());
         }
         return "未查询到相关业务数据，请确认查询条件或稍后重试。";
     }
@@ -157,7 +158,7 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
         builder.append("\n\n**参考依据**\n");
         int index = 1;
         for (Map<String, Object> item : evidence) {
-            if (index > MAX_EVIDENCE) {
+            if (index > maxEvidence()) {
                 break;
             }
             builder.append(index++).append(". ")
@@ -195,5 +196,13 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
             return "";
         }
         return text.length() <= max ? text : text.substring(0, max) + "...";
+    }
+
+    private int maxEvidence() {
+        return properties.getLimits().getTaskAnswerMaxEvidence();
+    }
+
+    private int maxSnippet() {
+        return properties.getLimits().getTaskAnswerMaxSnippet();
     }
 }

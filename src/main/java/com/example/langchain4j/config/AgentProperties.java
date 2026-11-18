@@ -1,5 +1,6 @@
 package com.example.langchain4j.config;
 
+import com.example.langchain4j.common.constant.ChatOptions;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
@@ -62,6 +63,60 @@ public class AgentProperties {
     /** 单次图执行整体超时（秒）；超时即中止本轮：取消后台任务并返回降级应答，一问一答照常闭环，用户可直接重发 */
     private int executionTimeoutSeconds = 240;
 
+    /** 跨节点通用运行上限：输入/输出/审计/候选集等，避免散落在各节点的魔法值 */
+    private Limits limits = new Limits();
+
+    /** 对话请求默认选项：客户端未传或传非法值时使用 */
+    private RequestOptions request = new RequestOptions();
+
+    @Data
+    public static class RequestOptions {
+        /** 默认回答模式：auto（标准链路）/ deep（深度链路） */
+        private String defaultAnswerMode = ChatOptions.ANSWER_MODE_AUTO;
+        /** 默认检索范围：all（公共+本人）/ private（仅本人） */
+        private String defaultVisibility = ChatOptions.VISIBILITY_ALL;
+    }
+
+    @Data
+    public static class Limits {
+        /** 入口单条输入最大字符数（与 Controller 校验保持一致） */
+        private int maxQueryLength = 4000;
+        /** 检索查询单条最大字符数（意图规划输出防御） */
+        private int maxRetrievalQueryLength = 400;
+        /** 质检认为“过短”的回答最小字符数 */
+        private int minResultLength = 5;
+        /** 质检失败原因写回状态时的最大字符数 */
+        private int maxValidationReasonLength = 200;
+        /** 生成视图候选消息条数上限 */
+        private int generationCandidateLimit = 40;
+        /** assistant 检索上下文快照截断上限（仅排查取证） */
+        private int contextSnapshotMax = 1200;
+        /** 会话标题最大字符数 */
+        private int conversationTitleMaxLength = 30;
+        /** 会话历史默认返回条数 */
+        private int defaultMessageLimit = 50;
+        /** 会话历史最大返回条数 */
+        private int maxMessageLimit = 200;
+        /** 任务回答最多展示的证据条数 */
+        private int taskAnswerMaxEvidence = 5;
+        /** 任务回答证据片段最大字符数 */
+        private int taskAnswerMaxSnippet = 300;
+        /** 任务执行最多保留的轨迹条数 */
+        private int taskTraceMaxEntries = 8;
+        /** 任务执行最多保留的证据条数 */
+        private int taskEvidenceMaxEntries = 8;
+        /** 任务轨迹/证据摘要最大字符数 */
+        private int taskSummaryMaxLength = 500;
+        /** 审计 JSON 单字段最大字符数 */
+        private int auditJsonMaxLength = 4000;
+        /** 改写结果相对原句允许的额外字符数（防模型输出解释废话） */
+        private int rewriteOutputSlack = 200;
+        /** 工单列表默认返回条数 */
+        private int defaultTicketLimit = 50;
+        /** 工单列表最大返回条数 */
+        private int maxTicketLimit = 200;
+    }
+
     @Data
     public static class Checkpoint {
         /** PostgresSaver 不可用时是否降级内存 saver */
@@ -88,6 +143,14 @@ public class AgentProperties {
         private int summaryMaxMessagesPerRun = 40;
         /** 段摘要最大字符数（超长截断，防止摘要本身膨胀） */
         private int summaryMaxLength = 4000;
+        /** 摘要输入单条消息截断长度 */
+        private int summaryMaxInputItemLength = 2000;
+        /** 单次摘要任务最多批次数（防异常循环） */
+        private int summaryMaxTaskLoops = 3;
+        /** 摘要输出最短长度（低于视为异常输出） */
+        private int summaryMinRefinedLength = 50;
+        /** 摘要缩水比例：低于已有摘要的 1/N 视为异常 */
+        private int summaryMinRetainRatio = 3;
     }
 
     @Data
@@ -114,6 +177,10 @@ public class AgentProperties {
     public static class Llm {
         private int timeoutSeconds = 60;
         private int maxRetries = 3;
+        /** 重试退避基数（毫秒）：第 N 次退避 = base * 2^N */
+        private long backoffBaseMs = 1000L;
+        /** 重试退避随机抖动上限（毫秒），避免多实例同时重试 */
+        private long backoffJitterMs = 500L;
         /** 结构化输出（generateJson）最大输出 token 数：JSON 节点输出短小，1024 足够；触顶即截断（finishReason=LENGTH） */
         private int maxOutputTokens = 1024;
         /** 自然语言回答预算：按意图/复杂度/模式动态选择字数与输出 token 上限 */
@@ -230,6 +297,21 @@ public class AgentProperties {
      */
     @Data
     public static class Retrieval {
+        /** 未显式传 topK 时的默认召回条数 */
+        private int defaultTopK = 3;
+
+        /** 稠密通道最小相似度（1-余弦距离）：低于该值视为不相关；需按验证集校准 */
+        private double denseMinScore = 0.85;
+
+        /** 稀疏通道最小内积（已归一化）：稀疏分数天然低于稠密，默认只过滤零重叠噪声 */
+        private double sparseMinScore = 0.05;
+
+        /** RRF 融合常数：经典取值 60，rank 从 1 起 */
+        private int rrfK = 60;
+
+        /** 单路宽召回候选池大小：先宽召回再融合截断 */
+        private int fusionPool = 10;
+
         /** 父子装配上下文预算（字符）：命中子块 → 父块（同 title 组拼接）的总长上限 */
         private int contextBudget = 5000;
         /** 单次检索最多装配的父块组数：防止一个主题占满上下文，给多主题召回留预算 */

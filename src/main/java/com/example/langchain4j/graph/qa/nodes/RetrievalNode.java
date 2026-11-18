@@ -1,5 +1,6 @@
 package com.example.langchain4j.graph.qa.nodes;
 
+import com.example.langchain4j.common.constant.ChatOptions;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.qa.EvidenceAssessor;
 import com.example.langchain4j.graph.state.WorkflowState;
@@ -136,7 +137,7 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
     /** auto 使用完整检索候选数，deep 放宽。 */
     private int topK(WorkflowState state) {
         AgentProperties.Retrieval retrieval = properties.getRetrieval();
-        return Math.max(1, "deep".equals(state.answerMode())
+        return Math.max(1, ChatOptions.ANSWER_MODE_DEEP.equals(state.answerMode())
                 ? retrieval.getDeepTopK() : retrieval.getFullTopK());
     }
 
@@ -159,7 +160,7 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
     }
 
     private boolean privateOnly(WorkflowState state) {
-        return "private".equals(state.visibility());
+        return ChatOptions.VISIBILITY_PRIVATE.equals(state.visibility());
     }
 
     /**

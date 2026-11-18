@@ -6,6 +6,7 @@ import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * 收尾节点：结果兜底组装（防空输出）并标记流程完成。
@@ -15,11 +16,15 @@ import java.util.Map;
 @Component
 public class FinalizeNode implements NodeAction<WorkflowState> {
 
+    /** 模型偶尔仍会输出来源编号：统一在出口清洗，保证用户看到的正文干净。 */
+    private static final Pattern REFERENCE_MARKER = Pattern.compile(
+            "[【\\[]\\s*参考资料\\s*\\d*\\s*[】\\]]");
+
     /** 收尾节点：保证结果非空并标记流程完成。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：读取生成结果
-        String result = state.result();
+        String result = stripReferenceMarkers(state.result());
         // 步骤2：最后一道防线 —— 任何路径到达这里都保证 result 非空
         if (result == null || result.isBlank()) {
             log.warn("[finalize] empty result, apply last-resort answer");
@@ -33,5 +38,17 @@ public class FinalizeNode implements NodeAction<WorkflowState> {
         return Map.of(
                 WorkflowState.RESULT, result,
                 WorkflowState.DONE, true);
+    }
+
+    /** 去掉【参考资料 N】/[参考资料 N] 标记，并清理标记移除后留下的多余空格与空行。 */
+    private String stripReferenceMarkers(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        String cleaned = REFERENCE_MARKER.matcher(text).replaceAll("");
+        cleaned = cleaned.replaceAll("[ \\t]+([，。；：！？])", "$1");
+        cleaned = cleaned.replaceAll("[ \\t]{2,}", " ");
+        cleaned = cleaned.replaceAll("\\n{3,}", "\n\n");
+        return cleaned.trim();
     }
 }

@@ -31,9 +31,6 @@ import java.util.Map;
 @Component
 public class IntentPlanNode implements NodeAction<WorkflowState> {
 
-    /** 检索查询单条长度上限：防模型输出解释性长文撑爆检索输入。 */
-    private static final int MAX_RETRIEVAL_QUERY_LENGTH = 400;
-
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
     private final AgentProperties properties;
@@ -100,7 +97,7 @@ public class IntentPlanNode implements NodeAction<WorkflowState> {
         return "用户原句：\n" + original + "\n\n多轮改写句（指代已消解，仅作参照）：\n" + effectiveQuery;
     }
 
-    /** 降级计划：知识问答 + 单查询；不根据问题长度做任何快路径判断。 */
+    /** 降级计划：简单对话 + 单查询；不检索、不调工具，避免分类失败时误执行。 */
     private Map<String, Object> degradedPlan(WorkflowState state, String reason) {
         String query = retrievalQuery(state.effectiveQuery(), state.query());
         List<String> subQueries = query.isBlank() ? List.of() : List.of(query);
@@ -145,8 +142,8 @@ public class IntentPlanNode implements NodeAction<WorkflowState> {
         if (cleaned.isBlank()) {
             return "";
         }
-        return cleaned.length() > MAX_RETRIEVAL_QUERY_LENGTH
-                ? cleaned.substring(0, MAX_RETRIEVAL_QUERY_LENGTH) : cleaned;
+        int maxLength = properties.getLimits().getMaxRetrievalQueryLength();
+        return cleaned.length() > maxLength ? cleaned.substring(0, maxLength) : cleaned;
     }
 
     private String normalizeComplexity(String value, int subQueryCount) {

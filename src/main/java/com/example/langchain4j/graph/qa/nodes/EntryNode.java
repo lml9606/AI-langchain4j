@@ -1,5 +1,6 @@
 package com.example.langchain4j.graph.qa.nodes;
 
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.state.WorkflowState;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
@@ -20,8 +21,11 @@ import java.util.Map;
 @Component
 public class EntryNode implements NodeAction<WorkflowState> {
 
-    /** 单条输入最大长度：超出部分直接截断，保护下游 token 开销（与 Controller @Size 一致，此处为图内兜底） */
-    private static final int MAX_QUERY_LENGTH = 4000;
+    private final AgentProperties properties;
+
+    public EntryNode(AgentProperties properties) {
+        this.properties = properties;
+    }
 
     /** 入口节点：空输入兜底、控制字符清洗、超长截断与本轮状态初始化。 */
     @Override
@@ -41,10 +45,11 @@ public class EntryNode implements NodeAction<WorkflowState> {
                 .replaceAll("[\\p{Cntrl}]", " ")
                 .trim();
         int originalLength = cleaned.length();
-        boolean truncated = cleaned.length() > MAX_QUERY_LENGTH;
+        int maxQueryLength = properties.getLimits().getMaxQueryLength();
+        boolean truncated = cleaned.length() > maxQueryLength;
         // 步骤4：超长截断 —— 超出上限的部分直接丢弃，保护下游 token 开销
-        if (cleaned.length() > MAX_QUERY_LENGTH) {
-            cleaned = cleaned.substring(0, MAX_QUERY_LENGTH);
+        if (cleaned.length() > maxQueryLength) {
+            cleaned = cleaned.substring(0, maxQueryLength);
         }
         log.info("[entry] accepted, queryLength={}, source={}, truncated={}",
                 originalLength, state.rewrittenQuery().isBlank() ? "raw" : "rewritten", truncated);

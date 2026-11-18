@@ -1,5 +1,6 @@
 package com.example.langchain4j.service;
 
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.repository.entity.Message;
 import com.example.langchain4j.repository.mapper.ConversationMapper;
 import com.example.langchain4j.repository.mapper.MessageMapper;
@@ -29,7 +30,7 @@ class ConversationServiceTest {
 
     @BeforeEach
     void setUp() {
-        conversationService = new ConversationService(conversationMapper, messageMapper);
+        conversationService = new ConversationService(conversationMapper, messageMapper, new AgentProperties());
     }
 
     @Test

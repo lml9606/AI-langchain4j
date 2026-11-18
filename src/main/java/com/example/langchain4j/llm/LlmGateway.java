@@ -43,7 +43,6 @@ public class LlmGateway {
 
     private static final String CB_FAILURES_KEY = "agent:llm:cb:failures";
     private static final String CB_OPEN_KEY = "agent:llm:cb:open";
-    private static final long BASE_BACKOFF_MS = 1000L;
     private final ModelRegistry modelRegistry;
     private final RedissonClient redissonClient;
     private final AgentProperties properties;
@@ -277,8 +276,8 @@ public class LlmGateway {
      * 避免多线程/多实例同时重试产生“惊群”冲击下游。
      */
     private void sleepWithBackoff(int attempt) {
-        long jitter = ThreadLocalRandom.current().nextLong(500);
-        long sleepMs = BASE_BACKOFF_MS * (1L << attempt) + jitter;
+        long jitter = ThreadLocalRandom.current().nextLong(properties.getLlm().getBackoffJitterMs());
+        long sleepMs = properties.getLlm().getBackoffBaseMs() * (1L << attempt) + jitter;
         try {
             TimeUnit.MILLISECONDS.sleep(sleepMs);
         } catch (InterruptedException e) {

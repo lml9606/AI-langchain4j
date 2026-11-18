@@ -1,5 +1,6 @@
 package com.example.langchain4j.graph.qa.nodes;
 
+import com.example.langchain4j.common.constant.ChatOptions;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.qa.EvidenceAssessor;
 import com.example.langchain4j.graph.qa.QaIntent;
@@ -65,6 +66,6 @@ public class RetrievalProbeNode implements NodeAction<WorkflowState> {
     }
 
     private boolean privateOnly(WorkflowState state) {
-        return "private".equals(state.visibility());
+        return ChatOptions.VISIBILITY_PRIVATE.equals(state.visibility());
     }
 }

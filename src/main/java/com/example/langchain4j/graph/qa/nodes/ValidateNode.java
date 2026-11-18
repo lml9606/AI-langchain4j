@@ -1,5 +1,6 @@
 package com.example.langchain4j.graph.qa.nodes;
 
+import com.example.langchain4j.common.constant.ChatOptions;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.qa.EvidenceAssessor;
 import com.example.langchain4j.graph.qa.QaIntent;
@@ -20,17 +21,14 @@ import java.util.Map;
  * 分层质量校验：
  * <ol>
  *   <li>规则层（始终执行）：空回答、过短、模型自曝错误；</li>
- *   <li>证据层（知识问答）：引用标记 + 回答对资料的词面支撑度；</li>
- *   <li>LLM 质检（按需）：仅在高风险、低证据、deep、重试轮、上下文不完整或引用/支撑不足时调用。</li>
+ *   <li>证据层（知识问答）：回答对资料的词面支撑度；</li>
+ *   <li>LLM 质检（按需）：仅在高风险、低证据、deep、重试轮、上下文不完整或支撑不足时调用。</li>
  * </ol>
  * 这样既保留防幻觉能力，又避免每个简单问题都多付一次 3~4 秒的 LLM 质检。
  */
 @Slf4j
 @Component
 public class ValidateNode implements NodeAction<WorkflowState> {
-
-    private static final int MIN_RESULT_LENGTH = 5;
-    private static final int MAX_REASON_LENGTH = 200;
 
     public static final String ISSUE_FORMAT = "format";
     public static final String ISSUE_GROUNDING = "grounding";
@@ -61,12 +59,10 @@ public class ValidateNode implements NodeAction<WorkflowState> {
         }
 
         double support = evidenceAssessor.answerSupport(state.result(), state.context());
-        boolean hasCitation = state.result().contains("【参考资料")
-                || state.result().contains("根据现有资料无法确定");
-        if (!shouldLlmCheck(state, support, hasCitation)) {
-            log.info("[validate] passed by rules, retryCount={}, support={}, citation={}, confidence={}",
+        if (!shouldLlmCheck(state, support)) {
+            log.info("[validate] passed by rules, retryCount={}, support={}, confidence={}",
                     state.retryCount(), String.format(Locale.ROOT, "%.2f", support),
-                    hasCitation, state.retrievalEvidence().confidence());
+                    state.retrievalEvidence().confidence());
             return pass(state, Math.min(1.0, 0.75 + 0.25 * support));
         }
 
@@ -74,19 +70,18 @@ public class ValidateNode implements NodeAction<WorkflowState> {
         if (!qa.valid()) {
             return fail(state, qa.issue(), qa.reason());
         }
-        log.info("[validate] passed by llm, retryCount={}, support={}, citation={}",
-                state.retryCount(), String.format(Locale.ROOT, "%.2f", support), hasCitation);
+        log.info("[validate] passed by llm, retryCount={}, support={}",
+                state.retryCount(), String.format(Locale.ROOT, "%.2f", support));
         return pass(state, 0.9);
     }
 
-    /** 质检升级条件：只在高风险/低证据/深链路/重试或引用支撑不足时调用 LLM。 */
-    private boolean shouldLlmCheck(WorkflowState state, double support, boolean hasCitation) {
-        return "deep".equals(state.answerMode())
+    /** 质检升级条件：只在高风险/低证据/深链路/重试或支撑不足时调用 LLM。 */
+    private boolean shouldLlmCheck(WorkflowState state, double support) {
+        return ChatOptions.ANSWER_MODE_DEEP.equals(state.answerMode())
                 || state.retryCount() > 0
                 || "high".equalsIgnoreCase(state.queryPlan().risk())
                 || !state.retrievalEvidence().sufficient()
                 || state.contextIncomplete()
-                || !hasCitation
                 || support < properties.getRetrieval().getMinAnswerSupport();
     }
 
@@ -142,7 +137,8 @@ public class ValidateNode implements NodeAction<WorkflowState> {
         if (text == null) {
             return "";
         }
-        return text.length() <= MAX_REASON_LENGTH ? text : text.substring(0, MAX_REASON_LENGTH);
+        int maxLength = properties.getLimits().getMaxValidationReasonLength();
+        return text.length() <= maxLength ? text : text.substring(0, maxLength);
     }
 
     private boolean isValid(String result, String intent) {
@@ -150,7 +146,8 @@ public class ValidateNode implements NodeAction<WorkflowState> {
             return false;
         }
         String trimmed = result.trim();
-        if (!QaIntent.CHITCHAT.equals(intent) && trimmed.length() < MIN_RESULT_LENGTH) {
+        if (!QaIntent.CHITCHAT.equals(intent)
+                && trimmed.length() < properties.getLimits().getMinResultLength()) {
             return false;
         }
         return !trimmed.contains("抱歉，我暂时无法")

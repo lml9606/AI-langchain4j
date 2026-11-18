@@ -23,6 +23,7 @@ import java.util.Map;
 @Component
 public class KnowledgeSearchTool implements AgentTool {
 
+    private static final int DEFAULT_TOP_K = 3;
     private static final int MAX_TOP_K = 5;
     private static final int MAX_SNIPPET = 300;
 
@@ -39,7 +40,8 @@ public class KnowledgeSearchTool implements AgentTool {
                 "检索知识库文档，返回与问题相关的资料片段",
                 "{\"type\":\"object\",\"required\":[\"query\"],\"properties\":{"
                         + "\"query\":{\"type\":\"string\",\"description\":\"检索问题\"},"
-                        + "\"topK\":{\"type\":\"integer\",\"description\":\"返回条数，1-5\",\"default\":3}}}",
+                        + "\"topK\":{\"type\":\"integer\",\"description\":\"返回条数，1-" + MAX_TOP_K
+                        + "\",\"default\":" + DEFAULT_TOP_K + "}}}",
                 List.of("query"),
                 ToolSideEffect.READ_ONLY,
                 // 本地 BGE-M3 单次嵌入本机约 2s；留足冷启动、DB 查询与网络抖动余量，避免误报 TIMEOUT
@@ -50,7 +52,7 @@ public class KnowledgeSearchTool implements AgentTool {
     public ToolResult execute(ToolContext context, JsonNode args) {
         long start = System.currentTimeMillis();
         String query = args.path("query").asText("").trim();
-        int topK = args.has("topK") ? args.path("topK").asInt(3) : 3;
+        int topK = args.has("topK") ? args.path("topK").asInt(DEFAULT_TOP_K) : DEFAULT_TOP_K;
         topK = Math.max(1, Math.min(MAX_TOP_K, topK));
         List<KnowledgeChunk> chunks = vectorSearchService.search(query, topK);
         List<Map<String, Object>> rows = new ArrayList<>();

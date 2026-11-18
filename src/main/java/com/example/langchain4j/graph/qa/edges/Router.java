@@ -1,5 +1,6 @@
 package com.example.langchain4j.graph.qa.edges;
 
+import com.example.langchain4j.common.constant.ChatOptions;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.qa.nodes.ValidateNode;
@@ -90,7 +91,7 @@ public class Router {
                 return route("retrieval-probe", state, TO_GENERATE);
             }
             boolean needsFull = state.context().isBlank()
-                    || "deep".equals(state.answerMode())
+                    || ChatOptions.ANSWER_MODE_DEEP.equals(state.answerMode())
                     || state.queryPlan().requiresFullRetrieval()
                     || !state.retrievalEvidence().sufficient();
             return route("retrieval-probe", state, needsFull ? TO_RETRIEVAL_FULL : TO_GENERATE);

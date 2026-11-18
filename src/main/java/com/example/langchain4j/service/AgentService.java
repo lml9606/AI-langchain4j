@@ -1,6 +1,7 @@
 package com.example.langchain4j.service;
 
 import com.example.langchain4j.common.auth.UserContext;
+import com.example.langchain4j.common.constant.ChatOptions;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.metrics.AgentMetrics;
@@ -52,15 +53,6 @@ import java.util.concurrent.TimeoutException;
 @Slf4j
 @Service
 public class AgentService {
-
-    /** 生成视图候选集上限：段内最近消息取这么多条参与 token 预算装配 */
-    private static final int GENERATION_CANDIDATE_LIMIT = 40;
-    /** 检索上下文快照截断上限（改写视图 itemMaxLength=800，存 1200 留余量） */
-    private static final int CONTEXT_SNAPSHOT_MAX = 1200;
-    /** 回答模式：深度链路（检索候选数放宽、强制完整质检） */
-    private static final String ANSWER_MODE_DEEP = "deep";
-    /** 检索可见范围：仅本人知识库 */
-    private static final String VISIBILITY_PRIVATE = "private";
 
     private final CompiledGraph<WorkflowState> agentGraph;
     private final CompiledGraph<WorkflowState> taskConfirmGraph;
@@ -136,8 +128,7 @@ public class AgentService {
         String answerMode = normalizeAnswerMode(request.getAnswerMode());
         String visibility = normalizeVisibility(request.getVisibility());
         // 4. 会话初始化（失败抛 DB_UNAVAILABLE，快速失败）
-        String conversationId = conversationService.ensureConversation(
-                userId, request.getConversationId(), query);
+        String conversationId = conversationService.ensureConversation(userId, request.getConversationId(), query);
         log.info("[agent] chat start, conversation={}, model={}, queryLength={}, answerMode={}, visibility={}",
                 conversationId, model, query.length(), answerMode, visibility);
         // 5. 会话锁内：保存用户消息 → 装配记忆 → 图执行 → 保存助手消息
@@ -354,8 +345,8 @@ public class AgentService {
         if (context == null || context.isBlank()) {
             return null;
         }
-        return context.length() > CONTEXT_SNAPSHOT_MAX
-                ? context.substring(0, CONTEXT_SNAPSHOT_MAX) : context;
+        int maxLength = properties.getLimits().getContextSnapshotMax();
+        return context.length() > maxLength ? context.substring(0, maxLength) : context;
     }
 
     /** 任务证据转响应引用：结构来源于 ToolEvidence，字段缺失时安全降级为空串 */
@@ -520,7 +511,7 @@ public class AgentService {
                 conversationId, segment.getSegmentId(),
                 properties.getHistory().getGenerationMaxTokens(),
                 properties.getHistory().getGenerationItemMaxLength(),
-                GENERATION_CANDIDATE_LIMIT);
+                properties.getLimits().getGenerationCandidateLimit());
         // 步骤7：异步触发段摘要（锁内仅提交任务，不等待 LLM 执行）
         summaryService.triggerIfNeeded(conversationId, segment);
         String summary = segment.getContent() == null ? "" : segment.getContent();
@@ -685,7 +676,8 @@ public class AgentService {
      * 入图前收敛，图内节点直接消费不再校验。
      */
     private String normalizeAnswerMode(String answerMode) {
-        return ANSWER_MODE_DEEP.equalsIgnoreCase(answerMode) ? ANSWER_MODE_DEEP : "auto";
+        return ChatOptions.normalizeAnswerMode(answerMode,
+                properties.getRequest().getDefaultAnswerMode());
     }
 
     /**
@@ -693,7 +685,8 @@ public class AgentService {
      * 入图前收敛，图内节点直接消费不再校验。
      */
     private String normalizeVisibility(String visibility) {
-        return VISIBILITY_PRIVATE.equalsIgnoreCase(visibility) ? VISIBILITY_PRIVATE : "all";
+        return ChatOptions.normalizeVisibility(visibility,
+                properties.getRequest().getDefaultVisibility());
     }
 
     /** 取异常链最深处的 message（业务原因通常在最底层），避免向上只看到包装信息 */
