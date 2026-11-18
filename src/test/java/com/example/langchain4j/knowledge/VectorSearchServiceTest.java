@@ -14,6 +14,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -230,5 +231,75 @@ class VectorSearchServiceTest {
 
         assertThat(result).hasSize(1);
         assertThat(result.get(0).getContent()).isEqualTo("命中子块原文10");
+    }
+
+    @Test
+    @DisplayName("maxParents 限制：只装配前 N 个父块组，避免单个主题挤占全部上下文")
+    void assembleLimitsParentGroups() {
+        AgentProperties.Retrieval retrieval = properties.getRetrieval();
+        retrieval.setContextBudget(10000);
+        retrieval.setMaxParents(2);
+        retrieval.setParentContextBudget(2000);
+
+        KnowledgeChunk hit1 = hit(10L, 5L);
+        KnowledgeChunk hit2 = hit(11L, 6L);
+        KnowledgeChunk hit3 = hit(12L, 7L);
+        KnowledgeChunk parent1 = parent(5L, "## 标题A", "A".repeat(20));
+        KnowledgeChunk parent2 = parent(6L, "## 标题B", "B".repeat(20));
+        when(knowledgeChunkMapper.selectParentById(5L, null)).thenReturn(parent1);
+        when(knowledgeChunkMapper.selectParentById(6L, null)).thenReturn(parent2);
+
+        List<KnowledgeChunk> result = service.assemble(List.of(hit1, hit2, hit3));
+
+        assertThat(result).hasSize(2);
+        verify(knowledgeChunkMapper).selectParentById(5L, null);
+        verify(knowledgeChunkMapper).selectParentById(6L, null);
+        verify(knowledgeChunkMapper, never()).selectParentById(7L, null);
+    }
+
+    @Test
+    @DisplayName("parentContextBudget：每个父块组单独限额，多个主题均能保留")
+    void assembleCapsEachParentGroup() {
+        AgentProperties.Retrieval retrieval = properties.getRetrieval();
+        retrieval.setContextBudget(10000);
+        retrieval.setMaxParents(3);
+        retrieval.setParentContextBudget(300);
+
+        KnowledgeChunk hit1 = hit(10L, 5L);
+        KnowledgeChunk hit2 = hit(11L, 6L);
+        KnowledgeChunk hit3 = hit(12L, 7L);
+        KnowledgeChunk parent1 = parent(5L, "## 标题A", "A".repeat(500));
+        KnowledgeChunk parent2 = parent(6L, "## 标题B", "B".repeat(500));
+        KnowledgeChunk parent3 = parent(7L, "## 标题C", "C".repeat(500));
+        when(knowledgeChunkMapper.selectParentById(5L, null)).thenReturn(parent1);
+        when(knowledgeChunkMapper.selectParentById(6L, null)).thenReturn(parent2);
+        when(knowledgeChunkMapper.selectParentById(7L, null)).thenReturn(parent3);
+
+        List<KnowledgeChunk> result = service.assemble(List.of(hit1, hit2, hit3));
+
+        assertThat(result).hasSize(3);
+        assertThat(result).allMatch(chunk -> chunk.getContent().length() == 300);
+    }
+
+    @Test
+    @DisplayName("同一逻辑章节的多个父块片段 → 只装配一次，不重复占用预算")
+    void assembleDedupsSameLogicalSection() {
+        KnowledgeChunk hit1 = hit(10L, 5L);
+        KnowledgeChunk hit2 = hit(11L, 6L);
+        KnowledgeChunk parent1 = parent(5L, "## 退款规则", "片段一");
+        KnowledgeChunk parent2 = parent(6L, "## 退款规则", "片段二");
+        parent1.setDocumentId("doc-1");
+        parent1.setVersion(2);
+        parent2.setDocumentId("doc-1");
+        parent2.setVersion(2);
+        when(knowledgeChunkMapper.selectParentById(5L, null)).thenReturn(parent1);
+        when(knowledgeChunkMapper.selectParentById(6L, null)).thenReturn(parent2);
+        when(knowledgeChunkMapper.selectParentsByTitle("## 退款规则", null, "doc-1", 2))
+                .thenReturn(List.of(parent1, parent2));
+
+        List<KnowledgeChunk> result = service.assemble(List.of(hit1, hit2));
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getContent()).isEqualTo("片段一\n\n片段二");
     }
 }

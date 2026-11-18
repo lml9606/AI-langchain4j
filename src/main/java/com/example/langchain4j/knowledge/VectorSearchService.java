@@ -191,8 +191,8 @@ public class VectorSearchService {
      *   <li>新数据（parentId 非空）→ 取父块；父块 title 非空再取同 title 父块组按 id 序拼接
      *       （长章节被拆成多父块时整组找回）；</li>
      *   <li>孤儿子块（存量数据 parentId=null）→ 退化为子块原文；</li>
-     *   <li>多个命中指向同一父块 → 只装配一次（最相关命中优先占预算）；</li>
-     *   <li>总长按 agent.retrieval.context-budget 截断（单组超预算即截尾）。</li>
+     *   <li>多个命中指向同一逻辑章节 → 只装配一次（同文档同版本同 title 去重）；</li>
+     *   <li>单组受 parent-context-budget 限额，总数受 max-parents 限额，总长受 context-budget 限额。</li>
      * </ul>
      * 父块查询失败降级为子块原文（fail-open，不阻断主流程）。
      */
@@ -202,6 +202,8 @@ public class VectorSearchService {
         }
         String userId = UserContext.get();
         int budget = Math.max(1, properties.getRetrieval().getContextBudget());
+        int maxParents = Math.max(1, properties.getRetrieval().getMaxParents());
+        int perParentBudget = properties.getRetrieval().getParentContextBudget();
         List<KnowledgeChunk> assembled = new ArrayList<>();
         Set<String> seenGroups = new HashSet<>();
         int used = 0;
@@ -209,53 +211,65 @@ public class VectorSearchService {
             if (hit == null || hit.getContent() == null) {
                 continue;
             }
-            // 去重键：有 parentId 按父块组去重，孤儿子块按自身 ID 去重
-            String dedupKey = hit.getParentId() != null ? "p:" + hit.getParentId() : "c:" + hit.getId();
-            if (!seenGroups.add(dedupKey)) {
-                continue;
+            if (assembled.size() >= maxParents) {
+                break;
             }
             int remaining = budget - used;
             if (remaining <= 0) {
                 break;
             }
-            // 命中父块优先占预算：长同 title 组从组开头拼接时，命中块可能被前面的块挤出上下文
-            String part = resolveParentContext(hit, userId, remaining);
-            if (part.isBlank()) {
+            // 单个父块组单独限额：防止第一个大章节吃掉全部预算，后续主题无上下文可用
+            int cap = perParentBudget > 0 ? Math.min(remaining, perParentBudget) : remaining;
+            ParentContext context = resolveParentContext(hit, userId, cap);
+            if (context == null || context.text() == null || context.text().isBlank()) {
                 continue;
             }
-            used += part.length();
+            // 逻辑章节去重：长章节拆成多个同 title 父块时，只装配一次，避免重复内容挤压其他主题
+            if (!seenGroups.add(context.key())) {
+                continue;
+            }
+            used += context.text().length();
             KnowledgeChunk ctx = new KnowledgeChunk();
-            ctx.setContent(part);
+            ctx.setContent(context.text());
             assembled.add(ctx);
         }
         return assembled;
     }
 
     /** 解析命中块的装配原文：新数据取父块（同 title 相邻组按命中块优先拼接），查询失败 fail-open 降级子块原文 */
-    private String resolveParentContext(KnowledgeChunk hit, String userId, int budget) {
+    private ParentContext resolveParentContext(KnowledgeChunk hit, String userId, int budget) {
         if (hit.getParentId() == null) {
-            return truncate(hit.getContent(), budget);
+            return new ParentContext("c:" + hit.getId(), truncate(hit.getContent(), budget));
         }
         try {
             KnowledgeChunk parent = knowledgeChunkMapper.selectParentById(hit.getParentId(), userId);
             if (parent == null || parent.getContent() == null) {
-                return truncate(hit.getContent(), budget);
+                return new ParentContext("p:" + hit.getParentId(), truncate(hit.getContent(), budget));
             }
+            String sectionKey = sectionKey(parent);
             if (parent.getTitle() == null || parent.getTitle().isBlank()) {
-                return truncate(parent.getContent(), budget);
+                return new ParentContext(sectionKey, truncate(parent.getContent(), budget));
             }
             // 同文档 + 同版本 + 同 title 父块组：长章节拆多父块时整组找回；id 相邻连续段再防重复章节误拼
             List<KnowledgeChunk> group = knowledgeChunkMapper.selectParentsByTitle(
                     parent.getTitle(), userId, parent.getDocumentId(), parent.getVersion());
             List<KnowledgeChunk> contiguous = contiguousGroup(group, parent.getId());
             if (contiguous.size() <= 1) {
-                return truncate(parent.getContent(), budget);
+                return new ParentContext(sectionKey, truncate(parent.getContent(), budget));
             }
-            return assembleAdjacentGroup(contiguous, parent.getId(), budget);
+            return new ParentContext(sectionKey, assembleAdjacentGroup(contiguous, parent.getId(), budget));
         } catch (Exception e) {
             log.warn("[vector] parent assembly degraded, parentId={}, reason={}", hit.getParentId(), e.getMessage());
-            return truncate(hit.getContent(), budget);
+            return new ParentContext("p:" + hit.getParentId(), truncate(hit.getContent(), budget));
         }
+    }
+
+    /** 逻辑章节去重键：同文档同版本的多个父块片段归为同一组；旧数据无 documentId 时退回父块 ID */
+    private String sectionKey(KnowledgeChunk parent) {
+        if (parent.getDocumentId() != null && parent.getTitle() != null) {
+            return "s:" + parent.getDocumentId() + ":" + parent.getVersion() + ":" + parent.getTitle();
+        }
+        return "p:" + parent.getId();
     }
 
     /**
@@ -374,6 +388,10 @@ public class VectorSearchService {
     private boolean adjacent(KnowledgeChunk a, KnowledgeChunk b) {
         return a != null && b != null && a.getId() != null && b.getId() != null
                 && a.getId() + 1 == b.getId();
+    }
+
+    /** 父块装配结果：key 为逻辑章节去重键，text 为实际放入上下文的文本 */
+    private record ParentContext(String key, String text) {
     }
 
     /** 拼接检索上下文；无结果返回空串，供 prompt 组装降级 */

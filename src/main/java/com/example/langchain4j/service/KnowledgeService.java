@@ -70,6 +70,11 @@ public class KnowledgeService {
     private static final String TITLE_SEPARATOR = "｜";
     /** 父块标题路径分隔符：保留从章节到小节的层级，供检索与上下文装配使用 */
     private static final String TITLE_PATH_SEPARATOR = " > ";
+    /** 父块目标区间默认值：自适应选层用，不写死某一级标题 */
+    private static final int DEFAULT_PARENT_TARGET_MIN = 800;
+    private static final int DEFAULT_PARENT_TARGET_MAX = 2000;
+    /** 允许的长尾比例：超过父块硬上限的小节占比不高于该值时，仍可选用该层 */
+    private static final double PARENT_OVER_RATIO_LIMIT = 0.25;
     /** title 列宽（schema: VARCHAR(256)），超长标题路径防御性截断 */
     private static final int MAX_TITLE_LENGTH = 256;
     /** 强结构标题行：Markdown 标题（#~######）与中文章节（第X章/节/篇/部）；Markdown 优先按层级处理 */
@@ -144,6 +149,8 @@ public class KnowledgeService {
         int childSize = boundedChunkSize(chunkSize);
         int overlap = boundedChunkOverlap(chunkOverlap, childSize);
         int parentSize = boundedParentChunkSize();
+        int parentTargetMin = boundedParentTargetMin(parentSize);
+        int parentTargetMax = boundedParentTargetMax(parentSize);
         int childTokenLimit = boundedChunkTokenLimit();
         String userId = UserContext.require();
         String resolvedDocumentId = resolveDocumentId(documentId);
@@ -154,7 +161,7 @@ public class KnowledgeService {
 
         // 步骤1：标题树 → 父块。父块保留整段上下文但不嵌入；超长父块会继续按段落/句子续切。
         long splitStartedAt = System.currentTimeMillis();
-        List<ParentSection> sections = splitParents(cleaned, parentSize);
+        List<ParentSection> sections = splitParents(cleaned, parentSize, parentTargetMin, parentTargetMax);
         log.info("[knowledge] parent split done, documentId={}, version={}, parents={}, cost={}ms",
                 resolvedDocumentId, resolvedVersion, sections.size(), System.currentTimeMillis() - splitStartedAt);
 
@@ -720,6 +727,18 @@ public class KnowledgeService {
         return Math.min(Math.max(configured, MIN_PARENT_SIZE), MAX_PARENT_SIZE);
     }
 
+    /** 父块目标区间下限：不小于分块最小防御边界且不超过父块硬上限，避免把父块切得过碎或目标失效 */
+    private int boundedParentTargetMin(int parentSize) {
+        int configured = properties.getKnowledge().getParentTargetMin();
+        return Math.min(Math.max(configured, MIN_PARENT_SIZE), parentSize);
+    }
+
+    /** 父块目标区间上限：不超过父块硬上限，保证目标区间与硬约束一致 */
+    private int boundedParentTargetMax(int parentSize) {
+        int configured = properties.getKnowledge().getParentTargetMax();
+        return Math.min(Math.max(configured, MIN_PARENT_SIZE), parentSize);
+    }
+
     /** 分块重叠防御边界：0 ~ chunkSize/2（负值归零，过大反而稀释块语义） */
     private int boundedChunkOverlap(Integer requestOverlap, int chunkSize) {
         int configured = properties.getKnowledge().getChunkOverlap();
@@ -782,18 +801,26 @@ public class KnowledgeService {
     }
 
     /**
-     * 父子分块第一层：把标题树展开为“标题自身的直接正文”父块（整段上下文，不嵌入）。
+     * 父子分块第一层：按文档结构自适应选择父块层级（整段上下文，不嵌入），不写死 H3。
      * <ul>
-     *   <li>父块边界不是固定 H2/H3，而是任意标题下、直到下一个标题前的直接正文；</li>
-     *   <li>“## 章节”只有标题时只作为路径，不单独成块；“### 小节”有正文时各自成父块；</li>
-     *   <li>父块 title 保存从顶级章节到当前标题的完整路径，如“一、Java 基础 &gt; 1. HashMap 底层原理”；</li>
+     *   <li>逐层统计小节长度，优先选择中位数落在目标区间、且超长比例可接受的层级；</li>
+     *   <li>选中层是父块边界；更深层标题内容并入当前父块，不再单独成块；</li>
+     *   <li>更浅层标题只提供标题路径；若其自有导语，导语仍单独保留，避免丢内容；</li>
+     *   <li>父块 title 保存从顶级章节到父块边界的完整路径；</li>
      *   <li>唯一的一级标题视为文档标题，不进入子标题路径；其自有导语仍保留为前言父块；</li>
-     *   <li>只有标题、没有正文且没有子标题的叶节点保留为父块，避免丢内容；</li>
+     *   <li>没有可识别标题的文档按长度窗口切分；只有标题、没有正文的叶节点仍保留，避免丢内容；</li>
      *   <li>围栏代码块中的 # 注释不当作标题；</li>
-     *   <li>父块超预算 → 复用 {@link #split} 按段落/句子续切，续块保持同一 title 路径。</li>
+     *   <li>父块超预算 → 复用 {@link #splitSemantic} 按软标题/段落/句子续切，续块保持同一 title。</li>
      * </ul>
      */
     List<ParentSection> splitParents(String content, int parentSize) {
+        return splitParents(content, parentSize, DEFAULT_PARENT_TARGET_MIN,
+                Math.min(DEFAULT_PARENT_TARGET_MAX, parentSize));
+    }
+
+    List<ParentSection> splitParents(String content, int parentSize, int targetMin, int targetMax) {
+        int boundedTargetMin = Math.max(1, targetMin);
+        int boundedTargetMax = Math.max(boundedTargetMin, Math.min(targetMax, parentSize));
         long startedAt = System.currentTimeMillis();
         List<Heading> headings = headings(content);
         log.debug("[knowledge] parent split start, chars={}, parentSize={}, headings={}",
@@ -801,7 +828,7 @@ public class KnowledgeService {
         if (headings.isEmpty()) {
             // 没有任何可识别标题：整篇按长度硬切，所有父块共享同一个兜底标题。
             String title = deriveTitle(content);
-            List<ParentSection> sections = split(content, parentSize, 0).stream()
+            List<ParentSection> sections = splitSemantic(content, parentSize, 0, parentSize).stream()
                     .map(piece -> new ParentSection(title, piece))
                     .toList();
             log.debug("[knowledge] parent split done without headings, title={}, parents={}, cost={}ms",
@@ -809,6 +836,9 @@ public class KnowledgeService {
             return sections;
         }
         Heading documentTitle = documentTitle(headings);
+        int parentLevel = chooseParentLevel(content, headings, boundedTargetMin, boundedTargetMax, parentSize);
+        log.debug("[knowledge] parent level selected, parentLevel={}, targetMin={}, targetMax={}",
+                parentLevel, boundedTargetMin, boundedTargetMax);
         List<ParentSection> sections = new ArrayList<>();
         // 首个标题前的正文没有标题路径，用兜底标题单独保留；否则这段前言会丢失。
         String preamble = content.substring(0, headings.get(0).start()).trim();
@@ -827,8 +857,14 @@ public class KnowledgeService {
             }
             path.add(heading);
 
-            // 当前标题的“直接正文”截止到下一个任意层级标题，不包含子标题自己的正文。
-            int end = i + 1 < headings.size() ? headings.get(i + 1).start() : content.length();
+            // H4 及更深标题不产生父块，但其文本和正文会被下面的 H3 父块整体包含。
+            if (heading.level() > parentLevel) {
+                continue;
+            }
+
+            // H1/H2 只取自己的直接正文，遇到下一标题即结束；
+            // L3 父块则一直扩展到下一个 H3/H2/H1，因此其下所有 H4 内容都会留在同一个父块中。
+            int end = parentSectionEnd(headings, i, parentLevel, content.length());
             String body = content.substring(heading.start(), end).trim();
             if (body.isEmpty()) {
                 continue;
@@ -836,8 +872,8 @@ public class KnowledgeService {
             int bodyStart = nextLineStart(content, heading.start(), end);
             boolean hasOwnBody = hasMeaningfulBody(content.substring(bodyStart, end));
             boolean hasChild = i + 1 < headings.size() && headings.get(i + 1).level() > heading.level();
-            // 纯容器标题只提供路径；标题本身无正文且无子节点时仍落一个父块，避免静默丢内容
-            if (!hasOwnBody && hasChild) {
+            // H1/H2 纯容器只提供路径；L3 即使没有直接正文，也要把其下 H4 内容装进父块。
+            if (heading.level() < parentLevel && !hasOwnBody && hasChild) {
                 log.debug("[knowledge] parent container skipped, level={}, title={}",
                         heading.level(), headingPath(path, content, documentTitle));
                 continue;
@@ -848,8 +884,9 @@ public class KnowledgeService {
                     i + 1, headings.size(), heading.level(), hasOwnBody, hasChild, body.length(), title);
             addSections(sections, title, body, parentSize);
         }
-        log.debug("[knowledge] parent split done, headings={}, documentTitle={}, parents={}, cost={}ms",
-                headings.size(), documentTitle != null, sections.size(), System.currentTimeMillis() - startedAt);
+        log.debug("[knowledge] parent split done, headings={}, parentLevel={}, documentTitle={}, parents={}, cost={}ms",
+                headings.size(), parentLevel, documentTitle != null, sections.size(),
+                System.currentTimeMillis() - startedAt);
         return sections;
     }
 
@@ -923,6 +960,90 @@ public class KnowledgeService {
         return first.level() == 1 && h1Count == 1 && hasDeeper ? first : null;
     }
 
+    /**
+     * 自适应选择父块层级：按每一层小节长度的中位数与超长比例选层，不写死 H3。
+     * 先在目标区间内找最浅的合格层；都不合格时选中位数最接近目标区间的层。
+     */
+    private int chooseParentLevel(String content, List<Heading> headings,
+                                  int targetMin, int targetMax, int parentSize) {
+        int maxLevel = headings.stream().mapToInt(Heading::level).max().orElse(1);
+        if (maxLevel <= 1) {
+            return maxLevel;
+        }
+        Heading documentTitle = documentTitle(headings);
+        int bestLevel = -1;
+        int bestDistance = Integer.MAX_VALUE;
+        for (int level = 2; level <= maxLevel; level++) {
+            List<Integer> sizes = new ArrayList<>();
+            for (int i = 0; i < headings.size(); i++) {
+                Heading heading = headings.get(i);
+                if (heading.level() != level) {
+                    continue;
+                }
+                if (documentTitle != null && heading.start() == documentTitle.start()) {
+                    continue;
+                }
+                int end = parentSectionEnd(headings, i, level, content.length());
+                int size = end - heading.start();
+                if (size > 0) {
+                    sizes.add(size);
+                }
+            }
+            if (sizes.size() < 2) {
+                continue;
+            }
+            int median = median(sizes);
+            int overCount = 0;
+            for (int size : sizes) {
+                if (size > parentSize) {
+                    overCount++;
+                }
+            }
+            double overRatio = overCount * 1.0 / sizes.size();
+            if (median >= targetMin && median <= targetMax && overRatio <= PARENT_OVER_RATIO_LIMIT) {
+                return level;
+            }
+            int distance = median < targetMin ? targetMin - median
+                    : median > targetMax ? median - targetMax : 0;
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestLevel = level;
+            }
+        }
+        return bestLevel > 0 ? bestLevel : maxLevel;
+    }
+
+    /** 小节长度中位数：偶数取中间两个的平均值 */
+    private int median(List<Integer> sizes) {
+        List<Integer> sorted = new ArrayList<>(sizes);
+        sorted.sort(Integer::compareTo);
+        int size = sorted.size();
+        return size % 2 == 1
+                ? sorted.get(size / 2)
+                : (sorted.get(size / 2 - 1) + sorted.get(size / 2)) / 2;
+    }
+
+    /**
+     * 计算当前标题父块的结束位置。
+     * <p>
+     * 比选中层更浅的标题只提供路径，取自己的直接正文，遇到下一标题即结束；
+     * 选中层是父块边界，必须一直扩展到下一个同级或更浅标题，不能在其子标题处提前结束。
+     */
+    private int parentSectionEnd(List<Heading> headings, int index, int parentLevel, int contentLength) {
+        Heading current = headings.get(index);
+        for (int i = index + 1; i < headings.size(); i++) {
+            Heading next = headings.get(i);
+            if (current.level() == parentLevel) {
+                if (next.level() <= parentLevel) {
+                    return next.start();
+                }
+            } else {
+                return next.start();
+            }
+        }
+        return contentLength;
+    }
+
     /** 生成“顶级章节 > 子章节 > 当前标题”的路径；文档标题不进入路径 */
     private String headingPath(List<Heading> path, String content, Heading documentTitle) {
         List<String> parts = new ArrayList<>();
@@ -990,7 +1111,7 @@ public class KnowledgeService {
 
     /** 按父块预算切节（超长节续切为多个同 title 父块） */
     private void addSections(List<ParentSection> sections, String title, String body, int parentSize) {
-        List<String> pieces = split(body, parentSize, 0);
+        List<String> pieces = splitSemantic(body, parentSize, 0, parentSize);
         if (pieces.size() > 1) {
             // 续块仍使用同一 title，检索命中任一续块时可由父块组装逻辑找回相邻上下文。
             log.debug("[knowledge] parent section oversized, title={}, bodyChars={}, parentSize={}, pieces={}",

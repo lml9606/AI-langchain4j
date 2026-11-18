@@ -185,8 +185,12 @@ public class AgentProperties {
      */
     @Data
     public static class Knowledge {
-        /** 父块大小（字符）：按标题/章节切分的整章上下文，不嵌入；检索命中子块后取父块装配 */
+        /** 父块硬上限（字符）：父块在语义切分后仍不得超过该值，超过则继续按段落/软标题续切 */
         private int parentChunkSize = 2000;
+        /** 父块目标区间下限（字符）：自适应选层时优先选择中位数落在此区间内的标题层级 */
+        private int parentTargetMin = 800;
+        /** 父块目标区间上限（字符）：与 parentTargetMin 共同决定父块层级，避免写死 H3 */
+        private int parentTargetMax = 2000;
         /** 子块大小（字符）：父块内按段落切分的最小检索单元，嵌入进向量库供检索 */
         private int chunkSize = 400;
         /** 相邻子块重叠字符数：保留跨块边界的句间语义 */
@@ -224,8 +228,12 @@ public class AgentProperties {
      */
     @Data
     public static class Retrieval {
-        /** 父子装配上下文预算（字符）：命中子块 → 父块整章（同 title 组拼接）的总长上限 */
-        private int contextBudget = 2400;
+        /** 父子装配上下文预算（字符）：命中子块 → 父块（同 title 组拼接）的总长上限 */
+        private int contextBudget = 5000;
+        /** 单次检索最多装配的父块组数：防止一个主题占满上下文，给多主题召回留预算 */
+        private int maxParents = 3;
+        /** 单个父块组的预算上限（字符）：0 表示不单独限制，仅受 contextBudget 约束 */
+        private int parentContextBudget = 2000;
     }
 
     @Data

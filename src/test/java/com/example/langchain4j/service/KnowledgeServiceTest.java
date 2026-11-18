@@ -158,15 +158,63 @@ class KnowledgeServiceTest {
     }
 
     @Test
-    @DisplayName("父子分块：标题层级不固定，四级标题同样按完整路径成为父块")
-    void splitParentsSupportsArbitraryHeadingDepth() {
-        String content = "## A\n\n### B\n\n#### C\n\n正文C。";
+    @DisplayName("父子分块：自适应选中 H3 时，H4 及更深内容并入所属 H3 父块")
+    void splitParentsKeepsDeeperHeadingsInSelectedParent() {
+        String content = "## A\n\n### B\n\n#### C\n\n" + "正文C。".repeat(200)
+                + "\n\n#### D\n\n" + "正文D。".repeat(200)
+                + "\n\n### E\n\n" + "正文E。".repeat(200);
 
         List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
 
-        assertThat(sections).hasSize(1);
-        assertThat(sections.get(0).title()).isEqualTo("A > B > C");
-        assertThat(sections.get(0).body()).startsWith("#### C").contains("正文C");
+        assertThat(sections).hasSize(2);
+        assertThat(sections.get(0).title()).isEqualTo("A > B");
+        assertThat(sections.get(0).body()).startsWith("### B")
+                .contains("#### C", "正文C", "#### D", "正文D");
+        assertThat(sections.get(1).title()).isEqualTo("A > E");
+    }
+
+    @Test
+    @DisplayName("自适应选层：H2 小节长度合适时选 H2，不强行下钻到 H3")
+    void splitParentsChoosesLevelTwoWhenSectionsFit() {
+        String content = "## A\n\n" + "A内容。".repeat(200) + "\n\n### A1\n\n" + "A1。".repeat(100)
+                + "\n\n## B\n\n" + "B内容。".repeat(200) + "\n\n### B1\n\n" + "B1。".repeat(100);
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
+
+        assertThat(sections).hasSize(2);
+        assertThat(sections.get(0).title()).isEqualTo("A");
+        assertThat(sections.get(0).body()).contains("### A1", "A1。");
+        assertThat(sections.get(1).title()).isEqualTo("B");
+        assertThat(sections.get(1).body()).contains("### B1", "B1。");
+    }
+
+    @Test
+    @DisplayName("自适应选层：H2 过大、H3 小节合适时选 H3")
+    void splitParentsChoosesLevelThreeWhenH2TooLarge() {
+        String content = "## A\n\n### A1\n\n" + "A1。".repeat(300)
+                + "\n\n### A2\n\n" + "A2。".repeat(300);
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content, 2000);
+
+        assertThat(sections).hasSize(2);
+        assertThat(sections.get(0).title()).isEqualTo("A > A1");
+        assertThat(sections.get(1).title()).isEqualTo("A > A2");
+    }
+
+    @Test
+    @DisplayName("父子分块：长父块按软标题续切，追问与答案不被拦腰截断")
+    void splitParentsLongSectionUsesSoftLabels() {
+        String content = "### Q\n\n**标准答案**\n\n" + "标准答案内容。".repeat(50)
+                + "\n\n**追问 1：问题一？**\n\n" + "追问一内容。".repeat(50)
+                + "\n\n**追问 2：问题二？**\n\n" + "追问二内容。".repeat(50);
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content, 600);
+
+        assertThat(sections.size()).isGreaterThan(1);
+        assertThat(sections).allMatch(section -> section.title().equals("Q"));
+        assertThat(sections).anyMatch(section -> section.body().contains("**标准答案**"));
+        assertThat(sections).anyMatch(section -> section.body().startsWith("**追问 1"));
+        assertThat(sections).anyMatch(section -> section.body().startsWith("**追问 2"));
     }
 
     @Test
@@ -379,5 +427,26 @@ class KnowledgeServiceTest {
         }
 
         verify(knowledgeChunkMapper).deleteDocumentVersion("doc-2", 1, "u2");
+    }
+
+    @Test
+    @DisplayName("自适应选层：面试题文档 L2 过大、L3 约 1.7k 时选 L3")
+    void splitParentsChoosesLevelThreeForInterviewDocStructure() {
+        StringBuilder content = new StringBuilder("# 面试题\n\n## 一、Java 基础\n\n");
+        for (int i = 1; i <= 5; i++) {
+            content.append("### ").append(i).append(". 问题").append(i).append("\n\n")
+                    .append("答案内容。".repeat(340)).append("\n\n");
+        }
+        content.append("## 二、并发\n\n");
+        for (int i = 6; i <= 9; i++) {
+            content.append("### ").append(i).append(". 问题").append(i).append("\n\n")
+                    .append("答案内容。".repeat(340)).append("\n\n");
+        }
+
+        List<KnowledgeService.ParentSection> sections = service.splitParents(content.toString(), 2000);
+
+        assertThat(sections).hasSize(9);
+        assertThat(sections.get(0).title()).isEqualTo("一、Java 基础 > 1. 问题1");
+        assertThat(sections).allMatch(section -> section.body().length() <= 2000);
     }
 }
