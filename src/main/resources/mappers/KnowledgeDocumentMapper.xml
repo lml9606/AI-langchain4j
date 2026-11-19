@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.KnowledgeDocumentMapper">
+
+    <resultMap id="KnowledgeDocumentMap" type="com.example.langchain4j.repository.entity.KnowledgeDocument">
+        <id property="id" column="id"/>
+        <result property="documentId" column="document_id"/>
+        <result property="userId" column="user_id"/>
+        <result property="activeVersion" column="active_version"/>
+        <result property="status" column="status"/>
+        <result property="contentHash" column="content_hash"/>
+        <result property="source" column="source"/>
+        <result property="activatedAt" column="activated_at"/>
+        <result property="purgedAt" column="purged_at"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="selectByDocumentId" resultMap="KnowledgeDocumentMap">
+        SELECT id, document_id, user_id, active_version, status, content_hash, source,
+               activated_at, purged_at, created_at, updated_at
+        FROM ai_document
+        WHERE document_id = #{documentId}
+          AND user_id = #{userId}
+    </select>
+
+    <!-- 并发首次导入：唯一约束保证只有一个赢家，输家随后 select 到同一行 -->
+    <insert id="insertIfAbsent" parameterType="com.example.langchain4j.repository.entity.KnowledgeDocument">
+        INSERT INTO ai_document (document_id, user_id, active_version, status)
+        VALUES (#{documentId}, #{userId}, #{activeVersion}, #{status})
+        ON CONFLICT (document_id, user_id) DO NOTHING
+    </insert>
+
+    <!--
+      抢占导入权：READY/FAILED 才能开始；IMPORTING 超过 staleMinutes 视为进程异常退出，允许接管。
+      这是并发导入的互斥点——同一文档同一时刻只有一个任务在写新版本。
+    -->
+    <update id="startImport">
+        UPDATE ai_document
+        SET status = 'IMPORTING', updated_at = now()
+        WHERE document_id = #{documentId}
+          AND user_id = #{userId}
+          AND (status &lt;&gt; 'IMPORTING'
+               OR updated_at &lt; now() - make_interval(mins =&gt; #{staleMinutes}))
+    </update>
+
+    <!-- 发布：整个版本切换唯一需要原子性的地方，只改一行指针 -->
+    <update id="activate">
+        UPDATE ai_document
+        SET active_version = #{version},
+            status = 'READY',
+            content_hash = #{contentHash},
+            source = #{source},
+            activated_at = now(),
+            updated_at = now()
+        WHERE document_id = #{documentId}
+          AND user_id = #{userId}
+          AND status = 'IMPORTING'
+    </update>
+
+    <update id="markImportFailed">
+        UPDATE ai_document
+        SET status = 'FAILED', updated_at = now()
+        WHERE document_id = #{documentId}
+          AND user_id = #{userId}
+          AND status = 'IMPORTING'
+    </update>
+
+    <update id="markPurged">
+        UPDATE ai_document
+        SET purged_at = now()
+        WHERE document_id = #{documentId}
+          AND user_id = #{userId}
+    </update>
+
+    <!--
+      待回收文档：发布已过保留期，且上次回收早于本次发布。
+      保留期给"切错了切回去 / 出事时对比两版"留窗口，不是正确性依赖。
+    -->
+    <select id="selectPurgeCandidates" resultMap="KnowledgeDocumentMap">
+        SELECT id, document_id, user_id, active_version, status, content_hash, source,
+               activated_at, purged_at, created_at, updated_at
+        FROM ai_document
+        WHERE active_version &gt; 0
+          AND activated_at IS NOT NULL
+          AND activated_at &lt; now() - make_interval(hours =&gt; #{retentionHours})
+          AND (purged_at IS NULL OR purged_at &lt; activated_at)
+        ORDER BY activated_at
+        LIMIT #{limit}
+    </select>
+
+</mapper>

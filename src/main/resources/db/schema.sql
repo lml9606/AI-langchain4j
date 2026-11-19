@@ -142,6 +142,70 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_sparse
 -- 历史词面通道（pg_trgm GIN 索引）已由稀疏向量通道取代：删除旧索引避免双份维护开销（扩展本身保留）
 DROP INDEX IF EXISTS idx_knowledge_content_trgm;
 
+-- 文档主表（文档聚合根）：active_version 是"当前对外可读版本"的唯一事实来源。
+-- 导入时先写新版本块但不改指针，成功后只更新这一行；因此切换成本与文档大小无关，
+-- 导入中的新版本对检索完全不可见，失败也不会污染旧版本。
+CREATE TABLE IF NOT EXISTS ai_document (
+    id             BIGSERIAL PRIMARY KEY,
+    document_id    VARCHAR(64) NOT NULL,                  -- 逻辑文档 ID（与 ai_knowledge_chunk.document_id 对应）
+    user_id        VARCHAR(64) NOT NULL,                  -- 归属用户（私有库）
+    active_version INTEGER     NOT NULL DEFAULT 0,        -- 当前对外可读版本；0 = 尚未成功导入过
+    status         VARCHAR(16) NOT NULL DEFAULT 'READY',  -- READY / IMPORTING / FAILED（导入互斥与可观测）
+    content_hash   VARCHAR(64),                           -- 内容指纹（SHA-256），用于识别无变更重传
+    source         VARCHAR(512),                          -- 来源（文件名等，便于运维定位）
+    activated_at   TIMESTAMPTZ,                           -- 最近一次成功发布时间（旧版本保留窗口起点）
+    purged_at      TIMESTAMPTZ,                           -- 最近一次旧版本回收时间（避免重复全量扫描）
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uk_document_user UNIQUE (document_id, user_id)
+);
+-- 文档列表/管理页索引：按用户 + 最近更新时间倒序
+CREATE INDEX IF NOT EXISTS idx_document_user ON ai_document (user_id, updated_at DESC);
+-- 旧版本回收扫描索引：按发布时间取已过保留期的文档
+CREATE INDEX IF NOT EXISTS idx_document_purge ON ai_document (activated_at);
+
+-- 存量回填（幂等）：已有文档按块里的 MAX(version) 作为当前可读版本；
+-- document_id 为空的存量块不参与（检索侧对其保留"不按版本过滤"的旧行为）。
+INSERT INTO ai_document (document_id, user_id, active_version, status, activated_at)
+SELECT c.document_id, c.user_id, MAX(c.version), 'READY', now()
+FROM ai_knowledge_chunk c
+WHERE c.document_id IS NOT NULL
+  AND c.user_id IS NOT NULL
+GROUP BY c.document_id, c.user_id
+ON CONFLICT (document_id, user_id) DO NOTHING;
+
+-- 工具演示数据表：读工具查询、写工具修改的对象（按 user_id 隔离，不同用户互不可见）
+CREATE TABLE IF NOT EXISTS ai_tool_demo_record (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    VARCHAR(64)  NOT NULL,
+    title      VARCHAR(200) NOT NULL,
+    content    TEXT,
+    status     VARCHAR(16)  NOT NULL DEFAULT 'OPEN',   -- OPEN / DONE
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_tool_demo_user ON ai_tool_demo_record (user_id, status, id);
+
+-- 工具执行台账：写工具幂等与"执行结果可查询"的唯一事实源。
+-- Redis 里的确认令牌只是短期授权；即使令牌被删/过期/Redis 重启，这张表仍能回答"到底执行没执行"。
+CREATE TABLE IF NOT EXISTS ai_tool_execution (
+    id              BIGSERIAL PRIMARY KEY,
+    execution_id    VARCHAR(128) NOT NULL,                -- 幂等键（当前= confirmationId）
+    user_id         VARCHAR(64)  NOT NULL,
+    conversation_id VARCHAR(64)  NOT NULL,
+    tool            VARCHAR(64)  NOT NULL,
+    args_hash       VARCHAR(64),                          -- 参数指纹：同键不同参直接拒绝
+    status          VARCHAR(16)  NOT NULL,                -- RUNNING / SUCCEEDED / FAILED
+    result          TEXT,                                 -- 成功结果（重放时原样返回）
+    error_code      VARCHAR(64),
+    error_message   TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uk_tool_execution UNIQUE (user_id, execution_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tool_execution_user ON ai_tool_execution (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_execution_status ON ai_tool_execution (status, updated_at);
+
 -- 工单表（运营闭环：转人工自动建单，运营回复后结单；根因字段联动审计表驱动知识治理）
 CREATE TABLE IF NOT EXISTS ai_ticket (
     id              BIGSERIAL PRIMARY KEY,

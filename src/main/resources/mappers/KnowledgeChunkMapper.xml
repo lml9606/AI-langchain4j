@@ -42,17 +42,16 @@
         SELECT c.id, c.content, c.embedding, c.metadata::text AS metadata, c.user_id,
                c.document_id, c.version, c.parent_id, c.chunk_type, c.title, c.created_at
         FROM ai_knowledge_chunk c
+        <!-- 文档版本指针：只召回当前发布版本；无主表行的存量块（d.id IS NULL）保持旧行为可见 -->
+        LEFT JOIN ai_document d
+               ON d.document_id = c.document_id
+              AND d.user_id = c.user_id
         WHERE c.embedding IS NOT NULL
           AND c.chunk_type = 'CHILD'
           AND (1 - (c.embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler})) &gt;= #{minScore}
           AND (c.user_id = #{userId} OR (NOT #{privateOnly} AND c.user_id IS NULL))
-          <!-- 文档只召回最新版本；document_id 为空的存量块不受影响 -->
-          AND (c.document_id IS NULL OR c.version = (
-              SELECT MAX(v.version)
-              FROM ai_knowledge_chunk v
-              WHERE v.document_id = c.document_id
-                AND v.user_id IS NOT DISTINCT FROM c.user_id
-          ))
+          <!-- 文档只召回 active_version；document_id 为空或主表尚未回填的存量块不受影响 -->
+          AND (c.document_id IS NULL OR d.id IS NULL OR c.version = d.active_version)
         ORDER BY c.embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}
         LIMIT #{topK}
     </select>
@@ -68,16 +67,14 @@
                c.document_id, c.version, c.parent_id, c.chunk_type, c.title, c.created_at,
                c.sparse_vector::text AS sparse_vector
         FROM ai_knowledge_chunk c
+        LEFT JOIN ai_document d
+               ON d.document_id = c.document_id
+              AND d.user_id = c.user_id
         WHERE c.sparse_vector IS NOT NULL
           AND c.chunk_type = 'CHILD'
           AND (-(c.sparse_vector &lt;#&gt; CAST(#{querySparse} AS sparsevec))) &gt;= #{minScore}
           AND (c.user_id = #{userId} OR (NOT #{privateOnly} AND c.user_id IS NULL))
-          AND (c.document_id IS NULL OR c.version = (
-              SELECT MAX(v.version)
-              FROM ai_knowledge_chunk v
-              WHERE v.document_id = c.document_id
-                AND v.user_id IS NOT DISTINCT FROM c.user_id
-          ))
+          AND (c.document_id IS NULL OR d.id IS NULL OR c.version = d.active_version)
         ORDER BY c.sparse_vector &lt;#&gt; CAST(#{querySparse} AS sparsevec)
         LIMIT #{topK}
     </select>
@@ -154,15 +151,27 @@
           AND user_id = #{userId}
     </select>
 
-    <!-- 新版本完整落库后清理旧版本；检索端另有 latest-version 过滤，清理失败也不会召回旧内容 -->
-    <delete id="deleteOlderVersions">
+    <!--
+      回收非当前版本（GC 专用）：按批删除，避免一次删掉上万行形成长事务与大锁。
+      调用方循环直到返回 0；旧版本已不在 active_version 上，删除失败不影响读。
+    -->
+    <delete id="deleteInactiveVersions">
         DELETE FROM ai_knowledge_chunk
-        WHERE document_id = #{documentId}
-          AND version &lt; #{version}
-          AND user_id = #{userId}
+        WHERE id IN (
+            SELECT id
+            FROM ai_knowledge_chunk
+            WHERE document_id = #{documentId}
+              AND user_id = #{userId}
+              AND (
+                  version &lt; #{activeVersion}
+                  OR (version &gt; #{activeVersion}
+                      AND created_at &lt; now() - make_interval(hours =&gt; #{retentionHours}))
+              )
+            LIMIT #{batchSize}
+        )
     </delete>
 
-    <!-- 导入中途失败清理：避免半成品版本成为 MAX(version) 后遮住上一份完整版本 -->
+    <!-- 导入中途失败清理：删除未发布的草稿版本；active_version 未变，旧版本对外仍可读 -->
     <delete id="deleteDocumentVersion">
         DELETE FROM ai_knowledge_chunk
         WHERE document_id = #{documentId}
@@ -193,6 +202,25 @@
           AND user_id = #{userId}
     </update>
 
+    <!-- 父块内容同步：父块不嵌入，只更新整章上下文；父子一致性由服务层在同一事务内维护 -->
+    <update id="updateParentContent">
+        UPDATE ai_knowledge_chunk
+        SET content = #{content},
+            metadata = CAST(#{metadata} AS jsonb),
+            updated_at = now()
+        WHERE id = #{id}
+          AND chunk_type = 'PARENT'
+          AND user_id = #{userId}
+    </update>
+
+    <!-- 子块级重建/父块删除前清空子块；仅本人私有块可操作 -->
+    <delete id="deleteChildrenByParentId">
+        DELETE FROM ai_knowledge_chunk
+        WHERE parent_id = #{parentId}
+          AND chunk_type = 'CHILD'
+          AND user_id = #{userId}
+    </delete>
+
     <!-- 删除：仅本人私有块可删（公共库块服务层直接拒绝，SQL 层再过滤双保险） -->
     <delete id="deleteById">
         DELETE FROM ai_knowledge_chunk
@@ -206,14 +234,19 @@
       范围 = 当前用户可见（公共库 + 本人私有库），支撑个人知识库健康观测。
     -->
     <select id="healthStats" resultType="com.example.langchain4j.repository.mapper.KnowledgeChunkMapper$HealthStats">
-        SELECT count(*)                                                              AS total_chunks,
-               count(*) FILTER (WHERE user_id IS NOT NULL)                          AS private_chunks,
-               count(*) FILTER (WHERE user_id IS NULL)                              AS public_chunks,
-               count(*) FILTER (WHERE content IS NULL OR length(trim(content)) = 0) AS empty_content,
-               count(*) FILTER (WHERE embedding IS NULL AND chunk_type = 'CHILD')  AS no_embedding,
-               COALESCE(AVG(length(content)), 0)                                    AS avg_content_length,
-               MAX(created_at)                                                      AS last_imported_at
-        FROM ai_knowledge_chunk
-        WHERE user_id IS NULL OR user_id = #{userId}
+        SELECT count(*)                                                                       AS total_chunks,
+               count(*) FILTER (WHERE c.user_id IS NOT NULL)                                  AS private_chunks,
+               count(*) FILTER (WHERE c.user_id IS NULL)                                      AS public_chunks,
+               count(*) FILTER (WHERE c.content IS NULL OR length(trim(c.content)) = 0)        AS empty_content,
+               count(*) FILTER (WHERE c.embedding IS NULL AND c.chunk_type = 'CHILD')         AS no_embedding,
+               COALESCE(AVG(length(c.content)), 0)                                            AS avg_content_length,
+               MAX(c.created_at)                                                              AS last_imported_at
+        FROM ai_knowledge_chunk c
+        <!-- 与检索口径一致：只统计当前发布版本，避免保留期内的旧版本把总量和平均长度算重 -->
+        LEFT JOIN ai_document d
+               ON d.document_id = c.document_id
+              AND d.user_id = c.user_id
+        WHERE (c.user_id IS NULL OR c.user_id = #{userId})
+          AND (c.document_id IS NULL OR d.id IS NULL OR c.version = d.active_version)
     </select>
 </mapper>

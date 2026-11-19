@@ -17,22 +17,35 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 写操作确认令牌：生成、一次性消费与归属校验。
- * <p>
- * 与普通缓存不同，这里必须 fail-closed：创建失败就不返回令牌，消费失败就拒绝执行，
- * 绝不能因为 Redis 故障而跳过人工确认。令牌用 getAndDelete 原子消费，保证同一确认只执行一次。
+ * 写操作确认令牌：短期授权 + 处理租约。
+ *
+ * <p>职责拆成两块，避免"一个令牌既当授权又当执行状态"：
+ * <ul>
+ *   <li><b>令牌</b>（{@code agent:confirm:{id}}）：保存服务端计划与归属，TTL 到期自动失效；</li>
+ *   <li><b>处理租约</b>（{@code agent:confirm:{id}:claim}）：SET NX 抢占，保证同一确认同一时刻只有一个执行者。</li>
+ * </ul>
+ *
+ * <p>令牌只是"用户同意过"的短期凭证，不是执行结果的事实源。执行是否成功由数据库台账
+ * {@code ai_tool_execution} 回答——令牌被删、过期、Redis 重启都不会丢失这个事实。
+ *
+ * <p>故障策略：
+ * <ul>
+ *   <li>创建失败 → 抛 503，绝不下发无法执行的令牌；</li>
+ *   <li>读取失败 → 抛 503，不能伪装成"令牌不存在"；</li>
+ *   <li>令牌不存在/归属不符/过期 → 统一按"不存在"处理，不泄露他人令牌。</li>
+ * </ul>
  */
 @Slf4j
 @Service
 public class ConfirmationService {
 
     private static final String KEY_PREFIX = "agent:confirm:";
+    private static final String CLAIM_SUFFIX = ":claim";
 
     private final RedissonClient redissonClient;
     private final AgentProperties properties;
     private final ObjectMapper objectMapper = JsonUtil.copyMapper();
 
-    /** 注入 Redis 客户端与 Agent 配置。 */
     public ConfirmationService(RedissonClient redissonClient, AgentProperties properties) {
         this.redissonClient = redissonClient;
         this.properties = properties;
@@ -69,40 +82,106 @@ public class ConfirmationService {
     }
 
     /**
-     * 一次性消费确认令牌：先删除再校验，任何失败都不允许继续执行写操作。
-     *
-     * @param confirmationId 前端回传的确认 ID
-     * @param userId         当前登录用户（令牌必须属于本人）
-     * @return 令牌有效时返回待确认动作；不存在、过期、归属不符或 Redis 故障返回 empty
+     * 只读取并校验令牌，不抢占、不删除。
+     * <p>供编排层在进入会话锁前做归属校验；Redis 故障抛 503，而不是伪装成令牌不存在。
      */
-    public Optional<PendingAction> consume(String confirmationId, String userId) {
+    public Optional<PendingAction> preview(String confirmationId, String userId) {
+        return Optional.ofNullable(load(confirmationId, userId));
+    }
+
+    /**
+     * 抢占处理租约：同一确认同一时刻只允许一个执行者。
+     * <p>租约到期自动释放，进程崩溃不会永久锁死；真正的重复执行防护由写工具幂等台账兜底。
+     *
+     * @throws BizException 令牌不存在（404）、已有执行者（409）、Redis 故障（503）
+     */
+    public PendingAction claim(String confirmationId, String userId) {
+        PendingAction action = load(confirmationId, userId);
+        if (action == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "确认请求不存在、已过期或已使用，请重新发起操作");
+        }
+        int claimSeconds = Math.max(1, properties.getTool().getConfirmation().getClaimSeconds());
+        try {
+            RBucket<String> claimBucket = redissonClient.getBucket(KEY_PREFIX + confirmationId + CLAIM_SUFFIX);
+            boolean acquired = claimBucket.trySet("1", claimSeconds, TimeUnit.SECONDS);
+            if (!acquired) {
+                log.warn("[confirm] claim conflict, idTail={}, conversation={}",
+                        idTail(confirmationId), action.conversationId());
+                throw new BizException(ErrorCode.CONFIRMATION_IN_PROGRESS);
+            }
+            log.info("[confirm] claimed, idTail={}, conversation={}, tool={}",
+                    idTail(confirmationId), action.conversationId(), action.tool());
+            return action;
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("[confirm] claim failed, idTail={}, fail-closed: {}", idTail(confirmationId), e.getMessage());
+            throw new BizException(ErrorCode.CACHE_UNAVAILABLE, "确认服务暂不可用，请稍后重试");
+        }
+    }
+
+    /**
+     * 释放处理租约但保留令牌：执行失败时调用，用户可以用同一个 confirmationId 重试。
+     * <p>重试是否安全由写工具的幂等台账保证，不依赖令牌本身。
+     */
+    public void release(String confirmationId) {
         if (confirmationId == null || confirmationId.isBlank()) {
-            return Optional.empty();
+            return;
         }
         try {
+            redissonClient.getBucket(KEY_PREFIX + confirmationId + CLAIM_SUFFIX).delete();
+        } catch (Exception e) {
+            // 租约会自然过期，释放失败不阻断主流程
+            log.warn("[confirm] release failed, idTail={}: {}", idTail(confirmationId), e.getMessage());
+        }
+    }
+
+    /** 完成确认：删除令牌与处理租约（成功执行或用户取消后调用） */
+    public void finish(String confirmationId) {
+        if (confirmationId == null || confirmationId.isBlank()) {
+            return;
+        }
+        try {
+            redissonClient.getBucket(KEY_PREFIX + confirmationId + CLAIM_SUFFIX).delete();
+            redissonClient.getBucket(KEY_PREFIX + confirmationId).delete();
+        } catch (Exception e) {
+            // 令牌 TTL 到期会自然清理；删不掉不影响业务结果
+            log.warn("[confirm] finish failed, idTail={}: {}", idTail(confirmationId), e.getMessage());
+        }
+    }
+
+    /** 读取并校验归属/过期；Redis 故障抛 503，其余无效情况返回 null */
+    private PendingAction load(String confirmationId, String userId) {
+        if (confirmationId == null || confirmationId.isBlank()) {
+            return null;
+        }
+        String json;
+        try {
             RBucket<String> bucket = redissonClient.getBucket(KEY_PREFIX + confirmationId);
-            String json = bucket.getAndDelete();
-            if (json == null || json.isBlank()) {
-                return Optional.empty();
-            }
+            json = bucket.get();
+        } catch (Exception e) {
+            log.error("[confirm] load failed, idTail={}, fail-closed: {}", idTail(confirmationId), e.getMessage());
+            throw new BizException(ErrorCode.CACHE_UNAVAILABLE, "确认服务暂不可用，请稍后重试");
+        }
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
             PendingAction action = objectMapper.readValue(json, PendingAction.class);
             if (!userId.equals(action.userId())) {
                 log.warn("[confirm] user mismatch, idTail={}, conversation={}",
                         idTail(confirmationId), action.conversationId());
-                return Optional.empty();
+                return null;
             }
             if (action.expiresAt() < System.currentTimeMillis()) {
                 log.warn("[confirm] expired, idTail={}, conversation={}",
                         idTail(confirmationId), action.conversationId());
-                return Optional.empty();
+                return null;
             }
-            log.info("[confirm] consumed, idTail={}, conversation={}, tool={}",
-                    idTail(confirmationId), action.conversationId(), action.tool());
-            return Optional.of(action);
+            return action;
         } catch (Exception e) {
-            log.warn("[confirm] consume failed, idTail={}, fail-closed: {}",
-                    idTail(confirmationId), e.getMessage());
-            return Optional.empty();
+            log.warn("[confirm] decode failed, idTail={}: {}", idTail(confirmationId), e.getMessage());
+            return null;
         }
     }
 

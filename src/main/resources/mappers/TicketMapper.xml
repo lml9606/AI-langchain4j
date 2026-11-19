@@ -31,6 +31,14 @@
         WHERE id = #{id}
     </select>
 
+    <select id="selectByIdAndUserId" resultMap="TicketMap">
+        SELECT id, ticket_no, user_id, conversation_id, question, root_cause,
+               status, assignee, reply, created_at, updated_at, resolved_at
+        FROM ai_ticket
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </select>
+
     <select id="selectByTicketNo" resultMap="TicketMap">
         SELECT id, ticket_no, user_id, conversation_id, question, root_cause,
                status, assignee, reply, created_at, updated_at, resolved_at
@@ -85,5 +93,6 @@
             updated_at = now(),
             resolved_at = CASE WHEN #{status} IN ('RESOLVED', 'CLOSED') THEN now() ELSE resolved_at END
         WHERE id = #{id}
+          AND user_id = #{userId}
     </update>
 </mapper>

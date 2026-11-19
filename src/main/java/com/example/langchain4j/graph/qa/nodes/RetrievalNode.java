@@ -2,6 +2,7 @@ package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.common.constant.ChatOptions;
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.graph.qa.EvidenceAssessor;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.knowledge.KnowledgeRetrievalResult;
@@ -170,9 +171,9 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
         String userPrompt = "原查询：\n" + state.effectiveQuery()
                 + "\n\n质检失败原因：\n" + state.validation().reason();
         try {
-            String refined = llmGateway.generate(state.model(),
+            String refined = llmGateway.generate(LlmRequest.of(state.model(),
                     promptTemplateService.resolve("REQUERY_SYSTEM", PromptTemplates.REQUERY_SYSTEM),
-                    userPrompt).text();
+                    userPrompt).scene("requery")).text();
             String cleaned = clean(refined);
             if (!cleaned.isBlank()) {
                 log.info("[retrieval-full] requery refined, queryLength={}, refinedLength={}",

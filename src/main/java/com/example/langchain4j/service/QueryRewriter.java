@@ -1,6 +1,7 @@
 package com.example.langchain4j.service;
 
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.Message;
@@ -65,9 +66,9 @@ public class QueryRewriter {
         try {
             // 步骤3：LLM 话题归属 + 改写一步完成（网关封装：json_object 约束 + 截断感知 + 提取解析，不可用返回 null）
             // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
-            JsonNode node = llmGateway.generateJsonNode(model,
+            JsonNode node = llmGateway.generateJson(LlmRequest.of(model,
                     promptTemplateService.resolve("REWRITE_SYSTEM", PromptTemplates.REWRITE_SYSTEM),
-                    buildUserPrompt(cleaned, history, topics), "rewrite");
+                    buildUserPrompt(cleaned, history, topics)).scene("rewrite"));
             // 截断/解析失败 → 降级返回原句（宁可失忆不可失败）
             if (node == null) {
                 log.warn("[rewrite] degraded, reason=parse, queryLength={}, history={}, costMs={}",

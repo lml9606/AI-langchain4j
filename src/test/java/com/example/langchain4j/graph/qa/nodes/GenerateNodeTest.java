@@ -1,6 +1,7 @@
 package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.guard.OutputGuardService;
 import com.example.langchain4j.graph.qa.AnswerBudgetResolver;
 import com.example.langchain4j.graph.qa.QaIntent;
@@ -9,7 +10,6 @@ import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.LlmResult;
 import com.example.langchain4j.repository.mapper.PromptConfigMapper;
 import com.example.langchain4j.service.PromptTemplateService;
-import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.model.output.FinishReason;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,9 +24,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -54,15 +52,17 @@ class GenerateNodeTest {
     @Test
     @DisplayName("简单知识问答 → system prompt 注入 500 字约束，LLM 收到 1024 token 上限")
     void simpleKnowledgeUsesDynamicBudget() {
-        when(llmGateway.generate(eq("test-model"), anyList(), anyInt()))
+        when(llmGateway.generate(any(LlmRequest.class)))
                 .thenReturn(new LlmResult("结论", 20, FinishReason.STOP));
 
         node.apply(stateOf("simple", 1, "auto"));
 
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<List<ChatMessage>> messagesCaptor = ArgumentCaptor.forClass(List.class);
-        verify(llmGateway).generate(eq("test-model"), messagesCaptor.capture(), eq(1024));
-        SystemMessage system = (SystemMessage) messagesCaptor.getValue().get(0);
+        ArgumentCaptor<LlmRequest> requestCaptor = ArgumentCaptor.forClass(LlmRequest.class);
+        verify(llmGateway).generate(requestCaptor.capture());
+        LlmRequest request = requestCaptor.getValue();
+        assertThat(request.model()).isEqualTo("test-model");
+        assertThat(request.maxOutputTokens()).isEqualTo(1024);
+        SystemMessage system = (SystemMessage) request.messages().get(0);
         assertThat(system.text())
                 .contains("总长度控制在 500 字以内")
                 .contains("最多 3 条关键点");
@@ -71,12 +71,14 @@ class GenerateNodeTest {
     @Test
     @DisplayName("复合知识问答 → LLM 收到复合预算 1536 token")
     void compoundKnowledgeUsesLargerBudget() {
-        when(llmGateway.generate(eq("test-model"), anyList(), anyInt()))
+        when(llmGateway.generate(any(LlmRequest.class)))
                 .thenReturn(new LlmResult("结论", 20, FinishReason.STOP));
 
         node.apply(stateOf("compound", 2, "auto"));
 
-        verify(llmGateway).generate(eq("test-model"), anyList(), eq(1536));
+        ArgumentCaptor<LlmRequest> requestCaptor = ArgumentCaptor.forClass(LlmRequest.class);
+        verify(llmGateway).generate(requestCaptor.capture());
+        assertThat(requestCaptor.getValue().maxOutputTokens()).isEqualTo(1536);
     }
 
     private WorkflowState stateOf(String complexity, int subQueryCount, String answerMode) {

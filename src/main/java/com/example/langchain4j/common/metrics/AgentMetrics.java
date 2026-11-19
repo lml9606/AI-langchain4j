@@ -6,6 +6,8 @@ import org.springframework.stereotype.Component;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 /**
  * Agent 业务指标：集中定义与埋点，暴露到 /actuator/prometheus。
@@ -27,15 +29,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class AgentMetrics {
 
     private final MeterRegistry registry;
-    /** 熔断器状态：跨线程共享，Gauge 定期采样上报 */
-    private final AtomicInteger circuitOpen = new AtomicInteger(0);
+    /** 熔断器状态：按模型隔离，Gauge 定期采样上报 */
+    private final Map<String, AtomicInteger> circuitOpenByModel = new ConcurrentHashMap<>();
 
     public AgentMetrics(MeterRegistry registry) {
         this.registry = registry;
-        // Gauge 构造即注册；后续只需更新 circuitOpen 的值
-        Gauge.builder("llm.circuit.open", circuitOpen, AtomicInteger::doubleValue)
-                .description("LLM 熔断器状态：1=打开（快速失败），0=关闭")
-                .register(registry);
     }
 
     /** 对话请求 +1 */
@@ -110,9 +108,18 @@ public class AgentMetrics {
                 .record(costMs, TimeUnit.MILLISECONDS);
     }
 
-    /** 更新熔断器状态（打开=1 / 关闭=0） */
-    public void setCircuitOpen(boolean open) {
-        circuitOpen.set(open ? 1 : 0);
+    /** 更新指定模型熔断器状态（打开=1 / 关闭=0），模型首次出现时注册 Gauge。 */
+    public void setCircuitOpen(String model, boolean open) {
+        String label = safeLabel(model);
+        AtomicInteger state = circuitOpenByModel.computeIfAbsent(label, key -> {
+            AtomicInteger value = new AtomicInteger(0);
+            Gauge.builder("llm.circuit.open", value, AtomicInteger::doubleValue)
+                    .tag("model", key)
+                    .description("LLM 熔断器状态：1=打开（快速失败），0=关闭")
+                    .register(registry);
+            return value;
+        });
+        state.set(open ? 1 : 0);
     }
 
     /** 标签值兜底：空值/异常字符统一替换，防止指标注册异常 */

@@ -16,6 +16,9 @@ public interface TicketMapper {
 
     Ticket selectById(@Param("id") long id);
 
+    /** 按 id + 归属用户查询（用户侧操作必须带 user_id，防水平越权） */
+    Ticket selectByIdAndUserId(@Param("id") long id, @Param("userId") String userId);
+
     Ticket selectByTicketNo(@Param("ticketNo") String ticketNo);
 
     /** 会话最近一条工单（任意状态；用于“同会话不重复建单”判断） */
@@ -29,5 +32,7 @@ public interface TicketMapper {
     int updateReply(@Param("id") long id, @Param("reply") String reply,
                     @Param("assignee") String assignee, @Param("status") String status);
 
-    int updateStatus(@Param("id") long id, @Param("status") String status);
+    /** 按 id + 归属用户更新状态（SQL 层再次过滤 user_id，避免 TOCTOU） */
+    int updateStatus(@Param("id") long id, @Param("status") String status,
+                     @Param("userId") String userId);
 }

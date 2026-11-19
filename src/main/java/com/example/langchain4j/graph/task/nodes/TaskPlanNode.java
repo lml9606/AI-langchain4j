@@ -3,6 +3,7 @@ package com.example.langchain4j.graph.task.nodes;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
@@ -37,18 +38,20 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
     private final ToolRegistry toolRegistry;
     private final AgentProperties properties;
 
-    /** 注入 LLM、提示词、工具注册表与 Agent 配置。 */
-    public TaskPlanNode(LlmGateway llmGateway,
-                        PromptTemplateService promptTemplateService,
-                        ToolRegistry toolRegistry,
-                        AgentProperties properties) {
+    /**
+     * 注入 LLM、提示词、工具注册表与 Agent 配置。
+     */
+    public TaskPlanNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService,
+                        ToolRegistry toolRegistry, AgentProperties properties) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
         this.toolRegistry = toolRegistry;
         this.properties = properties;
     }
 
-    /** 解析实体、判断缺参并生成工具执行计划；写操作转确认，只读操作转执行。 */
+    /**
+     * 解析实体、判断缺参并生成工具执行计划；写操作转确认，只读操作转执行。
+     */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         // 步骤1：准备工具清单（名称/描述/参数 Schema），模型只能从清单中选择
@@ -62,17 +65,18 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
             catalog.add(item);
         }
         int maxSteps = Math.max(1, properties.getTool().getMaxStepsPerTask());
-        String systemPrompt = promptTemplateService.resolveFormatted(
-                "TASK_PLAN_SYSTEM", PromptTemplates.TASK_PLAN_SYSTEM, maxSteps);
-        String userPrompt = "用户请求：\n" + state.effectiveQuery()
-                + "\n\n可用工具：\n" + JsonUtil.toJson(catalog);
+        String systemPrompt = promptTemplateService.resolveFormatted("TASK_PLAN_SYSTEM",
+                PromptTemplates.TASK_PLAN_SYSTEM, maxSteps);
+        String userPrompt = "用户请求：\n" + state.effectiveQuery() + "\n\n可用工具：\n" +
+                JsonUtil.toJson(catalog);
         log.info("[task-plan] start, queryLength={}, tools={}, maxSteps={}",
                 state.effectiveQuery().length(), catalog.size(), maxSteps);
 
         Map<String, Object> updates = new LinkedHashMap<>();
         try {
             // 步骤2：结构化输出计划；截断/解析失败直接标记错误，由路由转兜底
-            JsonNode node = llmGateway.generateJsonNode(state.model(), systemPrompt, userPrompt, "task-plan");
+            JsonNode node = llmGateway.generateJson(
+                    LlmRequest.of(state.model(), systemPrompt, userPrompt).scene("task-plan"));
             if (node == null) {
                 updates.put(WorkflowState.ERROR, "任务计划生成失败：模型输出截断或非 JSON");
                 return updates;
@@ -81,8 +85,8 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
             Map<String, String> entities = new LinkedHashMap<>();
             JsonNode entitiesNode = node.get("entities");
             if (entitiesNode != null && entitiesNode.isObject()) {
-                entitiesNode.fields().forEachRemaining(entry ->
-                        entities.put(entry.getKey(), entry.getValue().asText("")));
+                entitiesNode.fields().forEachRemaining(
+                        entry -> entities.put(entry.getKey(), entry.getValue().asText("")));
             }
             // 步骤4：解析缺失槽位
             List<String> missing = new ArrayList<>();
@@ -108,10 +112,10 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
                         continue;
                     }
                     JsonNode argsNode = stepNode.get("args");
-                    Map<String, Object> args = argsNode != null && argsNode.isObject()
-                            ? JsonUtil.mapper().convertValue(argsNode, new TypeReference<Map<String, Object>>() {
-                    })
-                            : Map.of();
+                    Map<String, Object> args = argsNode != null && argsNode.isObject() ?
+                            JsonUtil.mapper().convertValue(argsNode,
+                                    new TypeReference<Map<String, Object>>() {
+                                    }) : Map.of();
                     Map<String, Object> step = new LinkedHashMap<>();
                     step.put("tool", tool);
                     step.put("args", args);
@@ -130,8 +134,9 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
                 updates.put(WorkflowState.TASK_CLARIFY, true);
                 updates.put(WorkflowState.TASK_CONFIDENCE, 1.0);
                 updates.put(WorkflowState.TASK_CONFIDENCE_REASON, "缺少必要参数，已生成追问");
-                updates.put(WorkflowState.RESULT, promptTemplateService.resolveFormatted(
-                        "TASK_CLARIFY_ANSWER", PromptTemplates.TASK_CLARIFY_ANSWER, slotLabels(missing)));
+                updates.put(WorkflowState.RESULT,
+                        promptTemplateService.resolveFormatted("TASK_CLARIFY_ANSWER",
+                                PromptTemplates.TASK_CLARIFY_ANSWER, slotLabels(missing)));
                 updates.put(WorkflowState.ERROR, "");
                 log.info("[task-plan] clarification required, missingSlots={}, entityFields={}",
                         missing, entities.keySet());
@@ -150,8 +155,9 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
                 ToolDefinition definition = toolRegistry.find(toolName)
                         .map(AgentTool::definition)
                         .orElse(null);
-                ToolSideEffect sideEffect = definition == null
-                        ? ToolSideEffect.READ_ONLY : definition.sideEffect();
+                // 注册表查不到时按高风险处理：宁可多一次确认，也不能把未知工具当成只读直接执行
+                ToolSideEffect sideEffect =
+                        definition == null ? ToolSideEffect.DANGEROUS : definition.sideEffect();
                 if (sideEffect != ToolSideEffect.READ_ONLY) {
                     Map<String, Object> writeStep = new LinkedHashMap<>(step);
                     writeStep.put("risk", sideEffect.name());
@@ -198,7 +204,9 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
         }
     }
 
-    /** 槽位说明：任务工具由业务方注册，槽位名不写死，统一按参数名提示用户补充 */
+    /**
+     * 槽位说明：任务工具由业务方注册，槽位名不写死，统一按参数名提示用户补充
+     */
     private String slotLabels(List<String> slots) {
         List<String> labels = new ArrayList<>(slots.size());
         for (String slot : slots) {

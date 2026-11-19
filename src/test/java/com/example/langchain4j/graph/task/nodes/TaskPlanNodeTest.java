@@ -1,6 +1,7 @@
 package com.example.langchain4j.graph.task.nodes;
 
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.service.PromptTemplateService;
@@ -58,6 +59,10 @@ class TaskPlanNodeTest {
         lenient().when(toolRegistry.definitions()).thenReturn(List.of(
                 new ToolDefinition(TOOL, "查询业务对象或业务记录", "{}", List.of("entityId"),
                         ToolSideEffect.READ_ONLY, 3000)));
+        // 默认按只读工具建模；写工具用例再覆盖 definition()
+        lenient().when(agentTool.definition()).thenReturn(new ToolDefinition(
+                TOOL, "查询业务对象或业务记录", "{}", List.of("entityId"),
+                ToolSideEffect.READ_ONLY, 3000));
         lenient().when(toolRegistry.find(TOOL)).thenReturn(Optional.of(agentTool));
     }
 
@@ -75,7 +80,7 @@ class TaskPlanNodeTest {
     @Test
     @DisplayName("正常计划 → 写入工具步骤，clarify=false")
     void planNormal() throws Exception {
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(json("""
                         {"entities":{"entityId":"B1001"},"missing":[],
                          "steps":[{"tool":"read_tool",
@@ -96,7 +101,7 @@ class TaskPlanNodeTest {
     void planWriteToolRequiresConfirmation() throws Exception {
         when(agentTool.definition()).thenReturn(new ToolDefinition(
                 TOOL, "修改业务数据", "{}", List.of("entityId"), ToolSideEffect.WRITE, 3000));
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(json("""
                         {"entities":{"entityId":"B1001"},"missing":[],
                          "steps":[{"tool":"read_tool",
@@ -121,7 +126,7 @@ class TaskPlanNodeTest {
     void rejectMultipleWriteSteps() throws Exception {
         when(agentTool.definition()).thenReturn(new ToolDefinition(
                 TOOL, "修改业务数据", "{}", List.of("entityId"), ToolSideEffect.WRITE, 3000));
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(json("""
                         {"entities":{"entityId":"B1001"},"missing":[],
                          "steps":[
@@ -138,7 +143,7 @@ class TaskPlanNodeTest {
     @Test
     @DisplayName("缺少必填业务参数 → 生成追问，不执行工具")
     void clarifyWhenMissingSlot() throws Exception {
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(json("""
                         {"entities":{"entityId":""},"missing":["entityId"],"steps":[]}
                         """));
@@ -153,7 +158,7 @@ class TaskPlanNodeTest {
     @Test
     @DisplayName("未知工具被过滤；无可用步骤 → 标记规划失败")
     void rejectUnknownTool() throws Exception {
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(json("""
                         {"entities":{"entityId":"B1001"},"missing":[],
                          "steps":[{"tool":"delete_everything","args":{},"purpose":"危险操作"}]}
@@ -167,7 +172,7 @@ class TaskPlanNodeTest {
     @Test
     @DisplayName("LLM 返回 null → 标记错误，交由路由兜底")
     void failWhenLlmReturnsNull() {
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(null);
 
         Map<String, Object> updates = node.apply(stateOf("帮我查业务对象 B1001"));

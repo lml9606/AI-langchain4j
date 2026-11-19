@@ -99,7 +99,7 @@ public class TicketController {
      */
     @PostMapping("/{id}/close")
     public ApiResponse<Void> close(@PathVariable long id) {
-        ticketService.close(id);
+        ticketService.close(id, UserContext.require());
         return ApiResponse.success();
     }
 }

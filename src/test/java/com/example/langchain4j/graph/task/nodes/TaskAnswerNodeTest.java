@@ -1,6 +1,7 @@
 package com.example.langchain4j.graph.task.nodes;
 
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.guard.OutputGuardService;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
@@ -17,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
@@ -66,7 +68,7 @@ class TaskAnswerNodeTest {
     @Test
     @DisplayName("正常回答 → 追加参考依据，置信度与理由可解释")
     void appendCitationsAndConfidence() {
-        when(llmGateway.generate(anyString(), anyString(), anyString()))
+        when(llmGateway.generate(any(LlmRequest.class)))
                 .thenReturn(LlmResult.of("业务对象 B1001 已支付。", 10, null));
 
         Map<String, Object> updates = node.apply(stateWithEvidence());
@@ -83,7 +85,7 @@ class TaskAnswerNodeTest {
     @Test
     @DisplayName("模型失败 → 确定性摘要兜底，不抛异常")
     void deterministicFallbackWhenLlmFails() {
-        when(llmGateway.generate(anyString(), anyString(), anyString()))
+        when(llmGateway.generate(any(LlmRequest.class)))
                 .thenThrow(new RuntimeException("llm down"));
 
         Map<String, Object> updates = node.apply(stateWithEvidence());

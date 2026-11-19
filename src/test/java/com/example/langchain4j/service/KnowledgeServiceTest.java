@@ -3,12 +3,15 @@ package com.example.langchain4j.service;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.common.util.TokenEstimator;
+import com.example.langchain4j.dto.request.KnowledgeUpdateRequest;
 import com.example.langchain4j.knowledge.EmbeddingService;
 import com.example.langchain4j.knowledge.KnowledgeFileParser;
 import com.example.langchain4j.knowledge.SparseEmbeddingService;
 import com.example.langchain4j.knowledge.VectorSearchService;
 import com.example.langchain4j.repository.entity.KnowledgeChunk;
+import com.example.langchain4j.repository.entity.KnowledgeDocument;
 import com.example.langchain4j.repository.mapper.KnowledgeChunkMapper;
+import com.example.langchain4j.repository.mapper.KnowledgeDocumentMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -23,7 +26,9 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -36,6 +41,8 @@ class KnowledgeServiceTest {
 
     @Mock
     private KnowledgeChunkMapper knowledgeChunkMapper;
+    @Mock
+    private KnowledgeDocumentMapper knowledgeDocumentMapper;
     @Mock
     private EmbeddingService embeddingService;
     @Mock
@@ -53,8 +60,8 @@ class KnowledgeServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new KnowledgeService(knowledgeChunkMapper, embeddingService, sparseEmbeddingService,
-                vectorSearchService, fileParser, properties, importExecutor);
+        service = new KnowledgeService(knowledgeChunkMapper, knowledgeDocumentMapper, embeddingService,
+                sparseEmbeddingService, vectorSearchService, fileParser, properties, importExecutor);
     }
 
     @Test
@@ -366,12 +373,16 @@ class KnowledgeServiceTest {
     }
 
     @Test
-    @DisplayName("文档导入：父子块写入同一 documentId/version，并在成功后清理旧版本")
+    @DisplayName("文档导入：父子块写入同一 documentId/version，完成后发布 active_version")
     void importDocumentWritesDocumentVersion() {
         AgentProperties.Knowledge knowledge = new AgentProperties.Knowledge();
         when(properties.getKnowledge()).thenReturn(knowledge);
         when(embeddingService.embed(anyString())).thenReturn(new float[]{0.1f, 0.2f});
         when(sparseEmbeddingService.embed(anyString())).thenReturn(null);
+        when(knowledgeDocumentMapper.selectByDocumentId("doc-1", "u1"))
+                .thenReturn(null, document("doc-1", "u1", 0));
+        when(knowledgeDocumentMapper.startImport(eq("doc-1"), eq("u1"), anyInt())).thenReturn(1);
+        when(knowledgeDocumentMapper.activate(eq("doc-1"), eq("u1"), eq(2), any(), any())).thenReturn(1);
         when(knowledgeChunkMapper.insert(any(KnowledgeChunk.class))).thenAnswer(invocation -> {
             KnowledgeChunk chunk = invocation.getArgument(0);
             chunk.setId(100L);
@@ -400,7 +411,8 @@ class KnowledgeServiceTest {
             assertThat(child.getVersion()).isEqualTo(2);
             assertThat(child.getParentId()).isEqualTo(100L);
         });
-        verify(knowledgeChunkMapper).deleteOlderVersions("doc-1", 2, "u1");
+        // 发布只改指针；旧版本留给 GC 回收，不在导入线程里同步删除
+        verify(knowledgeDocumentMapper).activate(eq("doc-1"), eq("u1"), eq(2), any(), any());
     }
 
     @Test
@@ -410,6 +422,9 @@ class KnowledgeServiceTest {
         when(properties.getKnowledge()).thenReturn(knowledge);
         when(embeddingService.embed(anyString())).thenReturn(new float[]{0.1f, 0.2f});
         when(sparseEmbeddingService.embed(anyString())).thenReturn(null);
+        when(knowledgeDocumentMapper.selectByDocumentId("doc-2", "u2"))
+                .thenReturn(null, document("doc-2", "u2", 0));
+        when(knowledgeDocumentMapper.startImport(eq("doc-2"), eq("u2"), anyInt())).thenReturn(1);
         when(knowledgeChunkMapper.insert(any(KnowledgeChunk.class))).thenAnswer(invocation -> {
             KnowledgeChunk chunk = invocation.getArgument(0);
             chunk.setId(200L);
@@ -427,6 +442,16 @@ class KnowledgeServiceTest {
         }
 
         verify(knowledgeChunkMapper).deleteDocumentVersion("doc-2", 1, "u2");
+        verify(knowledgeDocumentMapper).markImportFailed("doc-2", "u2");
+    }
+
+    private KnowledgeDocument document(String documentId, String userId, int activeVersion) {
+        KnowledgeDocument document = new KnowledgeDocument();
+        document.setDocumentId(documentId);
+        document.setUserId(userId);
+        document.setActiveVersion(activeVersion);
+        document.setStatus("READY");
+        return document;
     }
 
     @Test
@@ -448,5 +473,143 @@ class KnowledgeServiceTest {
         assertThat(sections).hasSize(9);
         assertThat(sections.get(0).title()).isEqualTo("一、Java 基础 > 1. 问题1");
         assertThat(sections).allMatch(section -> section.body().length() <= 2000);
+    }
+
+    @Test
+    @DisplayName("更新子块：同步替换父块中的旧正文")
+    void updateChildSyncsParentContent() {
+        AgentProperties.Knowledge knowledge = new AgentProperties.Knowledge();
+        when(properties.getKnowledge()).thenReturn(knowledge);
+        KnowledgeChunk child = chunk(10L, 5L, "CHILD", "退款规则", "退款规则｜旧正文。");
+        KnowledgeChunk parent = chunk(5L, null, "PARENT", "退款规则", "旧正文。");
+        when(knowledgeChunkMapper.selectById(10L, "u1")).thenReturn(child);
+        when(knowledgeChunkMapper.selectParentById(5L, "u1")).thenReturn(parent);
+        when(knowledgeChunkMapper.updateContent(any(KnowledgeChunk.class))).thenReturn(1);
+        when(knowledgeChunkMapper.updateParentContent(eq(5L), eq("新正文。"), any(), eq("u1"))).thenReturn(1);
+        when(embeddingService.embed(anyString())).thenReturn(new float[]{0.1f, 0.2f});
+        when(sparseEmbeddingService.embed(anyString())).thenReturn(null);
+
+        KnowledgeUpdateRequest request = new KnowledgeUpdateRequest();
+        request.setContent("新正文。");
+        UserContext.set("u1", "USER");
+        try {
+            service.updateChunk(10L, request);
+        } finally {
+            UserContext.clear();
+        }
+
+        ArgumentCaptor<KnowledgeChunk> childCaptor = ArgumentCaptor.forClass(KnowledgeChunk.class);
+        verify(knowledgeChunkMapper).updateContent(childCaptor.capture());
+        assertThat(childCaptor.getValue().getContent()).isEqualTo("退款规则｜新正文。");
+        verify(knowledgeChunkMapper).updateParentContent(5L, "新正文。", null, "u1");
+    }
+
+    @Test
+    @DisplayName("删除子块：无兄弟子块时删除父块；有兄弟子块时同步父块正文")
+    void deleteChildSyncsOrRemovesParent() {
+        KnowledgeChunk child = chunk(10L, 5L, "CHILD", "退款规则", "退款规则｜旧正文。");
+        KnowledgeChunk parent = chunk(5L, null, "PARENT", "退款规则", "旧正文。\n\n保留正文。");
+        when(knowledgeChunkMapper.selectById(10L, "u1")).thenReturn(child);
+        when(knowledgeChunkMapper.selectParentById(5L, "u1")).thenReturn(parent);
+        when(knowledgeChunkMapper.deleteById(10L, "u1")).thenReturn(1);
+        when(knowledgeChunkMapper.selectChildrenByParentId(5L, "u1"))
+                .thenReturn(List.of(chunk(11L, 5L, "CHILD", "退款规则", "退款规则｜保留正文。")));
+        when(knowledgeChunkMapper.updateParentContent(eq(5L), anyString(), any(), eq("u1"))).thenReturn(1);
+
+        UserContext.set("u1", "USER");
+        try {
+            service.deleteChunk(10L);
+        } finally {
+            UserContext.clear();
+        }
+
+        verify(knowledgeChunkMapper).updateParentContent(5L, "保留正文。", null, "u1");
+    }
+
+    @Test
+    @DisplayName("删除最后一个子块：父块一并删除，不留空父块")
+    void deleteLastChildRemovesParent() {
+        KnowledgeChunk child = chunk(10L, 5L, "CHILD", "退款规则", "退款规则｜旧正文。");
+        when(knowledgeChunkMapper.selectById(10L, "u1")).thenReturn(child);
+        when(knowledgeChunkMapper.selectParentById(5L, "u1"))
+                .thenReturn(chunk(5L, null, "PARENT", "退款规则", "旧正文。"));
+        when(knowledgeChunkMapper.deleteById(10L, "u1")).thenReturn(1);
+        when(knowledgeChunkMapper.selectChildrenByParentId(5L, "u1")).thenReturn(List.of());
+        when(knowledgeChunkMapper.deleteById(5L, "u1")).thenReturn(1);
+
+        UserContext.set("u1", "USER");
+        try {
+            service.deleteChunk(10L);
+        } finally {
+            UserContext.clear();
+        }
+
+        verify(knowledgeChunkMapper).deleteById(5L, "u1");
+    }
+
+    @Test
+    @DisplayName("删除父块：级联删除其全部子块")
+    void deleteParentCascadesChildren() {
+        KnowledgeChunk parent = chunk(5L, null, "PARENT", "退款规则", "整章正文。");
+        when(knowledgeChunkMapper.selectById(5L, "u1")).thenReturn(parent);
+        when(knowledgeChunkMapper.deleteChildrenByParentId(5L, "u1")).thenReturn(2);
+        when(knowledgeChunkMapper.deleteById(5L, "u1")).thenReturn(1);
+
+        UserContext.set("u1", "USER");
+        try {
+            service.deleteChunk(5L);
+        } finally {
+            UserContext.clear();
+        }
+
+        verify(knowledgeChunkMapper).deleteChildrenByParentId(5L, "u1");
+        verify(knowledgeChunkMapper).deleteById(5L, "u1");
+    }
+
+    @Test
+    @DisplayName("更新父块：删除旧子块并按新正文重建子块")
+    void updateParentRebuildsChildren() {
+        AgentProperties.Knowledge knowledge = new AgentProperties.Knowledge();
+        when(properties.getKnowledge()).thenReturn(knowledge);
+        KnowledgeChunk parent = chunk(5L, null, "PARENT", "退款规则", "旧正文。");
+        parent.setDocumentId("doc-1");
+        parent.setVersion(2);
+        when(knowledgeChunkMapper.selectById(5L, "u1")).thenReturn(parent);
+        when(knowledgeChunkMapper.updateParentContent(eq(5L), eq("新正文。"), any(), eq("u1"))).thenReturn(1);
+        when(knowledgeChunkMapper.deleteChildrenByParentId(5L, "u1")).thenReturn(2);
+        when(embeddingService.embed(anyString())).thenReturn(new float[]{0.1f, 0.2f});
+        when(sparseEmbeddingService.embed(anyString())).thenReturn(null);
+
+        KnowledgeUpdateRequest request = new KnowledgeUpdateRequest();
+        request.setContent("新正文。");
+        UserContext.set("u1", "USER");
+        try {
+            service.updateChunk(5L, request);
+        } finally {
+            UserContext.clear();
+        }
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<KnowledgeChunk>> childrenCaptor = ArgumentCaptor.forClass(List.class);
+        verify(knowledgeChunkMapper).deleteChildrenByParentId(5L, "u1");
+        verify(knowledgeChunkMapper).insertBatch(childrenCaptor.capture());
+        assertThat(childrenCaptor.getValue()).isNotEmpty();
+        assertThat(childrenCaptor.getValue()).allSatisfy(child -> {
+            assertThat(child.getParentId()).isEqualTo(5L);
+            assertThat(child.getContent()).isEqualTo("退款规则｜新正文。");
+            assertThat(child.getDocumentId()).isEqualTo("doc-1");
+            assertThat(child.getVersion()).isEqualTo(2);
+        });
+    }
+
+    private KnowledgeChunk chunk(long id, Long parentId, String type, String title, String content) {
+        KnowledgeChunk chunk = new KnowledgeChunk();
+        chunk.setId(id);
+        chunk.setParentId(parentId);
+        chunk.setChunkType(type);
+        chunk.setTitle(title);
+        chunk.setContent(content);
+        chunk.setUserId("u1");
+        return chunk;
     }
 }

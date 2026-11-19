@@ -177,6 +177,8 @@ public class AgentProperties {
     public static class Llm {
         private int timeoutSeconds = 60;
         private int maxRetries = 3;
+        /** 单模型每分钟最多调用次数（Redis 固定窗口，多实例共享；<=0 关闭模型级限流） */
+        private int maxCallsPerMinute = 120;
         /** 重试退避基数（毫秒）：第 N 次退避 = base * 2^N */
         private long backoffBaseMs = 1000L;
         /** 重试退避随机抖动上限（毫秒），避免多实例同时重试 */
@@ -270,6 +272,17 @@ public class AgentProperties {
         private int batchMaxDocuments = 20;
         /** 单篇文档/知识块最大字符数（入口 token 拦截：超限拒绝导入，防超大内容打爆嵌入服务与检索预算） */
         private int maxDocumentChars = 50_000;
+
+        /** 旧版本保留小时数：发布后保留多久供回滚/对比，到期由 GC 回收 */
+        private int versionRetentionHours = 24;
+        /** 旧版本回收开关（关闭后数据继续累积，仅用于排障或手动运维） */
+        private boolean gcEnabled = true;
+        /** GC 单轮最多扫描的文档数：限制任务时长，避免一次扫全库 */
+        private int gcMaxDocuments = 50;
+        /** GC 单文档单批删除行数：分批删除，避免一次删上万行形成长事务与大锁 */
+        private int gcBatchSize = 500;
+        /** 导入中断判定分钟数：超过该时长仍为 IMPORTING，视为进程异常退出，允许后续导入接管 */
+        private int importStaleMinutes = 30;
     }
 
     /**
@@ -361,6 +374,11 @@ public class AgentProperties {
      */
     @Data
     public static class Tool {
+        /**
+         * 工具白名单：非空时只有列出的工具会进入规划目录、也只有它们能被查找执行。
+         * 配置了不存在的名字会在启动期 fail-fast，避免写错名字后静默失效。
+         */
+        private List<String> enabledTools = List.of();
         /** 全局只读开关：true 时任何 WRITE/DANGEROUS 工具都会被执行器拒绝 */
         private boolean readOnly = true;
         /** 写工具白名单：即使 readOnly=false，也只允许这里声明的写工具执行 */
@@ -388,6 +406,10 @@ public class AgentProperties {
         public static class Confirmation {
             /** 确认令牌有效期（秒）：过期后必须重新规划，避免陈旧操作被执行 */
             private int ttlSeconds = 300;
+            /** 处理租约（秒）：同一令牌在该时间内只允许一个请求执行，需覆盖一次图执行耗时 */
+            private int claimSeconds = 600;
+            /** 执行台账失联判定（秒）：RUNNING 超过该时长视为进程崩溃，允许接管重试 */
+            private int staleSeconds = 60;
         }
     }
 }

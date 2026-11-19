@@ -2,6 +2,7 @@ package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.common.constant.ChatOptions;
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.graph.qa.EvidenceAssessor;
 import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
@@ -111,9 +112,9 @@ public class ValidateNode implements NodeAction<WorkflowState> {
                 + "\n\n参考资料：\n" + state.context()
                 + "\n\n候选回答：\n" + state.result();
         try {
-            JsonNode node = llmGateway.generateJsonNode(state.model(),
+            JsonNode node = llmGateway.generateJson(LlmRequest.of(state.model(),
                     promptTemplateService.resolve("VALIDATE_LLM_SYSTEM", PromptTemplates.VALIDATE_LLM_SYSTEM),
-                    userPrompt, "validate");
+                    userPrompt).scene("validate"));
             if (node == null) {
                 return QaResult.pass();
             }

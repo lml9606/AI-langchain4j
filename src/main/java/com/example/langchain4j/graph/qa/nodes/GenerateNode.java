@@ -1,6 +1,7 @@
 package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.common.exception.BizException;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.guard.OutputGuardService;
 import com.example.langchain4j.graph.qa.AnswerBudget;
 import com.example.langchain4j.graph.qa.AnswerBudgetResolver;
@@ -114,7 +115,9 @@ public class GenerateNode implements NodeAction<WorkflowState> {
      * 代码生成的字数提示为 0（不限制字数），只保留 token 硬上限。
      */
     private LlmResult generate(WorkflowState state, List<ChatMessage> messages, AnswerBudget budget) {
-        return llmGateway.generate(state.model(), messages, budget.maxOutputTokens());
+        return llmGateway.generate(LlmRequest.of(state.model(), messages)
+                .scene("generate")
+                .maxOutputTokens(budget.maxOutputTokens()));
     }
 
     /** 追加动态长度约束；代码生成 budgetChars=0，不注入字数限制。 */

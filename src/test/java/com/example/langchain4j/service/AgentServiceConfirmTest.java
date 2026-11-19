@@ -13,6 +13,7 @@ import com.example.langchain4j.guard.RateLimiter;
 import com.example.langchain4j.guard.SessionLock;
 import com.example.langchain4j.llm.ModelRegistry;
 import com.example.langchain4j.repository.entity.Message;
+import com.example.langchain4j.repository.entity.ToolExecution;
 import com.example.langchain4j.tool.runtime.ConfirmationService;
 import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.RunnableConfig;
@@ -29,6 +30,8 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -83,6 +86,8 @@ class AgentServiceConfirmTest {
     private PromptTemplateService promptTemplateService;
     @Mock
     private ConfirmationService confirmationService;
+    @Mock
+    private ToolExecutionService toolExecutionService;
 
     private AgentService service;
 
@@ -91,10 +96,18 @@ class AgentServiceConfirmTest {
         service = new AgentService(agentGraph, taskConfirmGraph, rateLimiter, sessionLock,
                 conversationService, queryRewriter, segmentService, auditService, summaryService,
                 modelRegistry, ticketService, agentExecutor, properties, metrics,
-                promptTemplateService, confirmationService);
+                promptTemplateService, confirmationService, toolExecutionService);
+        passThroughExecutor();
         UserContext.set("demo", "USER");
+        lenient().when(confirmationService.preview("cfm_1", "demo"))
+                .thenReturn(Optional.of(action()));
+        lenient().when(confirmationService.claim("cfm_1", "demo"))
+                .thenReturn(action());
         lenient().when(taskConfirmGraph.invoke(anyMap(), any(RunnableConfig.class)))
                 .thenReturn(Optional.of(completedState("业务对象 B1001 已取消")));
+        // 确认链路以台账判定成败：默认模拟写工具已成功落账
+        lenient().when(toolExecutionService.find("demo", "cfm_1"))
+                .thenReturn(Optional.of(execution(ToolExecution.STATUS_SUCCEEDED, null, null)));
     }
 
     @AfterEach
@@ -133,15 +146,39 @@ class AgentServiceConfirmTest {
                 WorkflowState.TASK_CLARIFY, false));
     }
 
+    private ToolExecution execution(String status, String errorCode, String errorMessage) {
+        ToolExecution execution = new ToolExecution();
+        execution.setExecutionId("cfm_1");
+        execution.setUserId("demo");
+        execution.setConversationId("c1");
+        execution.setStatus(status);
+        execution.setResult("业务对象 B1001 已取消");
+        execution.setErrorCode(errorCode);
+        execution.setErrorMessage(errorMessage);
+        return execution;
+    }
+
     private void passThroughLock() {
         lenient().doAnswer(invocation -> ((java.util.function.Supplier<?>) invocation.getArgument(1)).get())
                 .when(sessionLock).executeWithLock(anyString(), any());
     }
 
+    /** 图执行改为统一线程池提交：单测里同步执行，便于继续校验确认图入参。 */
+    private void passThroughExecutor() {
+        lenient().when(agentExecutor.submit(any(Callable.class))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Callable<WorkflowState> task = (Callable<WorkflowState>) invocation.getArgument(0);
+            try {
+                return CompletableFuture.completedFuture(task.call());
+            } catch (Exception e) {
+                return CompletableFuture.failedFuture(e);
+            }
+        });
+    }
+
     @Test
     @DisplayName("用户拒绝 → 只记录取消消息，不执行确认图")
     void rejectDoesNotExecuteWrite() {
-        when(confirmationService.consume("cfm_1", "demo")).thenReturn(Optional.of(action()));
         passThroughLock();
 
         ChatResponse response = service.confirm(request(false));
@@ -153,6 +190,7 @@ class AgentServiceConfirmTest {
                 contains("取消确认"), eq("model-x"), isNull());
         verify(conversationService).saveMessage(eq("c1"), eq(Message.ROLE_ASSISTANT),
                 contains("未对业务数据"), eq("model-x"), isNull());
+        verify(confirmationService).finish("cfm_1");
         verifyNoInteractions(taskConfirmGraph);
     }
 
@@ -160,7 +198,6 @@ class AgentServiceConfirmTest {
     @DisplayName("用户确认 → 用已确认计划执行，不重新跑 intent/task_plan")
     @SuppressWarnings("unchecked")
     void approveExecutesConfirmedPlan() {
-        when(confirmationService.consume("cfm_1", "demo")).thenReturn(Optional.of(action()));
         passThroughLock();
 
         ChatResponse response = service.confirm(request(true));
@@ -181,12 +218,14 @@ class AgentServiceConfirmTest {
                 .containsEntry(WorkflowState.CONVERSATION_ID, "c1");
         assertThat((List<Map<String, Object>>) inputsCaptor.getValue().get(WorkflowState.TASK_PLAN))
                 .hasSize(1);
+        verify(confirmationService).finish("cfm_1");
     }
 
     @Test
     @DisplayName("令牌不存在/已用过 → 404，且不加锁、不执行")
     void missingTokenIsRejected() {
-        when(confirmationService.consume("cfm_1", "demo")).thenReturn(Optional.empty());
+        when(confirmationService.preview("cfm_1", "demo")).thenReturn(Optional.empty());
+        when(toolExecutionService.find("demo", "cfm_1")).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.confirm(request(true)))
                 .isInstanceOf(BizException.class)
@@ -194,12 +233,61 @@ class AgentServiceConfirmTest {
                 .isEqualTo(ErrorCode.NOT_FOUND.getCode());
         verifyNoInteractions(sessionLock, taskConfirmGraph);
         verify(conversationService, never()).requireOwnership(anyString(), anyString());
+        verify(confirmationService, never()).claim(anyString(), anyString());
     }
 
     @Test
-    @DisplayName("确认执行失败 → 写失败回复并向上抛业务异常，令牌仍已被消费")
+    @DisplayName("令牌已删除但台账已成功 → 幂等重放上次结果，不重复执行")
+    void replaySucceededExecution() {
+        when(confirmationService.preview("cfm_1", "demo")).thenReturn(Optional.empty());
+        ToolExecution execution = new ToolExecution();
+        execution.setExecutionId("cfm_1");
+        execution.setUserId("demo");
+        execution.setConversationId("c1");
+        execution.setStatus(ToolExecution.STATUS_SUCCEEDED);
+        execution.setResult("已将记录 1 标记为完成");
+        when(toolExecutionService.find("demo", "cfm_1")).thenReturn(Optional.of(execution));
+
+        ChatResponse response = service.confirm(request(true));
+
+        assertThat(response.getResult()).isEqualTo("已将记录 1 标记为完成");
+        verifyNoInteractions(sessionLock, taskConfirmGraph);
+        verify(confirmationService, never()).claim(anyString(), anyString());
+    }
+
+    @Test
+    @DisplayName("会话归属校验失败 → 不消耗确认令牌，用户仍可重试")
+    void ownershipFailureDoesNotConsumeToken() {
+        org.mockito.Mockito.doThrow(new BizException(ErrorCode.FORBIDDEN, "无权访问该会话"))
+                .when(conversationService).requireOwnership("c1", "demo");
+
+        assertThatThrownBy(() -> service.confirm(request(true)))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.FORBIDDEN.getCode());
+
+        verify(confirmationService, never()).claim(anyString(), anyString());
+        verifyNoInteractions(sessionLock, taskConfirmGraph);
+    }
+
+    @Test
+    @DisplayName("会话锁冲突 → 不消耗确认令牌，用户仍可重试")
+    void lockConflictDoesNotConsumeToken() {
+        when(sessionLock.executeWithLock(anyString(), any()))
+                .thenThrow(new BizException(ErrorCode.AGENT_SESSION_LOCKED));
+
+        assertThatThrownBy(() -> service.confirm(request(true)))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.AGENT_SESSION_LOCKED.getCode());
+
+        verify(confirmationService, never()).claim(anyString(), anyString());
+        verifyNoInteractions(taskConfirmGraph);
+    }
+
+    @Test
+    @DisplayName("确认执行失败 → 写失败回复、释放租约保留令牌，供幂等重试")
     void executionFailureClosesTurn() {
-        when(confirmationService.consume("cfm_1", "demo")).thenReturn(Optional.of(action()));
         passThroughLock();
         when(taskConfirmGraph.invoke(anyMap(), any(RunnableConfig.class)))
                 .thenThrow(new IllegalStateException("db down"));
@@ -212,5 +300,23 @@ class AgentServiceConfirmTest {
                 contains("确认执行"), eq("model-x"), isNull());
         verify(conversationService).saveMessage(eq("c1"), eq(Message.ROLE_ASSISTANT),
                 contains("确认操作执行失败"), eq("model-x"), isNull());
+        verify(confirmationService).release("cfm_1");
+        verify(confirmationService, never()).finish("cfm_1");
+    }
+
+    @Test
+    @DisplayName("写工具返回失败 → 保留令牌并释放租约，允许同一确认重试")
+    void toolFailureKeepsTokenForRetry() {
+        passThroughLock();
+        when(taskConfirmGraph.invoke(anyMap(), any(RunnableConfig.class)))
+                .thenReturn(Optional.of(completedState("写操作失败：数据库暂时不可用")));
+        when(toolExecutionService.find("demo", "cfm_1"))
+                .thenReturn(Optional.of(execution(ToolExecution.STATUS_FAILED, "DB_DOWN", "数据库不可用")));
+
+        ChatResponse response = service.confirm(request(true));
+
+        assertThat(response.getResult()).contains("写操作失败");
+        verify(confirmationService).release("cfm_1");
+        verify(confirmationService, never()).finish("cfm_1");
     }
 }

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.ToolDemoRecordMapper">
+
+    <resultMap id="ToolDemoRecordMap" type="com.example.langchain4j.repository.entity.ToolDemoRecord">
+        <id property="id" column="id"/>
+        <result property="userId" column="user_id"/>
+        <result property="title" column="title"/>
+        <result property="content" column="content"/>
+        <result property="status" column="status"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <select id="selectByUserId" resultMap="ToolDemoRecordMap">
+        SELECT id, user_id, title, content, status, created_at, updated_at
+        FROM ai_tool_demo_record
+        WHERE user_id = #{userId}
+        <if test="status != null and status != ''">
+            AND status = #{status}
+        </if>
+        ORDER BY id DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectById" resultMap="ToolDemoRecordMap">
+        SELECT id, user_id, title, content, status, created_at, updated_at
+        FROM ai_tool_demo_record
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </select>
+
+    <select id="selectByTitle" resultMap="ToolDemoRecordMap">
+        SELECT id, user_id, title, content, status, created_at, updated_at
+        FROM ai_tool_demo_record
+        WHERE user_id = #{userId}
+          AND title = #{title}
+        ORDER BY id
+        LIMIT #{limit}
+    </select>
+
+    <!-- 幂等业务语义：只有 OPEN 才能变 DONE，重复调用自然返回 0 行 -->
+    <update id="markDone">
+        UPDATE ai_tool_demo_record
+        SET status = 'DONE', updated_at = now()
+        WHERE id = #{id}
+          AND user_id = #{userId}
+          AND status = 'OPEN'
+    </update>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.ToolDemoRecord"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ai_tool_demo_record (user_id, title, content, status)
+        VALUES (#{userId}, #{title}, #{content}, #{status})
+    </insert>
+
+    <select id="countByUserId" resultType="long">
+        SELECT count(*) FROM ai_tool_demo_record WHERE user_id = #{userId}
+    </select>
+
+</mapper>

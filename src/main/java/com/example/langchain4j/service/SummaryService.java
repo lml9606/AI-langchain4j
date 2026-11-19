@@ -1,6 +1,7 @@
 package com.example.langchain4j.service;
 
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.ConversationSummary;
@@ -160,9 +161,9 @@ public class SummaryService {
         String userPrompt = "已有摘要：\n" + (segment.getContent().isBlank() ? "（无）" : segment.getContent())
                 + "\n\n" + sb;
         // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
-        String output = llmGateway.generate(properties.getLlm().getDefaultModel(),
+        String output = llmGateway.generate(LlmRequest.of(properties.getLlm().getDefaultModel(),
                 promptTemplateService.resolve("SUMMARY_SYSTEM", PromptTemplates.SUMMARY_SYSTEM),
-                userPrompt).text();
+                userPrompt).scene("summary")).text();
         if (output == null) {
             return "";
         }

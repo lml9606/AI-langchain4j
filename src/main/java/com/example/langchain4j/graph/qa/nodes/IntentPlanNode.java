@@ -1,6 +1,7 @@
 package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
@@ -53,8 +54,8 @@ public class IntentPlanNode implements NodeAction<WorkflowState> {
             int maxSubQueries = Math.max(1, properties.getMaxSubQueries());
             String systemPrompt = promptTemplateService.resolveFormatted(
                     "INTENT_PLAN_SYSTEM", PromptTemplates.INTENT_PLAN_SYSTEM, maxSubQueries);
-            JsonNode node = llmGateway.generateJsonNode(state.model(), systemPrompt,
-                    buildUserPrompt(state, effectiveQuery), "intent-plan");
+            JsonNode node = llmGateway.generateJson(LlmRequest.of(state.model(), systemPrompt,
+                    buildUserPrompt(state, effectiveQuery)).scene("intent-plan"));
             if (node == null) {
                 return degradedPlan(state, "输出截断或解析失败");
             }

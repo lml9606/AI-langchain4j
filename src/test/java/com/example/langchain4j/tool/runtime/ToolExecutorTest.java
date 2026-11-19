@@ -161,6 +161,20 @@ class ToolExecutorTest {
     }
 
     @Test
+    @DisplayName("写工具已确认但没有幂等键 → 拒绝执行（防重复落库）")
+    void rejectWriteToolWithoutIdempotencyKey() throws Exception {
+        properties.getTool().setReadOnly(false);
+        properties.getTool().setAllowedWriteTools(List.of(TOOL_NAME));
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.WRITE, List.of()));
+        ToolContext approved = new ToolContext("demo", "c1", true, "");
+
+        ToolResult result = executor.invoke(approved, TOOL_NAME, MAPPER.readTree("{}"));
+
+        assertThat(result.errorCode()).isEqualTo("MISSING_IDEMPOTENCY_KEY");
+        verify(tool, never()).execute(any(), any(JsonNode.class));
+    }
+
+    @Test
     @DisplayName("单用户超过每分钟上限 → RATE_LIMITED")
     void rateLimitPerUser() throws Exception {
         properties.getTool().setMaxCallsPerMinute(1);

@@ -1,6 +1,7 @@
 package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.graph.qa.EvidenceAssessor;
 import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
@@ -17,6 +18,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -86,7 +88,7 @@ class ValidateNodeTest {
     @Test
     @DisplayName("LLM 质检：判定编造（grounding）→ 失败标记，路由回检索重查")
     void llmCheckRejectsUngroundedAnswer() throws Exception {
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(MAPPER.readTree(
                         "{\"valid\":false,\"issue\":\"grounding\",\"reason\":\"回答与参考资料矛盾\"}"));
 
@@ -101,7 +103,7 @@ class ValidateNodeTest {
     @Test
     @DisplayName("质检 LLM 不可用 → fail-open 放行（漏判优于误杀）")
     void failOpenWhenJudgeUnavailable() {
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(null);
 
         Map<String, Object> updates =
@@ -113,7 +115,7 @@ class ValidateNodeTest {
     @Test
     @DisplayName("规则层 + LLM 质检都通过 → 写入通过标记")
     void passWhenBothLayersOk() throws Exception {
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(MAPPER.readTree("{\"valid\":true}"));
 
         Map<String, Object> updates =

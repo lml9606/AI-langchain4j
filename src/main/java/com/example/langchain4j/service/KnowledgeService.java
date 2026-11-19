@@ -17,7 +17,9 @@ import com.example.langchain4j.knowledge.KnowledgeFileParser;
 import com.example.langchain4j.knowledge.SparseEmbeddingService;
 import com.example.langchain4j.knowledge.VectorSearchService;
 import com.example.langchain4j.repository.entity.KnowledgeChunk;
+import com.example.langchain4j.repository.entity.KnowledgeDocument;
 import com.example.langchain4j.repository.mapper.KnowledgeChunkMapper;
+import com.example.langchain4j.repository.mapper.KnowledgeDocumentMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -31,6 +33,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
@@ -59,6 +65,10 @@ public class KnowledgeService {
     private static final int MAX_CHUNK_TOKEN_LIMIT = 2048;
     /** 逻辑文档 ID 列宽（schema: VARCHAR(64)） */
     private static final int MAX_DOCUMENT_ID_LENGTH = 64;
+    /** 文档来源列宽（schema: ai_document.source VARCHAR(512)） */
+    private static final int MAX_SOURCE_LENGTH = 512;
+    /** 文档主表状态：空闲（可接受导入） */
+    private static final String STATUS_READY = "READY";
     /** 段落边界：空行切分优先级最高，保证段落语义块完整 */
     private static final String PARAGRAPH_BOUNDARY = "\n\n";
     /** 句末边界字符：段落/行边界都找不到时退而求其次，避免把句子拦腰截断 */
@@ -93,6 +103,7 @@ public class KnowledgeService {
     private static final Pattern STRONG_LABEL_LINE = Pattern.compile("^\\*\\*[^*]+\\*\\*$");
 
     private final KnowledgeChunkMapper knowledgeChunkMapper;
+    private final KnowledgeDocumentMapper knowledgeDocumentMapper;
     private final EmbeddingService embeddingService;
     private final SparseEmbeddingService sparseEmbeddingService;
     private final VectorSearchService vectorSearchService;
@@ -101,6 +112,7 @@ public class KnowledgeService {
     private final ThreadPoolTaskExecutor importExecutor;
 
     public KnowledgeService(KnowledgeChunkMapper knowledgeChunkMapper,
+                            KnowledgeDocumentMapper knowledgeDocumentMapper,
                             EmbeddingService embeddingService,
                             SparseEmbeddingService sparseEmbeddingService,
                             VectorSearchService vectorSearchService,
@@ -108,6 +120,7 @@ public class KnowledgeService {
                             AgentProperties properties,
                             @Qualifier("knowledgeImportExecutor") ThreadPoolTaskExecutor importExecutor) {
         this.knowledgeChunkMapper = knowledgeChunkMapper;
+        this.knowledgeDocumentMapper = knowledgeDocumentMapper;
         this.embeddingService = embeddingService;
         this.sparseEmbeddingService = sparseEmbeddingService;
         this.vectorSearchService = vectorSearchService;
@@ -131,10 +144,13 @@ public class KnowledgeService {
     }
 
     /**
-     * 导入长文档并绑定逻辑文档版本。
+     * 导入长文档并发布为一个新版本。
+     *
+     * <p>发布模型：写块阶段不改 active_version，新版本对检索完全不可见；写完后只更新文档主表一行指针完成切换。
+     * 因此导入失败不会出现"查到半成品"，切换成本也与文档块数无关。
      *
      * @param documentId 逻辑文档 ID；空则生成 UUID（新文档）
-     * @param version    文档版本；空则自动取当前最大版本 + 1，显式值必须大于当前最大版本
+     * @param version    文档版本；空则自动取当前版本 + 1，显式值必须大于当前版本
      * @return 落库总块数（父块 + 子块）
      */
     public int importDocument(String content, String metadata, Integer chunkSize, Integer chunkOverlap,
@@ -147,23 +163,62 @@ public class KnowledgeService {
         }
         checkDocumentSize(cleaned);
         int childSize = boundedChunkSize(chunkSize);
-        int overlap = boundedChunkOverlap(chunkOverlap, childSize);
         int parentSize = boundedParentChunkSize();
-        int parentTargetMin = boundedParentTargetMin(parentSize);
-        int parentTargetMax = boundedParentTargetMax(parentSize);
-        int childTokenLimit = boundedChunkTokenLimit();
+        ImportSettings settings = new ImportSettings(
+                parentSize,
+                boundedParentTargetMin(parentSize),
+                boundedParentTargetMax(parentSize),
+                childSize,
+                boundedChunkOverlap(chunkOverlap, childSize),
+                boundedChunkTokenLimit());
+
         String userId = UserContext.require();
         String resolvedDocumentId = resolveDocumentId(documentId);
-        int resolvedVersion = resolveVersion(resolvedDocumentId, userId, version);
-        log.info("[knowledge] import start, documentId={}, version={}, chars={}, parentSize={}, childSize={}, "
-                        + "overlap={}, childTokenLimit={}",
-                resolvedDocumentId, resolvedVersion, cleaned.length(), parentSize, childSize, overlap, childTokenLimit);
+        // 文档聚合根必须先存在：active_version 是版本分配的基准，也是导入互斥的锚点
+        KnowledgeDocument document = ensureDocument(resolvedDocumentId, userId);
+        int resolvedVersion = resolveVersion(document, userId, version);
+        // 抢占导入权：同一文档同一时刻只允许一个任务写新版本，避免并发导入互相覆盖
+        claimImport(resolvedDocumentId, userId);
+        log.info("[knowledge] import start, documentId={}, version={}, activeVersion={}, chars={}, parentSize={}, "
+                        + "childSize={}, overlap={}, childTokenLimit={}",
+                resolvedDocumentId, resolvedVersion, document.getActiveVersion(), cleaned.length(),
+                settings.parentSize(), settings.childSize(), settings.overlap(), settings.childTokenLimit());
 
+        try {
+            int chunks = writeVersion(cleaned, metadata, settings, resolvedDocumentId, resolvedVersion, userId);
+            // 发布：只改一行指针；此刻新版本才对检索可见，旧版本继续保留在库里等待 GC 回收
+            publishVersion(resolvedDocumentId, userId, resolvedVersion, contentHash(cleaned), extractSource(metadata));
+            log.info("[knowledge] document published, documentId={}, version={}, chunks={}, cost={}ms",
+                    resolvedDocumentId, resolvedVersion, chunks, System.currentTimeMillis() - startedAt);
+            return chunks;
+        } catch (RuntimeException e) {
+            // 失败版本只是未发布的草稿：删掉即可，active_version 不变，旧版本对外仍然可读
+            log.error("[knowledge] document import failed, documentId={}, version={}, reason={}",
+                    resolvedDocumentId, resolvedVersion, rootMessage(e));
+            cleanupFailedImport(resolvedDocumentId, resolvedVersion, userId);
+            releaseImport(resolvedDocumentId, userId);
+            throw e;
+        }
+    }
+
+    /** 一次导入的分块参数快照：入口归一化后固定，避免下游重复读配置导致同一文档前后不一致 */
+    private record ImportSettings(int parentSize, int parentTargetMin, int parentTargetMax,
+                                  int childSize, int overlap, int childTokenLimit) {
+    }
+
+    /**
+     * 写入一个完整版本的父子块（不发布）：数据对检索不可见，失败由调用方按版本清理。
+     *
+     * @return 落库总块数（父块 + 子块）
+     */
+    private int writeVersion(String cleaned, String metadata, ImportSettings settings,
+                             String documentId, int version, String userId) {
         // 步骤1：标题树 → 父块。父块保留整段上下文但不嵌入；超长父块会继续按段落/句子续切。
         long splitStartedAt = System.currentTimeMillis();
-        List<ParentSection> sections = splitParents(cleaned, parentSize, parentTargetMin, parentTargetMax);
+        List<ParentSection> sections = splitParents(cleaned, settings.parentSize(),
+                settings.parentTargetMin(), settings.parentTargetMax());
         log.info("[knowledge] parent split done, documentId={}, version={}, parents={}, cost={}ms",
-                resolvedDocumentId, resolvedVersion, sections.size(), System.currentTimeMillis() - splitStartedAt);
+                documentId, version, sections.size(), System.currentTimeMillis() - splitStartedAt);
 
         // 步骤2：父块 → 语义子块 → 双向量。嵌入是易失败阶段，必须放在落库前，失败时数据库零残留。
         List<KnowledgeChunk> parents = new ArrayList<>(sections.size());
@@ -178,10 +233,11 @@ public class KnowledgeService {
             parent.setTitle(section.title());
             parent.setMetadata(withChunkInfo(metadata, p + 1, sections.size()));
             parent.setUserId(userId);
-            parent.setDocumentId(resolvedDocumentId);
-            parent.setVersion(resolvedVersion);
+            parent.setDocumentId(documentId);
+            parent.setVersion(version);
             parents.add(parent);
-            List<String> pieces = splitChildren(section.body(), section.title(), childSize, overlap, childTokenLimit);
+            List<String> pieces = splitChildren(section.body(), section.title(),
+                    settings.childSize(), settings.overlap(), settings.childTokenLimit());
             log.debug("[knowledge] parent prepared, index={}/{}, title={}, parentChars={}, children={}",
                     p + 1, sections.size(), section.title(), section.body().length(), pieces.size());
             for (int i = 0; i < pieces.size(); i++) {
@@ -197,55 +253,34 @@ public class KnowledgeService {
                 child.setTitle(section.title());
                 child.setMetadata(withChunkInfo(metadata, i + 1, pieces.size()));
                 child.setUserId(userId);
-                child.setDocumentId(resolvedDocumentId);
-                child.setVersion(resolvedVersion);
+                child.setDocumentId(documentId);
+                child.setVersion(version);
                 children.add(child);
             }
             childrenPerParent.add(pieces.size());
         }
         log.info("[knowledge] children embedded, documentId={}, version={}, parents={}, children={}, cost={}ms",
-                resolvedDocumentId, resolvedVersion, parents.size(), children.size(),
+                documentId, version, parents.size(), children.size(),
                 System.currentTimeMillis() - embedStartedAt);
 
-        try {
-            // 步骤3：父块逐个落库拿自增 ID；子块必须在父块之后落库，才能回填 parent_id。
-            // children 是按父块顺序连续追加的，因此用 cursor 做一次线性回填，避免额外的 Map 查找。
-            long persistStartedAt = System.currentTimeMillis();
-            log.info("[knowledge] persistence start, documentId={}, version={}, parents={}, children={}",
-                    resolvedDocumentId, resolvedVersion, parents.size(), children.size());
-            int cursor = 0;
-            for (int p = 0; p < parents.size(); p++) {
-                knowledgeChunkMapper.insert(parents.get(p));
-                for (int i = 0; i < childrenPerParent.get(p); i++) {
-                    children.get(cursor + i).setParentId(parents.get(p).getId());
-                }
-                cursor += childrenPerParent.get(p);
+        // 步骤3：父块逐个落库拿自增 ID；子块必须在父块之后落库，才能回填 parent_id。
+        // children 是按父块顺序连续追加的，因此用 cursor 做一次线性回填，避免额外的 Map 查找。
+        long persistStartedAt = System.currentTimeMillis();
+        log.info("[knowledge] persistence start, documentId={}, version={}, parents={}, children={}",
+                documentId, version, parents.size(), children.size());
+        int cursor = 0;
+        for (int p = 0; p < parents.size(); p++) {
+            knowledgeChunkMapper.insert(parents.get(p));
+            for (int i = 0; i < childrenPerParent.get(p); i++) {
+                children.get(cursor + i).setParentId(parents.get(p).getId());
             }
-            if (!children.isEmpty()) {
-                knowledgeChunkMapper.insertBatch(children);
-            }
-            log.info("[knowledge] persistence done, documentId={}, version={}, cost={}ms",
-                    resolvedDocumentId, resolvedVersion, System.currentTimeMillis() - persistStartedAt);
-        } catch (RuntimeException e) {
-            // 失败版本必须清理：否则半成品会成为 MAX(version)，把上一份完整版本遮住
-            log.error("[knowledge] document import failed, documentId={}, version={}, parents={}, children={}, reason={}",
-                    resolvedDocumentId, resolvedVersion, parents.size(), children.size(), rootMessage(e));
-            cleanupFailedImport(resolvedDocumentId, resolvedVersion, userId);
-            throw e;
+            cursor += childrenPerParent.get(p);
         }
-        // 新版本已完整落库后再清理旧版本；检索端按 MAX(version) 过滤，清理失败也不会召回旧内容
-        if (resolvedVersion > 1) {
-            try {
-                knowledgeChunkMapper.deleteOlderVersions(resolvedDocumentId, resolvedVersion, userId);
-            } catch (Exception e) {
-                log.warn("[knowledge] old version cleanup failed, documentId={}, version={}, reason={}",
-                        resolvedDocumentId, resolvedVersion, e.getMessage());
-            }
+        if (!children.isEmpty()) {
+            knowledgeChunkMapper.insertBatch(children);
         }
-        log.info("[knowledge] document imported, documentId={}, version={}, parents={}, children={}, "
-                        + "parentSize={}, childSize={}, childTokenLimit={}, cost={}ms",
-                resolvedDocumentId, resolvedVersion, parents.size(), children.size(),
-                parentSize, childSize, childTokenLimit, System.currentTimeMillis() - startedAt);
+        log.info("[knowledge] persistence done, documentId={}, version={}, cost={}ms",
+                documentId, version, System.currentTimeMillis() - persistStartedAt);
         return parents.size() + children.size();
     }
 
@@ -326,43 +361,244 @@ public class KnowledgeService {
     public void updateChunk(long id, KnowledgeUpdateRequest request) {
         String userId = UserContext.require();
         KnowledgeChunk existing = knowledgeChunkMapper.selectById(id, userId);
-        if (existing == null) {
-            throw new BizException(ErrorCode.NOT_FOUND, "知识块不存在或不可见");
-        }
-        if (existing.getUserId() == null) {
-            throw new BizException(ErrorCode.FORBIDDEN, "公共库知识块仅运营侧可维护");
-        }
+        requirePrivateChunk(existing);
         String content = sanitize(request.getContent());
         if (content.isEmpty()) {
             throw new BizException(ErrorCode.BAD_REQUEST, "content 清洗后为空");
         }
         checkDocumentSize(content);
-        KnowledgeChunk chunk = new KnowledgeChunk();
-        chunk.setId(id);
-        chunk.setContent(content);
-        // 双向量同步重算：内容变更后稠密/稀疏任一不重算都会造成该通道命中错位
-        chunk.setEmbedding(embeddingService.embed(content));
-        chunk.setSparseVector(sparseEmbeddingService.embed(content));
-        chunk.setMetadata(request.getMetadata());
-        chunk.setUserId(userId);
-        if (knowledgeChunkMapper.updateContent(chunk) == 0) {
-            throw new BizException(ErrorCode.NOT_FOUND, "知识块不存在或已被删除");
+        if (TYPE_PARENT.equals(existing.getChunkType())) {
+            updateParentAndRebuildChildren(existing, content, request.getMetadata(), userId);
+        } else {
+            updateChildAndSyncParent(existing, content, request.getMetadata(), userId);
         }
         log.info("[knowledge] chunk updated, id={}", id);
     }
 
     /** 删除知识块：仅本人私有块可删（公共库块 403），SQL 层 user_id 过滤双保险 */
+    @Transactional(rollbackFor = Exception.class)
     public void deleteChunk(long id) {
         String userId = UserContext.require();
         KnowledgeChunk existing = knowledgeChunkMapper.selectById(id, userId);
+        requirePrivateChunk(existing);
+        if (TYPE_PARENT.equals(existing.getChunkType())) {
+            int removedChildren = knowledgeChunkMapper.deleteChildrenByParentId(id, userId);
+            if (knowledgeChunkMapper.deleteById(id, userId) == 0) {
+                throw new BizException(ErrorCode.NOT_FOUND, "知识块不存在或已被删除");
+            }
+            log.info("[knowledge] parent chunk deleted with children, id={}, children={}", id, removedChildren);
+            return;
+        }
+        String oldBody = childBody(existing);
+        if (knowledgeChunkMapper.deleteById(id, userId) == 0) {
+            throw new BizException(ErrorCode.NOT_FOUND, "知识块不存在或已被删除");
+        }
+        if (existing.getParentId() != null) {
+            KnowledgeChunk parent = knowledgeChunkMapper.selectParentById(existing.getParentId(), userId);
+            if (parent != null) {
+                syncParentAfterChildDelete(parent, oldBody, userId);
+            }
+        }
+        log.info("[knowledge] chunk deleted, id={}", id);
+    }
+
+    /** 仅允许维护本人私有块；公共库块由运营侧维护，避免普通用户改动共享知识。 */
+    private void requirePrivateChunk(KnowledgeChunk existing) {
         if (existing == null) {
             throw new BizException(ErrorCode.NOT_FOUND, "知识块不存在或不可见");
         }
         if (existing.getUserId() == null) {
             throw new BizException(ErrorCode.FORBIDDEN, "公共库知识块仅运营侧可维护");
         }
-        knowledgeChunkMapper.deleteById(id, userId);
-        log.info("[knowledge] chunk deleted, id={}", id);
+    }
+
+    /**
+     * 更新父块：父块保存整章上下文，子块是检索单元。
+     * 父块正文变化后必须重建子块，否则检索仍会命中旧子块、生成仍会拿到旧父块。
+     */
+    private void updateParentAndRebuildChildren(KnowledgeChunk parent, String content,
+                                                String metadata, String userId) {
+        List<KnowledgeChunk> newChildren = buildChildren(parent, content, metadata, userId);
+        if (newChildren.isEmpty()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "父块内容无法切出有效子块");
+        }
+        if (knowledgeChunkMapper.updateParentContent(parent.getId(), content, metadata, userId) == 0) {
+            throw new BizException(ErrorCode.NOT_FOUND, "父块不存在或已被删除");
+        }
+        int removedChildren = knowledgeChunkMapper.deleteChildrenByParentId(parent.getId(), userId);
+        if (!newChildren.isEmpty()) {
+            knowledgeChunkMapper.insertBatch(newChildren);
+        }
+        log.info("[knowledge] parent updated and children rebuilt, id={}, removedChildren={}, newChildren={}",
+                parent.getId(), removedChildren, newChildren.size());
+    }
+
+    /**
+     * 更新子块：子块重嵌后，父块是命中子块时装配的整章上下文，必须同步替换对应正文。
+     * 如果父块原文找不到旧子块正文（历史数据或人工改过父块），退化为按当前兄弟子块重建父块内容。
+     */
+    private void updateChildAndSyncParent(KnowledgeChunk child, String content,
+                                          String metadata, String userId) {
+        String oldBody = childBody(child);
+        String newBody = childBody(content, child.getTitle());
+        if (newBody.isBlank()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "子块正文不能为空");
+        }
+        String childText = withChildTitle(child.getTitle(), newBody);
+        KnowledgeChunk update = new KnowledgeChunk();
+        update.setId(child.getId());
+        update.setContent(childText);
+        // 双向量同步重算：内容变更后稠密/稀疏任一不重算都会造成该通道命中错位
+        update.setEmbedding(embeddingService.embed(childText));
+        update.setSparseVector(sparseEmbeddingService.embed(childText));
+        update.setMetadata(metadata);
+        update.setUserId(userId);
+        if (knowledgeChunkMapper.updateContent(update) == 0) {
+            throw new BizException(ErrorCode.NOT_FOUND, "知识块不存在或已被删除");
+        }
+        if (child.getParentId() == null) {
+            return;
+        }
+        KnowledgeChunk parent = knowledgeChunkMapper.selectParentById(child.getParentId(), userId);
+        if (parent == null) {
+            return;
+        }
+        String updatedParentContent = replaceOnce(parent.getContent(), oldBody, newBody);
+        if (updatedParentContent == null) {
+            updatedParentContent = mergeChildBodies(
+                    knowledgeChunkMapper.selectChildrenByParentId(parent.getId(), userId));
+        }
+        updateParentContentOrThrow(parent, updatedParentContent, userId);
+    }
+
+    /** 子块删除后同步父块：没有兄弟子块则删除父块；否则移除旧正文，定位失败时按剩余子块重建。 */
+    private void syncParentAfterChildDelete(KnowledgeChunk parent, String oldBody, String userId) {
+        List<KnowledgeChunk> remaining = knowledgeChunkMapper.selectChildrenByParentId(parent.getId(), userId);
+        if (remaining == null || remaining.isEmpty()) {
+            if (knowledgeChunkMapper.deleteById(parent.getId(), userId) == 0) {
+                log.warn("[knowledge] parent already missing after child delete, parentId={}", parent.getId());
+            }
+            return;
+        }
+        String updated = replaceOnce(parent.getContent(), oldBody, "");
+        if (updated == null || updated.isBlank()) {
+            updated = mergeChildBodies(remaining);
+        }
+        updateParentContentOrThrow(parent, updated, userId);
+    }
+
+    /** 父块内容落库；空内容视为无有效上下文，删除父块，避免生成链路拿到空父块。 */
+    private void updateParentContentOrThrow(KnowledgeChunk parent, String content, String userId) {
+        String normalized = content == null ? "" : content.trim();
+        if (normalized.isEmpty()) {
+            knowledgeChunkMapper.deleteChildrenByParentId(parent.getId(), userId);
+            if (knowledgeChunkMapper.deleteById(parent.getId(), userId) == 0) {
+                log.warn("[knowledge] parent already missing after content sync, parentId={}", parent.getId());
+            }
+            return;
+        }
+        if (knowledgeChunkMapper.updateParentContent(parent.getId(), normalized, parent.getMetadata(), userId) == 0) {
+            throw new BizException(ErrorCode.NOT_FOUND, "父块不存在或已被删除");
+        }
+    }
+
+    /** 按父块正文重建子块；先完成嵌入再写库，失败时事务回滚不会留下半成品。 */
+    private List<KnowledgeChunk> buildChildren(KnowledgeChunk parent, String body,
+                                               String metadata, String userId) {
+        int childSize = boundedChunkSize(null);
+        int overlap = boundedChunkOverlap(null, childSize);
+        int tokenLimit = boundedChunkTokenLimit();
+        List<String> pieces = splitChildren(body, parent.getTitle(), childSize, overlap, tokenLimit);
+        List<KnowledgeChunk> children = new ArrayList<>(pieces.size());
+        for (int i = 0; i < pieces.size(); i++) {
+            String childText = withChildTitle(parent.getTitle(), pieces.get(i));
+            KnowledgeChunk child = new KnowledgeChunk();
+            child.setContent(childText);
+            child.setEmbedding(embeddingService.embed(childText));
+            child.setSparseVector(sparseEmbeddingService.embed(childText));
+            child.setChunkType(TYPE_CHILD);
+            child.setTitle(parent.getTitle());
+            child.setMetadata(withChunkInfo(metadata, i + 1, pieces.size()));
+            child.setUserId(userId);
+            child.setDocumentId(parent.getDocumentId());
+            child.setVersion(parent.getVersion());
+            child.setParentId(parent.getId());
+            children.add(child);
+        }
+        return children;
+    }
+
+    /** 子块存储文本带标题前缀；这里统一去掉前缀后再比较/重建父块正文。 */
+    private String childBody(KnowledgeChunk chunk) {
+        return childBody(chunk.getContent(), chunk.getTitle());
+    }
+
+    private String childBody(String content, String title) {
+        String text = content == null ? "" : content.trim();
+        if (title != null && !title.isBlank()) {
+            String prefix = title + TITLE_SEPARATOR;
+            if (text.startsWith(prefix)) {
+                return text.substring(prefix.length()).trim();
+            }
+        }
+        return text;
+    }
+
+    private String withChildTitle(String title, String body) {
+        if (title == null || title.isBlank()) {
+            return body == null ? "" : body;
+        }
+        return title + TITLE_SEPARATOR + (body == null ? "" : body);
+    }
+
+    /** 文本中替换一次子块正文；找不到返回 null，由调用方走重建兜底。 */
+    private String replaceOnce(String text, String oldPart, String newPart) {
+        if (text == null || oldPart == null || oldPart.isBlank()) {
+            return null;
+        }
+        int index = text.indexOf(oldPart);
+        if (index < 0) {
+            return null;
+        }
+        return text.substring(0, index) + (newPart == null ? "" : newPart)
+                + text.substring(index + oldPart.length());
+    }
+
+    /** 兄弟子块重建父块正文：按 id 顺序拼接，并去掉相邻子块的重叠部分，避免上下文重复。 */
+    private String mergeChildBodies(List<KnowledgeChunk> children) {
+        if (children == null || children.isEmpty()) {
+            return "";
+        }
+        StringBuilder merged = new StringBuilder();
+        for (KnowledgeChunk child : children) {
+            String body = childBody(child);
+            if (body.isBlank()) {
+                continue;
+            }
+            if (merged.length() == 0) {
+                merged.append(body);
+                continue;
+            }
+            String current = merged.toString();
+            int overlap = overlapLength(current, body);
+            if (overlap > 0) {
+                merged.append(body.substring(overlap));
+            } else {
+                merged.append(PARAGRAPH_BOUNDARY).append(body);
+            }
+        }
+        return merged.toString().trim();
+    }
+
+    /** 相邻子块最大重叠长度（子块切分时的 overlap 保留策略）。 */
+    private int overlapLength(String left, String right) {
+        int max = Math.min(left.length(), right.length());
+        for (int i = max; i > 0; i--) {
+            if (left.regionMatches(left.length() - i, right, 0, i)) {
+                return i;
+            }
+        }
+        return 0;
     }
 
     /** 知识库健康度：当前用户可见范围（公共库 + 本人私有库）聚合统计 */
@@ -765,20 +1001,100 @@ public class KnowledgeService {
         return trimmed;
     }
 
-    /** 解析版本：未传则当前最大版本 + 1；显式版本必须为正且大于当前最大版本 */
-    private int resolveVersion(String documentId, String userId, Integer version) {
-        Integer currentMax = knowledgeChunkMapper.selectMaxVersion(documentId, userId);
+    /**
+     * 解析版本：基于"当前发布版本"与"库中最大块版本"取较大者作为基准再 +1。
+     * <p>基准同时看两边：active_version 决定对外可见版本，最大块版本用于跳过失败导入残留的草稿号，
+     * 避免同一版本号被两次导入复用。
+     */
+    private int resolveVersion(KnowledgeDocument document, String userId, Integer version) {
+        Integer maxChunkVersion = knowledgeChunkMapper.selectMaxVersion(document.getDocumentId(), userId);
+        int base = Math.max(document.getActiveVersion() == null ? 0 : document.getActiveVersion(),
+                maxChunkVersion == null ? 0 : maxChunkVersion);
         if (version == null) {
-            return currentMax == null ? 1 : currentMax + 1;
+            return base + 1;
         }
         if (version < 1) {
             throw new BizException(ErrorCode.BAD_REQUEST, "version 必须大于 0");
         }
-        if (currentMax != null && version <= currentMax) {
-            throw new BizException(ErrorCode.BAD_REQUEST,
-                    "version 必须大于当前版本 " + currentMax);
+        if (version <= base) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "version 必须大于当前版本 " + base);
         }
         return version;
+    }
+
+    /** 文档聚合根：不存在则幂等创建；active_version=0 表示尚无成功导入版本（导入期间对检索不可见） */
+    private KnowledgeDocument ensureDocument(String documentId, String userId) {
+        KnowledgeDocument existing = knowledgeDocumentMapper.selectByDocumentId(documentId, userId);
+        if (existing != null) {
+            return existing;
+        }
+        KnowledgeDocument fresh = new KnowledgeDocument();
+        fresh.setDocumentId(documentId);
+        fresh.setUserId(userId);
+        fresh.setActiveVersion(0);
+        fresh.setStatus(STATUS_READY);
+        knowledgeDocumentMapper.insertIfAbsent(fresh);
+        KnowledgeDocument created = knowledgeDocumentMapper.selectByDocumentId(documentId, userId);
+        if (created == null) {
+            throw new BizException(ErrorCode.INTERNAL_ERROR, "文档元数据初始化失败");
+        }
+        return created;
+    }
+
+    /** 抢占导入权：并发导入同一文档时只有一个任务进入，其余快速失败（不排队、不重复嵌入） */
+    private void claimImport(String documentId, String userId) {
+        int updated = knowledgeDocumentMapper.startImport(
+                documentId, userId, properties.getKnowledge().getImportStaleMinutes());
+        if (updated == 0) {
+            throw new BizException(ErrorCode.DOCUMENT_IMPORTING, "该文档正在导入中，请稍后重试");
+        }
+    }
+
+    /** 发布版本：只更新一行指针；影响行数为 0 说明导入权已被接管，本次写入作废 */
+    private void publishVersion(String documentId, String userId, int version,
+                                String contentHash, String source) {
+        if (knowledgeDocumentMapper.activate(documentId, userId, version, contentHash, source) == 0) {
+            throw new BizException(ErrorCode.INTERNAL_ERROR, "文档版本发布失败，导入状态可能已被接管");
+        }
+    }
+
+    /** 释放导入权并记录失败：active_version 不变，旧版本继续对外可读 */
+    private void releaseImport(String documentId, String userId) {
+        try {
+            knowledgeDocumentMapper.markImportFailed(documentId, userId);
+        } catch (Exception e) {
+            log.warn("[knowledge] mark import failed error, documentId={}, reason={}", documentId, e.getMessage());
+        }
+    }
+
+    /** 内容指纹（SHA-256）：用于识别无变更重传；计算失败不阻断导入 */
+    private String contentHash(String content) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(content.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            log.warn("[knowledge] content hash unavailable: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** 从 metadata JSON 提取 source 写入文档主表（运维定位用）；非 JSON 或缺失返回 null */
+    private String extractSource(String metadata) {
+        if (metadata == null || metadata.isBlank()) {
+            return null;
+        }
+        try {
+            Map<String, Object> parsed = JsonUtil.fromJson(metadata, new TypeReference<>() {
+            });
+            Object source = parsed == null ? null : parsed.get("source");
+            if (source == null) {
+                return null;
+            }
+            String value = String.valueOf(source);
+            return value.length() <= MAX_SOURCE_LENGTH ? value : value.substring(0, MAX_SOURCE_LENGTH);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** 元数据追加分块信息（chunkIndex/chunkCount）：原 JSON 对象合并，非 JSON 原文保留在 raw 字段 */

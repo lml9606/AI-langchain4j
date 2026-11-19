@@ -1,6 +1,7 @@
 package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
@@ -49,7 +50,7 @@ class IntentPlanNodeTest {
     @Test
     @DisplayName("复合知识问题 → 一次调用产出意图、主查询、子查询、复杂度与风险")
     void planCompoundKnowledgeQuestion() throws Exception {
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(MAPPER.readTree("""
                         {"intent":"knowledge_qa","primaryQuery":"A公司和B公司的退款规则",
                          "subQueries":["A公司退款规则","B公司退款规则"],"complexity":"compound",
@@ -69,7 +70,7 @@ class IntentPlanNodeTest {
     @Test
     @DisplayName("代码意图 → 不触发完整检索规划")
     void planCodeIntent() throws Exception {
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(MAPPER.readTree("""
                         {"intent":"code_generate","primaryQuery":"写一个 Java 快排",
                          "subQueries":["写一个 Java 快排"],"complexity":"simple",
@@ -86,7 +87,7 @@ class IntentPlanNodeTest {
     @Test
     @DisplayName("LLM 不可用 → 降级为知识问答 + 单查询，不阻断主链路")
     void degradeWhenLlmUnavailable() {
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(null);
 
         Map<String, Object> updates = node.apply(stateOf("jvm 内存模型"));
@@ -110,7 +111,7 @@ class IntentPlanNodeTest {
     @Test
     @DisplayName("未知意图与空子查询 → 白名单归一 + 回退主查询")
     void normalizeUnknownIntentAndEmptySubQueries() throws Exception {
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(MAPPER.readTree("""
                         {"intent":"unknown","primaryQuery":"JVM 是什么","subQueries":[],
                          "complexity":"","risk":"unknown","reason":""}

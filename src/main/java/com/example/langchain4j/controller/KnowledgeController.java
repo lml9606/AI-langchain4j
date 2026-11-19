@@ -67,7 +67,7 @@ public class KnowledgeController {
      *
      * @param files 上传文件列表（支持多选；单次数量上限同 agent.knowledge.batch-max-documents）
      * @param documentId 逻辑文档 ID（可空；单文件重导同一文档时传入，用于版本更新）
-     * @param version    文档版本（可空；空则自动取当前最大版本 + 1）
+     * @param version    文档版本（可空；空则自动取当前版本 + 1；新版本写完才切换，导入中对读不可见）
      * @return 逐文件导入结果（fileName / chunks / ok / error）
      */
     @Operation(summary = "文件上传导入知识库并父子分块落库")

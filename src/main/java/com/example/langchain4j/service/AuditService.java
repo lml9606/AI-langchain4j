@@ -58,14 +58,34 @@ public class AuditService {
      */
     public void audit(String conversationId, String nodeName, String status,
                       String input, String output, String errorMsg, Long costMs, String rootCause) {
+        auditJson(conversationId, nodeName, status,
+                Map.of("query", input == null ? "" : input),
+                Map.of("result", output == null ? "" : output),
+                errorMsg, costMs, rootCause);
+    }
+
+    /**
+     * 结构化审计落库：输入/输出直接以 JSON 对象写入，避免把多个字段拼成字符串后再二次转义。
+     * 适用于 rewrite、retrieval-plan 这类需要保留多个排查字段的步骤。
+     */
+    public void auditJson(String conversationId, String nodeName, String status,
+                          Map<String, Object> input, Map<String, Object> output,
+                          String errorMsg, Long costMs) {
+        auditJson(conversationId, nodeName, status, input, output, errorMsg, costMs, null);
+    }
+
+    /** 结构化审计落库（带根因）；审计失败只告警，不影响主流程。 */
+    public void auditJson(String conversationId, String nodeName, String status,
+                          Map<String, Object> input, Map<String, Object> output,
+                          String errorMsg, Long costMs, String rootCause) {
         try {
             GraphExecution execution = new GraphExecution();
             execution.setExecutionId(UUID.randomUUID().toString().replace("-", ""));
             execution.setConversationId(conversationId);
             execution.setNodeName(nodeName);
             execution.setStatus(status);
-            execution.setInputJson(truncate(JsonUtil.toJson(Map.of("query", input == null ? "" : input))));
-            execution.setOutputJson(truncate(JsonUtil.toJson(Map.of("result", output == null ? "" : output))));
+            execution.setInputJson(truncate(JsonUtil.toJson(input == null ? Map.of() : input)));
+            execution.setOutputJson(truncate(JsonUtil.toJson(output == null ? Map.of() : output)));
             execution.setErrorMsg(errorMsg);
             execution.setCostMs(costMs);
             execution.setRootCause(rootCause == null || rootCause.isBlank() ? null : rootCause);

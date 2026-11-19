@@ -26,6 +26,8 @@ public enum ErrorCode {
     // ---- Agent 业务 ----
     AGENT_RATE_LIMITED(42901, "触发限流，请稍后重试"),
     AGENT_SESSION_LOCKED(40901, "会话正在处理中，请勿重复提交"),
+    DOCUMENT_IMPORTING(40903, "该文档正在导入中，请稍后重试"),
+    CONFIRMATION_IN_PROGRESS(40904, "确认操作正在执行中，请稍后重试"),
     AGENT_EXECUTION_FAILED(50010, "Agent 执行失败"),
     AGENT_LLM_UNAVAILABLE(50300, "大模型服务暂时不可用，已降级处理"),
     AGENT_TIMEOUT(50400, "Agent 执行超时"),

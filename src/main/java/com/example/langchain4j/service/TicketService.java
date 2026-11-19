@@ -97,12 +97,17 @@ public class TicketService {
         log.info("[ticket] replied, id={}, assignee={}", id, assignee);
     }
 
-    /** 关单（用户确认解决后关闭） */
+    /** 关单（用户确认解决后关闭；只允许关闭本人工单，防枚举 id 水平越权） */
     @Transactional(rollbackFor = Exception.class)
-    public void close(long id) {
-        Ticket ticket = requireTicket(id);
-        ticketMapper.updateStatus(id, Ticket.STATUS_CLOSED);
-        log.info("[ticket] closed, id={}", id);
+    public void close(long id, String userId) {
+        Ticket ticket = ticketMapper.selectByIdAndUserId(id, userId);
+        if (ticket == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在或无权操作: " + id);
+        }
+        if (ticketMapper.updateStatus(id, Ticket.STATUS_CLOSED, userId) == 0) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在或已被删除: " + id);
+        }
+        log.info("[ticket] closed, id={}, user={}", id, userId);
     }
 
     private Ticket requireTicket(long id) {

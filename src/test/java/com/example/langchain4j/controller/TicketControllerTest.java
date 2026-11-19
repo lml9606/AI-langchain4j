@@ -19,6 +19,7 @@ import java.util.Optional;
 
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -90,5 +91,16 @@ class TicketControllerTest {
         mockMvc.perform(get("/api/tickets/list"))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.code").value(ErrorCode.TOKEN_INVALID.getCode()));
+    }
+
+    @Test
+    @DisplayName("关闭工单 → 当前登录用户作为归属条件传给服务层")
+    void closeUsesCurrentUser() throws Exception {
+        mockMvc.perform(post("/api/tickets/9/close")
+                        .header("Authorization", "Bearer user-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0));
+
+        org.mockito.Mockito.verify(ticketService).close(9L, "alice");
     }
 }

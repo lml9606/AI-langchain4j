@@ -88,10 +88,18 @@ public interface KnowledgeChunkMapper {
     /** 查询同一用户下某逻辑文档的当前最大版本号；无记录返回 null */
     Integer selectMaxVersion(@Param("documentId") String documentId, @Param("userId") String userId);
 
-    /** 删除同一用户下某逻辑文档的旧版本（保留当前版本，控制存储与误召回） */
-    int deleteOlderVersions(@Param("documentId") String documentId,
-                            @Param("version") Integer version,
-                            @Param("userId") String userId);
+    /**
+     * 按批回收非当前版本（GC 专用）：旧版本已不在 active_version 上，删除只是回收空间。
+     * <p>只删"低于当前版本"的行；高于当前版本的草稿必须是保留期之前的，才允许删除——
+     * 避免 GC 与正在写入的新版本导入并发时误删草稿。
+     *
+     * @return 本批删除行数；调用方循环直到返回 0
+     */
+    int deleteInactiveVersions(@Param("documentId") String documentId,
+                               @Param("userId") String userId,
+                               @Param("activeVersion") int activeVersion,
+                               @Param("batchSize") int batchSize,
+                               @Param("retentionHours") int retentionHours);
 
     /** 删除某逻辑文档的指定版本（导入中途失败时清理已写入的半成品） */
     int deleteDocumentVersion(@Param("documentId") String documentId,
@@ -108,6 +116,16 @@ public interface KnowledgeChunkMapper {
 
     /** 更新内容 + 重嵌向量（SQL 层再按 user_id 过滤，双保险防越权；归属由服务层校验后调用） */
     int updateContent(KnowledgeChunk chunk);
+
+    /** 更新父块内容：父块不参与向量检索，只维护整章上下文与元数据，不重算向量 */
+    int updateParentContent(@Param("id") long id,
+                            @Param("content") String content,
+                            @Param("metadata") String metadata,
+                            @Param("userId") String userId);
+
+    /** 删除父块下的全部子块：父块删除/重建时保证父子结构不残留孤儿块 */
+    int deleteChildrenByParentId(@Param("parentId") long parentId,
+                                 @Param("userId") String userId);
 
     /** 删除知识块（SQL 层按 user_id 过滤：仅本人私有块；公共库块由服务层直接拒绝） */
     int deleteById(@Param("id") long id, @Param("userId") String userId);

@@ -2,6 +2,7 @@ package com.example.langchain4j.graph.task.nodes;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.guard.OutputGuardService;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
@@ -51,9 +52,9 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
         Integer tokenUsage = null;
         try {
             // 步骤1：优先让模型基于证据组织自然语言回答
-            LlmResult result = llmGateway.generate(state.model(),
+            LlmResult result = llmGateway.generate(LlmRequest.of(state.model(),
                     promptTemplateService.resolve("TASK_ANSWER_SYSTEM", PromptTemplates.TASK_ANSWER_SYSTEM),
-                    buildUserPrompt(state, evidence, trace));
+                    buildUserPrompt(state, evidence, trace)).scene("task-answer"));
             answer = result.text();
             tokenUsage = result.tokenUsage();
         } catch (BizException e) {

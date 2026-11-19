@@ -84,6 +84,13 @@ public class ToolExecutor {
                 record(context, toolName, args, result, start);
                 return result;
             }
+            // 写工具必须带幂等键：没有它就无法保证"重试不会重复落库"
+            if (context.idempotencyKey().isBlank()) {
+                result = ToolResult.failure("MISSING_IDEMPOTENCY_KEY", "写工具缺少幂等键，拒绝执行: " + toolName,
+                        System.currentTimeMillis() - start);
+                record(context, toolName, args, result, start);
+                return result;
+            }
         }
         String missing = missingArg(definition, args);
         if (missing != null) {

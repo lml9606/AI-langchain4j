@@ -1,9 +1,11 @@
 package com.example.langchain4j.service;
 
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.service.model.RewriteResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.data.message.UserMessage;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -16,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -53,7 +56,7 @@ class QueryRewriterTest {
     void rewriteFollowUpQuery() throws Exception {
         when(promptTemplateService.resolve(anyString(), anyString()))
                 .thenAnswer(invocation -> invocation.getArgument(1));
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(MAPPER.readTree("{\"rewritten\":\"JVM 是什么\",\"topic\":\"JVM\",\"newTopic\":false}"));
 
         RewriteResult result = rewriter.rewrite("它是什么", history(), List.of("JVM"), "test-model");
@@ -66,7 +69,7 @@ class QueryRewriterTest {
     void keepLlmForNewShortTopic() throws Exception {
         when(promptTemplateService.resolve(anyString(), anyString()))
                 .thenAnswer(invocation -> invocation.getArgument(1));
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(MAPPER.readTree("{\"rewritten\":\"Redis 是什么\",\"topic\":\"Redis\",\"newTopic\":true}"));
 
         RewriteResult result = rewriter.rewrite("Redis", history(), List.of("JVM"), "test-model");
@@ -80,7 +83,7 @@ class QueryRewriterTest {
     void rewriteReferentFromAssistantAnswer() throws Exception {
         when(promptTemplateService.resolve(anyString(), anyString()))
                 .thenAnswer(invocation -> invocation.getArgument(1));
-        when(llmGateway.generateJsonNode(anyString(), anyString(), anyString(), anyString()))
+        when(llmGateway.generateJson(any(LlmRequest.class)))
                 .thenReturn(MAPPER.readTree("{\"rewritten\":\"ArrayList 的扩容机制是什么\",\"topic\":\"Java 集合\",\"newTopic\":false}"));
 
         RewriteResult result = rewriter.rewrite("它的扩容机制呢", List.of(
@@ -88,9 +91,10 @@ class QueryRewriterTest {
                 Map.of("role", "assistant", "content", "ArrayList 默认容量是 10，扩容为原来的 1.5 倍")),
                 List.of("Java 集合"), "test-model");
 
-        ArgumentCaptor<String> userPrompt = ArgumentCaptor.forClass(String.class);
-        verify(llmGateway).generateJsonNode(anyString(), anyString(), userPrompt.capture(), anyString());
-        assertThat(userPrompt.getValue())
+        ArgumentCaptor<LlmRequest> requestCaptor = ArgumentCaptor.forClass(LlmRequest.class);
+        verify(llmGateway).generateJson(requestCaptor.capture());
+        String userPrompt = ((UserMessage) requestCaptor.getValue().messages().get(1)).singleText();
+        assertThat(userPrompt)
                 .contains("[用户] List 和 ArrayList 有什么区别")
                 .contains("[助手] ArrayList 默认容量是 10，扩容为原来的 1.5 倍");
         assertThat(result.rewritten()).isEqualTo("ArrayList 的扩容机制是什么");
