@@ -359,13 +359,14 @@ public class AgentProperties {
     }
 
     /**
-     * 会话锁配置（显式租约，不使用 Watchdog 续期）。
-     * 锁最迟在租约到期后自动释放，保证异常路径漏解锁时有界自愈；
-     * 代价是不自动续期，租约必须大于最长图执行耗时。
+     * 会话锁配置。
+     * chat/resume 使用宽松模式：显式租约、Redis 故障 fail-open；
+     * confirm 使用严格模式：Redisson Watchdog 自动续期、Redis 故障 fail-closed。
+     * leaseSeconds 仅作用于宽松模式，必须大于最长图执行耗时。
      */
     @Data
     public static class Lock {
-        /** 锁租约（秒）：必须大于 executionTimeoutSeconds，否则任务未结束锁先过期 */
+        /** 宽松模式锁租约（秒）：必须大于 executionTimeoutSeconds；严格模式由 Watchdog 续期 */
         private int leaseSeconds = 300;
     }
 
@@ -406,8 +407,6 @@ public class AgentProperties {
         public static class Confirmation {
             /** 确认令牌有效期（秒）：过期后必须重新规划，避免陈旧操作被执行 */
             private int ttlSeconds = 300;
-            /** 处理租约（秒）：同一令牌在该时间内只允许一个请求执行，需覆盖一次图执行耗时 */
-            private int claimSeconds = 600;
             /** 执行台账失联判定（秒）：RUNNING 超过该时长视为进程崩溃，允许接管重试 */
             private int staleSeconds = 60;
         }

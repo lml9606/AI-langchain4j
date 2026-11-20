@@ -13,7 +13,8 @@ import org.springframework.context.annotation.Configuration;
  * Redis 配置：统一客户端为 Redisson（不再使用 Lettuce/StringRedisTemplate）+ 启动期连通性探测。
  * <ul>
  *   <li>全局 Codec 固定 StringCodec：限流计数、熔断标记、缓存值均为纯字符串，可读且兼容历史数据；</li>
- *   <li>不可用时只告警不阻断（限流/锁/缓存/熔断均为 fail-open 策略）。</li>
+ *   <li>不可用时只告警不阻断（限流/缓存/熔断/宽松会话锁 fail-open；
+ *       确认写链路的严格会话锁 fail-closed）。</li>
  * </ul>
  */
 @Slf4j
@@ -48,10 +49,10 @@ public class RedisConfig {
                 if (pong) {
                     log.info("[redis] connectivity OK");
                 } else {
-                    log.warn("[redis] ping failed, rate-limit/session-lock/cache will fail-open");
+                    log.warn("[redis] ping failed, chat/resume locks fail-open, confirm locks fail-closed");
                 }
             } catch (Exception e) {
-                log.warn("[redis] unavailable, rate-limit/session-lock/cache will fail-open: {}",
+                log.warn("[redis] unavailable, chat/resume locks fail-open, confirm locks fail-closed: {}",
                         e.getMessage());
             }
         };

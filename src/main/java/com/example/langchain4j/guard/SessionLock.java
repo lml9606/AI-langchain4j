@@ -12,18 +12,18 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
- * Redis 分布式会话锁（Redisson RLock + 显式租约实现）。
- * <p>
- * 用途：同一会话（thread_id）同一时刻只允许一个图执行，防止 checkpoint 并发写竞态。
+ * Redis 分布式会话锁（Redisson RLock）。
+ *
+ * <p>用途：同一会话（thread_id）同一时刻只允许一个图执行，防止 checkpoint 并发写竞态。
+ * 提供两种模式，按链路风险选择：
  * <ul>
- *   <li>显式租约：租约到期自动释放（agent.lock.lease-seconds，默认 300s），
- *       异常路径漏解锁时锁最迟在租约到期后自愈，不会因 Watchdog 无限续期而永久锁死；</li>
- *   <li>可重入：同一线程重复加锁不会死锁；</li>
- *   <li>Redis 故障时 fail-open（不锁直接执行），可用性优先；</li>
- *   <li>释放前校验 isHeldByCurrentThread，避免误释放他人锁。</li>
+ *   <li><b>宽松模式</b>：chat/resume 使用。显式租约（agent.lock.lease-seconds，默认 300s），
+ *       Redis 故障 fail-open；异常路径漏解锁时，锁最迟在租约到期后自愈；</li>
+ *   <li><b>严格模式</b>：confirm（写操作确认）使用。Redisson Watchdog 自动续期，
+ *       Redis 故障 fail-closed，绝不在无锁状态下执行写操作。</li>
  * </ul>
- * 代价：显式租约不自动续期，任务超过租约会被提前解锁，
- * 因此租约必须大于最长图执行耗时（execution-timeout-seconds）。
+ * 两种模式均可重入，释放前校验 isHeldByCurrentThread，避免误释放他人锁。
+ * 宽松模式的租约必须大于最长图执行耗时（execution-timeout-seconds）。
  */
 @Slf4j
 @Component
@@ -62,6 +62,32 @@ public class SessionLock {
     }
 
     /**
+     * 严格模式：确认写操作专用。
+     *
+     * <p>与 {@link #executeWithLock(String, Supplier)} 的区别：
+     * <ul>
+     *   <li>启用 Redisson Watchdog（tryLock 只传 waitTime，不传固定 leaseTime），
+     *       执行期间自动续期，避免长任务执行到一半锁先过期；</li>
+     *   <li>Redis 不可用时 fail-closed，直接拒绝确认，而不是无锁执行。</li>
+     * </ul>
+     *
+     * <p>chat/resume 继续使用宽松模式，保持原有 fail-open 行为不变。
+     */
+    public <T> T executeWithLockStrict(String lockKey, Supplier<T> action) {
+        RLock lock = redissonClient.getLock(KEY_PREFIX + sanitize(lockKey));
+        boolean locked = tryAcquireStrict(lock);
+        if (!locked) {
+            log.warn("[session-lock] strict lock conflict, key={}", lock.getName());
+            throw new BizException(ErrorCode.AGENT_SESSION_LOCKED);
+        }
+        try {
+            return action.get();
+        } finally {
+            releaseQuietly(lock);
+        }
+    }
+
+    /**
      * 立即尝试加锁（不等待）：成功返回 true；锁冲突返回 false；Redis 故障 fail-open 返回 true。
      * <p>
      * tryLock(0, leaseSeconds, SECONDS) 的两个行为：
@@ -82,13 +108,31 @@ public class SessionLock {
         }
     }
 
+    /**
+     * 严格模式加锁：只传 waitTime，leaseTime 交给 Redisson Watchdog 自动续期。
+     * <p>Redis 故障/中断都 fail-closed，确认写操作绝不在无锁状态下执行。
+     */
+    private boolean tryAcquireStrict(RLock lock) {
+        try {
+            return lock.tryLock(0, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("[session-lock] strict acquire interrupted, key={}", lock.getName());
+            throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "会话锁获取被中断");
+        } catch (Exception e) {
+            log.error("[session-lock] strict acquire failed, fail-closed, key={}: {}",
+                    lock.getName(), e.getMessage());
+            throw new BizException(ErrorCode.CACHE_UNAVAILABLE, "会话锁服务暂不可用，请稍后重试");
+        }
+    }
+
     private void releaseQuietly(RLock lock) {
         try {
             if (lock.isHeldByCurrentThread()) {
                 lock.unlock();
             }
         } catch (Exception e) {
-            log.warn("[session-lock] release failed (watchdog will expire it): {}", e.getMessage());
+            log.warn("[session-lock] release failed (lease will expire it): {}", e.getMessage());
         }
     }
 

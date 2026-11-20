@@ -21,20 +21,20 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.endsWith;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 确认令牌单测：短期授权、处理租约、归属/过期校验与故障语义。
+ * 确认令牌单测：一个会话一个 key，key 的值就是当前待确认动作。
  */
 @ExtendWith(MockitoExtension.class)
 class ConfirmationServiceTest {
@@ -42,9 +42,7 @@ class ConfirmationServiceTest {
     @Mock
     private RedissonClient redissonClient;
     @Mock
-    private RBucket<String> tokenBucket;
-    @Mock
-    private RBucket<String> claimBucket;
+    private RBucket<String> conversationBucket;
 
     private final ObjectMapper objectMapper = JsonUtil.copyMapper();
     private ConfirmationService service;
@@ -53,11 +51,10 @@ class ConfirmationServiceTest {
     void setUp() {
         AgentProperties properties = new AgentProperties();
         properties.getTool().getConfirmation().setTtlSeconds(120);
-        properties.getTool().getConfirmation().setClaimSeconds(600);
         service = new ConfirmationService(redissonClient, properties);
-        // 默认返回令牌 bucket；更具体的 :claim 后缀 stub 放在后面，优先命中
-        lenient().doReturn(tokenBucket).when(redissonClient).getBucket(anyString());
-        lenient().doReturn(claimBucket).when(redissonClient).getBucket(endsWith(":claim"));
+        lenient().doReturn(conversationBucket).when(redissonClient).getBucket(anyString());
+        lenient().when(conversationBucket.trySet(anyString(), anyLong(), eq(TimeUnit.SECONDS)))
+                .thenReturn(true);
     }
 
     private ConfirmationService.PendingAction action(String userId) {
@@ -69,8 +66,8 @@ class ConfirmationServiceTest {
     }
 
     @Test
-    @DisplayName("创建确认令牌 → 写入 Redis 并返回带过期时间的动作")
-    void createWritesTokenWithTtl() throws Exception {
+    @DisplayName("创建待确认动作 → 只写会话 key，值就是待确认动作本身")
+    void createWritesConversationKeyWithTtl() throws Exception {
         ConfirmationService.PendingAction created = service.create(
                 "demo", "c1", "model-x", "complete_demo_record",
                 List.of(Map.of("tool", "complete_demo_record", "args", Map.of("recordId", 1))),
@@ -80,102 +77,112 @@ class ConfirmationServiceTest {
         assertThat(created.expiresAt()).isGreaterThan(System.currentTimeMillis());
 
         ArgumentCaptor<String> jsonCaptor = ArgumentCaptor.forClass(String.class);
-        verify(tokenBucket).set(jsonCaptor.capture(), eq(120L), eq(TimeUnit.SECONDS));
+        verify(conversationBucket).trySet(jsonCaptor.capture(), eq(120L), eq(TimeUnit.SECONDS));
         ConfirmationService.PendingAction stored = objectMapper.readValue(
                 jsonCaptor.getValue(), ConfirmationService.PendingAction.class);
         assertThat(stored.confirmationId()).isEqualTo(created.confirmationId());
         assertThat(stored.userId()).isEqualTo("demo");
+        assertThat(stored.conversationId()).isEqualTo("c1");
         assertThat(stored.plan()).hasSize(1);
     }
 
     @Test
-    @DisplayName("preview 只读：不抢租约、不删令牌")
-    void previewDoesNotClaim() throws Exception {
-        when(tokenBucket.get()).thenReturn(objectMapper.writeValueAsString(action("demo")));
+    @DisplayName("preview 只读：不删除会话 key")
+    void previewDoesNotDeletePending() throws Exception {
+        when(conversationBucket.get()).thenReturn(objectMapper.writeValueAsString(action("demo")));
 
-        Optional<ConfirmationService.PendingAction> preview = service.preview("cfm_1", "demo");
+        Optional<ConfirmationService.PendingAction> preview =
+                service.preview("c1", "cfm_1", "demo");
 
         assertThat(preview).isPresent();
-        verify(claimBucket, never()).trySet(anyString(), anyLong(), any());
-        verify(tokenBucket, never()).delete();
+        verify(conversationBucket, never()).delete();
     }
 
     @Test
-    @DisplayName("同一令牌只能抢占一次：第二个请求收到执行中")
-    void claimIsExclusive() throws Exception {
-        when(tokenBucket.get()).thenReturn(objectMapper.writeValueAsString(action("demo")));
-        when(claimBucket.trySet("1", 600L, TimeUnit.SECONDS)).thenReturn(true, false);
+    @DisplayName("同一会话已有待确认动作 → trySet 失败，拒绝第二张令牌")
+    void createRejectsSecondPendingAction() {
+        when(conversationBucket.trySet(anyString(), anyLong(), eq(TimeUnit.SECONDS)))
+                .thenReturn(false);
 
-        ConfirmationService.PendingAction claimed = service.claim("cfm_1", "demo");
-
-        assertThat(claimed.confirmationId()).isEqualTo("cfm_1");
-        assertThatThrownBy(() -> service.claim("cfm_1", "demo"))
+        assertThatThrownBy(() -> service.create(
+                "demo", "c1", "model-x", "complete_demo_record", List.of(),
+                "即将执行：完成演示记录。", "WRITE"))
                 .isInstanceOf(BizException.class)
                 .extracting(e -> ((BizException) e).getCode())
-                .isEqualTo(ErrorCode.CONFIRMATION_IN_PROGRESS.getCode());
+                .isEqualTo(ErrorCode.CONFIRMATION_PENDING.getCode());
     }
 
     @Test
-    @DisplayName("他人令牌 → 视为不存在，且不抢占、不删除")
-    void rejectOtherUsersToken() throws Exception {
-        when(tokenBucket.get()).thenReturn(objectMapper.writeValueAsString(action("owner")));
+    @DisplayName("confirmationId 不是会话当前动作 → 不能确认")
+    void previewRejectsStaleConfirmationId() throws Exception {
+        when(conversationBucket.get()).thenReturn(objectMapper.writeValueAsString(action("demo")));
 
-        assertThatThrownBy(() -> service.claim("cfm_1", "attacker"))
-                .isInstanceOf(BizException.class)
-                .extracting(e -> ((BizException) e).getCode())
-                .isEqualTo(ErrorCode.NOT_FOUND.getCode());
-        verify(claimBucket, never()).trySet(anyString(), anyLong(), any());
+        assertThat(service.preview("c1", "cfm_old", "demo")).isEmpty();
+        verify(conversationBucket, never()).delete();
     }
 
     @Test
-    @DisplayName("令牌已过期 → 拒绝执行且不抢占")
-    void rejectExpiredToken() throws Exception {
-        ConfirmationService.PendingAction expired = new ConfirmationService.PendingAction(
-                "cfm_1", "demo", "c1", "model-x", "complete_demo_record",
-                List.of(), "已过期", "WRITE", System.currentTimeMillis() - 1);
-        when(tokenBucket.get()).thenReturn(objectMapper.writeValueAsString(expired));
+    @DisplayName("他人动作 → 视为不存在，且不删除")
+    void rejectOtherUsersAction() throws Exception {
+        when(conversationBucket.get()).thenReturn(objectMapper.writeValueAsString(action("owner")));
 
-        assertThatThrownBy(() -> service.claim("cfm_1", "demo"))
-                .isInstanceOf(BizException.class)
-                .extracting(e -> ((BizException) e).getCode())
-                .isEqualTo(ErrorCode.NOT_FOUND.getCode());
-        verify(claimBucket, never()).trySet(anyString(), anyLong(), any());
+        assertThat(service.preview("c1", "cfm_1", "attacker")).isEmpty();
+        verify(conversationBucket, never()).delete();
+    }
+
+    @Test
+    @DisplayName("会话 key 不存在（含 TTL 到期）→ 视为不存在")
+    void rejectMissingConversationKey() {
+        when(conversationBucket.get()).thenReturn(null);
+
+        assertThat(service.preview("c1", "cfm_1", "demo")).isEmpty();
+        verify(conversationBucket, never()).delete();
     }
 
     @Test
     @DisplayName("Redis 读取失败 → 503 而不是伪装成 404")
     void previewFailsClosedWithServiceUnavailable() {
-        when(tokenBucket.get()).thenThrow(new RuntimeException("redis down"));
+        when(conversationBucket.get()).thenThrow(new RuntimeException("redis down"));
 
-        assertThatThrownBy(() -> service.preview("cfm_1", "demo"))
+        assertThatThrownBy(() -> service.preview("c1", "cfm_1", "demo"))
                 .isInstanceOf(BizException.class)
                 .extracting(e -> ((BizException) e).getCode())
                 .isEqualTo(ErrorCode.CACHE_UNAVAILABLE.getCode());
     }
 
     @Test
-    @DisplayName("release 只释放租约，保留令牌供重试")
-    void releaseKeepsToken() {
-        service.release("cfm_1");
+    @DisplayName("finish 删除会话 key")
+    void finishDeletesConversationKey() throws Exception {
+        when(conversationBucket.get()).thenReturn(objectMapper.writeValueAsString(action("demo")));
 
-        verify(claimBucket).delete();
-        verify(tokenBucket, never()).delete();
+        service.finish("c1", "cfm_1");
+
+        verify(conversationBucket).delete();
     }
 
     @Test
-    @DisplayName("finish 同时删除租约与令牌")
-    void finishDeletesTokenAndClaim() {
-        service.finish("cfm_1");
+    @DisplayName("finish 不清除后续新动作")
+    void finishDoesNotDeleteNewerAction() throws Exception {
+        when(conversationBucket.get()).thenReturn(objectMapper.writeValueAsString(action("demo")));
 
-        verify(claimBucket).delete();
-        verify(tokenBucket).delete();
+        service.finish("c1", "cfm_old");
+
+        verify(conversationBucket, never()).delete();
+    }
+
+    @Test
+    @DisplayName("finish 遇到 Redis 故障只降级，不影响业务结果")
+    void finishIgnoresRedisFailure() {
+        when(conversationBucket.get()).thenThrow(new RuntimeException("redis down"));
+
+        assertThatCode(() -> service.finish("c1", "cfm_1")).doesNotThrowAnyException();
     }
 
     @Test
     @DisplayName("Redis 创建异常 → fail-closed，抛出缓存不可用")
     void createFailsClosedOnRedisError() {
         doThrow(new RuntimeException("redis down"))
-                .when(tokenBucket).set(anyString(), anyLong(), eq(TimeUnit.SECONDS));
+                .when(conversationBucket).trySet(anyString(), anyLong(), eq(TimeUnit.SECONDS));
 
         assertThatThrownBy(() -> service.create(
                 "demo", "c1", "model-x", "complete_demo_record", List.of(),

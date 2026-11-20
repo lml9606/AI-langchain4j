@@ -2,7 +2,7 @@
 
 > 统一约定：`/api/**` 除白名单（`/api/auth/**`、`/actuator/**`）外均需携带
 > `Authorization: Bearer <token>`（JWT，登录/注册接口签发）。
-> 统一响应体：`{"code": 0, "message": "成功", "data": ...}`；`code != 0` 表示业务失败。
+> 统一响应体：`{"code": 0, "message": "成功", "data": ...}`；`code != 0` 表示接口调用失败；业务动作是否成功看 `data.business`。
 > 角色体系：`USER`（注册默认）/ `ADMIN`（运维 SQL 指定）；标注 **需 ADMIN** 的接口，
 > 普通用户访问返回 HTTP 403 + `code=40300`。
 >
@@ -24,11 +24,13 @@
 |---|---|---|---|
 | POST | `/api/agent/chat` | 同步对话（invoke 全图） | `{conversationId?, query, model?, history?}` |
 | POST | `/api/agent/chat/stream` | 流式对话（SSE） | 同 chat |
+| POST | `/api/agent/confirm` | 确认/取消写操作（同一会话只允许一个待确认动作） | `{conversationId, confirmationId, approved}` |
 | POST | `/api/agent/resume` | 断点恢复（从最近 checkpoint 继续） | `{conversationId, query?}` |
 | GET | `/api/agent/state/{threadId}` | 查询 checkpoint 执行状态 | 路径参数 threadId |
 | GET | `/api/agent/conversation/{id}/messages` | 会话历史（默认 50 条，上限 200） | `?limit=50` |
 
 安全：会话归属校验（403 防水平越权）；身份以 Token 为准（服务端从 Authorization 头解析，请求体不携带用户 ID）。
+`confirm` 的 `approved=true` 表示执行、`false` 表示取消；响应 `data.business.success/errorCode/errorMessage` 表示业务动作结果。
 
 ## 3. 知识库 `/api/knowledge`
 

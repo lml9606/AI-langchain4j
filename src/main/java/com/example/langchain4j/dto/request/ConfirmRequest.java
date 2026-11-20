@@ -10,6 +10,10 @@ import lombok.Data;
 @Data
 public class ConfirmRequest {
 
+    @NotBlank(message = "conversationId 不能为空")
+    @Size(max = 64, message = "conversationId 长度不能超过 64")
+    private String conversationId;
+
     @NotBlank(message = "confirmationId 不能为空")
     @Size(max = 128, message = "confirmationId 长度不能超过 128")
     private String confirmationId;

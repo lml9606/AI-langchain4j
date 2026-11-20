@@ -58,20 +58,22 @@ public class MyTool implements AgentTool {
 
 ```text
 规划阶段：LLM 生成计划 → 检测到 WRITE 工具 → 不执行
-          → TaskConfirmNode 生成 Redis 令牌（TTL 5 分钟）
+          → TaskConfirmNode 写入会话当前待确认动作（Redis 单 key，TTL 5 分钟）
           → 响应 pendingAction，保存 assistant 确认话术
 
-确认阶段：POST /api/agent/confirm
-          → Redis getAndDelete（一次性）
-          → 校验 userId / conversationId / 过期时间
-          → 会话锁内执行已确认计划（approved=true + confirmationId）
+确认阶段：POST /api/agent/confirm（conversationId + confirmationId + approved）
+          → 校验会话归属
+          → 严格会话锁内只读一次当前动作
+          → 校验 confirmationId / userId；key 由 Redis TTL 判定过期
+          → 执行已确认计划（approved=true + confirmationId，同步在锁内完成）
           → ToolExecutor 二次校验白名单 + approved
           → 业务数据隔离、状态更新与幂等防重由具体写工具实现
           → TaskAnswerNode 基于工具结果回答并保存 assistant 消息
+          → 台账 SUCCEEDED 删除会话 key；失败保留 key 供同 ID 重试
 ```
 
-关键约束：确认令牌只证明“用户同意了这个计划”，真正防止重复落库的是写工具里的幂等键；
-执行超时或失败不会自动重试写工具，用户需要重新发起规划。
+关键约束：Redis 待确认动作只证明“用户同意了这个计划”，真正防止重复落库的是写工具里的幂等键；
+一个会话同一时刻只允许一个待确认动作；执行失败不会自动重试写工具，用户可用同一个 `confirmationId` 重试。
 
 ## 6. 管理接口
 

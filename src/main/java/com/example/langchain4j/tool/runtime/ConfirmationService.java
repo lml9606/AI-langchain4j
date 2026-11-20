@@ -17,13 +17,12 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 写操作确认令牌：短期授权 + 处理租约。
+ * 写操作确认令牌：短期授权，保存服务端计划与归属。
  *
- * <p>职责拆成两块，避免"一个令牌既当授权又当执行状态"：
- * <ul>
- *   <li><b>令牌</b>（{@code agent:confirm:{id}}）：保存服务端计划与归属，TTL 到期自动失效；</li>
- *   <li><b>处理租约</b>（{@code agent:confirm:{id}:claim}）：SET NX 抢占，保证同一确认同一时刻只有一个执行者。</li>
- * </ul>
+ * <p>同一确认的执行互斥由编排层的严格会话锁负责（Watchdog + Redis 故障 fail-closed），
+ * 本类负责令牌的创建、读取与删除，并维护"一个会话最多一个待确认动作"的约束：
+ * 每个会话只有一个 {@code agent:confirm:{conversationId}} key，值本身就是当前待确认动作，
+ * 创建新动作直接 trySet，已存在则拒绝，确认/取消后删除该 key。
  *
  * <p>令牌只是"用户同意过"的短期凭证，不是执行结果的事实源。执行是否成功由数据库台账
  * {@code ai_tool_execution} 回答——令牌被删、过期、Redis 重启都不会丢失这个事实。
@@ -40,7 +39,6 @@ import java.util.concurrent.TimeUnit;
 public class ConfirmationService {
 
     private static final String KEY_PREFIX = "agent:confirm:";
-    private static final String CLAIM_SUFFIX = ":claim";
 
     private final RedissonClient redissonClient;
     private final AgentProperties properties;
@@ -70,11 +68,17 @@ public class ConfirmationService {
         PendingAction action = new PendingAction(confirmationId, userId, conversationId,
                 model, tool, plan, summary, risk, expiresAt);
         try {
-            RBucket<String> bucket = redissonClient.getBucket(KEY_PREFIX + confirmationId);
-            bucket.set(objectMapper.writeValueAsString(action), ttlSeconds, TimeUnit.SECONDS);
+            String json = objectMapper.writeValueAsString(action);
+            // 单会话单 key：key 存在就表示已有待确认动作，直接拒绝第二张令牌。
+            if (!conversationBucket(conversationId).trySet(json, ttlSeconds, TimeUnit.SECONDS)) {
+                log.warn("[confirm] pending exists, conversation={}", conversationId);
+                throw new BizException(ErrorCode.CONFIRMATION_PENDING);
+            }
             log.info("[confirm] created, idTail={}, tool={}, ttl={}s",
                     idTail(confirmationId), tool, ttlSeconds);
             return action;
+        } catch (BizException e) {
+            throw e;
         } catch (Exception e) {
             log.error("[confirm] create failed, fail-closed: {}", e.getMessage());
             throw new BizException(ErrorCode.CACHE_UNAVAILABLE, "确认服务暂不可用，请稍后重试");
@@ -82,85 +86,73 @@ public class ConfirmationService {
     }
 
     /**
+     * 会话是否存在待确认动作。
+     *
+     * <p>这是聊天入口的体验层前置检查：Redis 读失败时 fail-open，允许继续执行普通问答；
+     * 真正防止第二张令牌的原子闸门在 {@link #create} 的 trySet，那里 Redis 故障会 fail-closed。
+     */
+    public boolean hasPending(String conversationId) {
+        if (conversationId == null || conversationId.isBlank()) {
+            return false;
+        }
+        try {
+            return conversationBucket(conversationId).get() != null;
+        } catch (Exception e) {
+            log.warn("[confirm] pending check failed, fail-open, conversation={}: {}",
+                    conversationId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * 只读取并校验令牌，不抢占、不删除。
      * <p>供编排层在进入会话锁前做归属校验；Redis 故障抛 503，而不是伪装成令牌不存在。
      */
-    public Optional<PendingAction> preview(String confirmationId, String userId) {
-        return Optional.ofNullable(load(confirmationId, userId));
+    public Optional<PendingAction> preview(String conversationId, String confirmationId,
+                                           String userId) {
+        return Optional.ofNullable(load(conversationId, confirmationId, userId));
     }
 
     /**
-     * 抢占处理租约：同一确认同一时刻只允许一个执行者。
-     * <p>租约到期自动释放，进程崩溃不会永久锁死；真正的重复执行防护由写工具幂等台账兜底。
-     *
-     * @throws BizException 令牌不存在（404）、已有执行者（409）、Redis 故障（503）
+     * 完成确认：删除会话当前令牌（成功执行或用户取消后调用）。
+     * <p>只有会话 key 仍指向该令牌时才删除，避免误删后续新操作。
      */
-    public PendingAction claim(String confirmationId, String userId) {
-        PendingAction action = load(confirmationId, userId);
-        if (action == null) {
-            throw new BizException(ErrorCode.NOT_FOUND, "确认请求不存在、已过期或已使用，请重新发起操作");
+    public void finish(String conversationId, String confirmationId) {
+        if (conversationId == null || conversationId.isBlank()
+                || confirmationId == null || confirmationId.isBlank()) {
+            return;
         }
-        int claimSeconds = Math.max(1, properties.getTool().getConfirmation().getClaimSeconds());
         try {
-            RBucket<String> claimBucket = redissonClient.getBucket(KEY_PREFIX + confirmationId + CLAIM_SUFFIX);
-            boolean acquired = claimBucket.trySet("1", claimSeconds, TimeUnit.SECONDS);
-            if (!acquired) {
-                log.warn("[confirm] claim conflict, idTail={}, conversation={}",
-                        idTail(confirmationId), action.conversationId());
-                throw new BizException(ErrorCode.CONFIRMATION_IN_PROGRESS);
+            RBucket<String> bucket = conversationBucket(conversationId);
+            String json = bucket.get();
+            if (json == null || json.isBlank()) {
+                return;
             }
-            log.info("[confirm] claimed, idTail={}, conversation={}, tool={}",
-                    idTail(confirmationId), action.conversationId(), action.tool());
-            return action;
-        } catch (BizException e) {
-            throw e;
-        } catch (Exception e) {
-            log.error("[confirm] claim failed, idTail={}, fail-closed: {}", idTail(confirmationId), e.getMessage());
-            throw new BizException(ErrorCode.CACHE_UNAVAILABLE, "确认服务暂不可用，请稍后重试");
-        }
-    }
-
-    /**
-     * 释放处理租约但保留令牌：执行失败时调用，用户可以用同一个 confirmationId 重试。
-     * <p>重试是否安全由写工具的幂等台账保证，不依赖令牌本身。
-     */
-    public void release(String confirmationId) {
-        if (confirmationId == null || confirmationId.isBlank()) {
-            return;
-        }
-        try {
-            redissonClient.getBucket(KEY_PREFIX + confirmationId + CLAIM_SUFFIX).delete();
-        } catch (Exception e) {
-            // 租约会自然过期，释放失败不阻断主流程
-            log.warn("[confirm] release failed, idTail={}: {}", idTail(confirmationId), e.getMessage());
-        }
-    }
-
-    /** 完成确认：删除令牌与处理租约（成功执行或用户取消后调用） */
-    public void finish(String confirmationId) {
-        if (confirmationId == null || confirmationId.isBlank()) {
-            return;
-        }
-        try {
-            redissonClient.getBucket(KEY_PREFIX + confirmationId + CLAIM_SUFFIX).delete();
-            redissonClient.getBucket(KEY_PREFIX + confirmationId).delete();
+            PendingAction action = objectMapper.readValue(json, PendingAction.class);
+            if (confirmationId.equals(action.confirmationId())) {
+                bucket.delete();
+            }
         } catch (Exception e) {
             // 令牌 TTL 到期会自然清理；删不掉不影响业务结果
-            log.warn("[confirm] finish failed, idTail={}: {}", idTail(confirmationId), e.getMessage());
+            log.warn("[confirm] finish failed, idTail={}: {}", idTail(confirmationId),
+                    e.getMessage());
         }
     }
 
-    /** 读取并校验归属/过期；Redis 故障抛 503，其余无效情况返回 null */
-    private PendingAction load(String confirmationId, String userId) {
-        if (confirmationId == null || confirmationId.isBlank()) {
+    /**
+     * 读取并校验归属/过期；Redis 故障抛 503，其余无效情况返回 null
+     */
+    private PendingAction load(String conversationId, String confirmationId, String userId) {
+        if (conversationId == null || conversationId.isBlank()
+                || confirmationId == null || confirmationId.isBlank()) {
             return null;
         }
         String json;
         try {
-            RBucket<String> bucket = redissonClient.getBucket(KEY_PREFIX + confirmationId);
-            json = bucket.get();
+            json = conversationBucket(conversationId).get();
         } catch (Exception e) {
-            log.error("[confirm] load failed, idTail={}, fail-closed: {}", idTail(confirmationId), e.getMessage());
+            log.error("[confirm] load failed, idTail={}, fail-closed: {}", idTail(confirmationId),
+                    e.getMessage());
             throw new BizException(ErrorCode.CACHE_UNAVAILABLE, "确认服务暂不可用，请稍后重试");
         }
         if (json == null || json.isBlank()) {
@@ -168,24 +160,42 @@ public class ConfirmationService {
         }
         try {
             PendingAction action = objectMapper.readValue(json, PendingAction.class);
+            if (!confirmationId.equals(action.confirmationId())) {
+                log.warn("[confirm] confirmation mismatch, conversation={}, idTail={}",
+                        conversationId, idTail(confirmationId));
+                return null;
+            }
             if (!userId.equals(action.userId())) {
                 log.warn("[confirm] user mismatch, idTail={}, conversation={}",
                         idTail(confirmationId), action.conversationId());
                 return null;
             }
-            if (action.expiresAt() < System.currentTimeMillis()) {
-                log.warn("[confirm] expired, idTail={}, conversation={}",
-                        idTail(confirmationId), action.conversationId());
-                return null;
-            }
+            // Redis TTL 是过期事实源；expiresAt 只用于响应展示。
             return action;
         } catch (Exception e) {
-            log.warn("[confirm] decode failed, idTail={}: {}", idTail(confirmationId), e.getMessage());
+            log.warn("[confirm] decode failed, idTail={}: {}", idTail(confirmationId),
+                    e.getMessage());
             return null;
         }
     }
 
-    /** 确认令牌脱敏：长 ID 仅保留末 8 位，短 ID 完全隐藏。 */
+    /**
+     * 令牌桶：集中 key 拼接与 Redisson 访问，业务方法不直接操作 bucket。
+     */
+    private RBucket<String> conversationBucket(String conversationId) {
+        return redissonClient.getBucket(conversationKey(conversationId));
+    }
+
+    /**
+     * 令牌 key：只在这里维护前缀。
+     */
+    private String conversationKey(String conversationId) {
+        return KEY_PREFIX + conversationId;
+    }
+
+    /**
+     * 确认令牌脱敏：长 ID 仅保留末 8 位，短 ID 完全隐藏。
+     */
     private String idTail(String id) {
         if (id == null || id.isBlank()) {
             return "";
@@ -193,7 +203,9 @@ public class ConfirmationService {
         return id.length() <= 8 ? "***" : id.substring(id.length() - 8);
     }
 
-    /** 待确认写操作：plan 为完整执行计划，确认后原样交给执行图 */
+    /**
+     * 待确认写操作：plan 为完整执行计划，确认后原样交给执行图
+     */
     public record PendingAction(String confirmationId,
                                 String userId,
                                 String conversationId,

@@ -1,6 +1,8 @@
 package com.example.langchain4j.dto.response;
 
+import com.example.langchain4j.common.response.BaseResponse;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 
 import java.util.List;
 import java.util.Map;
@@ -9,7 +11,8 @@ import java.util.Map;
  * 对话响应：图执行最终结果（保证非空，兜底路径也返回降级答案）。
  */
 @Data
-public class ChatResponse {
+@EqualsAndHashCode(callSuper = true)
+public class ChatResponse extends BaseResponse {
 
     /** 会话 ID（同时是 LangGraph threadId） */
     private String conversationId;
@@ -37,6 +40,8 @@ public class ChatResponse {
     private boolean clarify;
     /** 写操作待确认信息（含一次性 confirmationId）；非写操作轮为 null */
     private PendingAction pendingAction;
+    /** 业务执行结果；接口成功不代表业务动作成功（尤其写工具/确认链路） */
+    private BusinessResult business = BusinessResult.ok();
 
     public static ChatResponse of(String conversationId, String result, boolean fallback,
                                   Integer tokenUsage, long costMs, boolean done, String rootCause) {
