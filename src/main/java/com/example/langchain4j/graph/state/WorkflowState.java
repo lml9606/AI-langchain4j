@@ -110,6 +110,8 @@ public class WorkflowState extends AgentState {
     public static final String TASK_APPROVED = "taskApproved";
     /** 写工具幂等键（确认执行图入参，等于 confirmationId） */
     public static final String TASK_IDEMPOTENCY_KEY = "taskIdempotencyKey";
+    /** 固定任务工作流 ID（TaskPlanNode 写入；确认链路据此复核工具契约） */
+    public static final String TASK_WORKFLOW_ID = "taskWorkflowId";
 
     // ---- 旧版平铺字段 key：仅用于升级前 checkpoint 的迁移与兼容读取，新数据一律写入嵌套子对象 ----
     private static final String LEGACY_VALIDATED = "validated";
@@ -293,6 +295,7 @@ public class WorkflowState extends AgentState {
         reset.put(TASK_CONFIRMATION_ID, "");
         reset.put(TASK_APPROVED, false);
         reset.put(TASK_IDEMPOTENCY_KEY, "");
+        reset.put(TASK_WORKFLOW_ID, "");
         return reset;
     }
 
@@ -629,6 +632,11 @@ public class WorkflowState extends AgentState {
     /** 写工具幂等键；缺省空串 */
     public String taskIdempotencyKey() {
         return value(TASK_IDEMPOTENCY_KEY, "");
+    }
+
+    /** 固定任务工作流 ID；缺省空串 */
+    public String taskWorkflowId() {
+        return value(TASK_WORKFLOW_ID, "");
     }
 
     /** 本轮回答置信度（0~1）；缺省 0 */

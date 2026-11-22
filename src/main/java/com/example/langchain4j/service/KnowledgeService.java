@@ -4,6 +4,7 @@ import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.util.JsonUtil;
+import com.example.langchain4j.common.util.Throwables;
 import com.example.langchain4j.common.util.TokenEstimator;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.request.KnowledgeBatchImportRequest;
@@ -194,7 +195,7 @@ public class KnowledgeService {
         } catch (RuntimeException e) {
             // 失败版本只是未发布的草稿：删掉即可，active_version 不变，旧版本对外仍然可读
             log.error("[knowledge] document import failed, documentId={}, version={}, reason={}",
-                    resolvedDocumentId, resolvedVersion, rootMessage(e));
+                    resolvedDocumentId, resolvedVersion, Throwables.rootMessage(e));
             cleanupFailedImport(resolvedDocumentId, resolvedVersion, userId);
             releaseImport(resolvedDocumentId, userId);
             throw e;
@@ -337,20 +338,12 @@ public class KnowledgeService {
                 imported++;
             } catch (Exception e) {
                 log.warn("[knowledge] file import {} failed: {}", fileName, e.getMessage());
-                results.add(new KnowledgeFileImportResponse.FileResult(i, fileName, 0, false, rootMessage(e)));
+                results.add(new KnowledgeFileImportResponse.FileResult(i, fileName, 0, false,
+                        Throwables.rootMessage(e)));
                 failed++;
             }
         }
         return new KnowledgeFileImportResponse(files.size(), imported, failed, results);
-    }
-
-    /** 取异常链最深处的 message（业务原因通常在最底层），避免向上只看到包装信息 */
-    private String rootMessage(Throwable t) {
-        Throwable cur = t;
-        while (cur.getCause() != null && cur.getCause() != cur) {
-            cur = cur.getCause();
-        }
-        return String.valueOf(cur.getMessage());
     }
 
     /**

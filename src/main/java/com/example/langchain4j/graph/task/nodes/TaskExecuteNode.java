@@ -1,12 +1,18 @@
 package com.example.langchain4j.graph.task.nodes;
 
 import com.example.langchain4j.common.util.JsonUtil;
+import com.example.langchain4j.common.util.Texts;
+import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.tool.api.ToolContext;
 import com.example.langchain4j.tool.api.ToolEvidence;
 import com.example.langchain4j.tool.api.ToolResult;
+import com.example.langchain4j.tool.runtime.ToolAccessPolicy;
+import com.example.langchain4j.tool.runtime.ToolErrorCode;
 import com.example.langchain4j.tool.runtime.ToolExecutor;
+import com.example.langchain4j.tool.workflow.TaskWorkflow;
+import com.example.langchain4j.tool.workflow.TaskWorkflowRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
@@ -19,7 +25,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 任务执行节点：按计划逐步调用工具，收集调用轨迹与证据。
+ * 任务执行节点：先复核整组工具契约与权限，再按计划逐步调用工具并收集轨迹。
  * <p>
  * 观察语义最小化：某一步失败不抛异常，继续执行后续步骤；工具结果为空也保留轨迹，
  * 由回答节点统一说明“未查询到/查询失败”，避免半途中断导致用户拿不到任何反馈。
@@ -28,17 +34,30 @@ import java.util.Set;
 @Component
 public class TaskExecuteNode implements NodeAction<WorkflowState> {
 
-    /** 观察判定：这些错误继续执行后续步骤也没有意义，直接停止，避免浪费调用配额 */
+    /**
+     * 观察判定：这些错误继续执行后续步骤也没有意义，直接停止，避免浪费调用配额。
+     * 使用 ToolErrorCode 的枚举名而不是散落字符串，保证与执行器错误码同步。
+     */
     private static final Set<String> FATAL_ERRORS =
-            Set.of("FORBIDDEN_WRITE", "CONFIRMATION_REQUIRED", "UNKNOWN_TOOL", "RATE_LIMITED", "TIMEOUT");
+            Set.of(ToolErrorCode.FORBIDDEN_WRITE.name(), ToolErrorCode.FORBIDDEN_TOOL.name(),
+                    ToolErrorCode.CONFIRMATION_REQUIRED.name(),
+                    ToolErrorCode.MISSING_IDEMPOTENCY_KEY.name(),
+                    ToolErrorCode.UNKNOWN_TOOL.name(), ToolErrorCode.RATE_LIMITED.name(),
+                    ToolErrorCode.OVERLOADED.name(), ToolErrorCode.INTERRUPTED.name(),
+                    ToolErrorCode.TIMEOUT.name(), ToolErrorCode.INVALID_ARGS.name());
 
     private final ToolExecutor toolExecutor;
     private final AgentProperties properties;
+    private final TaskWorkflowRegistry workflowRegistry;
+    private final ToolAccessPolicy accessPolicy;
 
     /** 注入统一工具执行器。 */
-    public TaskExecuteNode(ToolExecutor toolExecutor, AgentProperties properties) {
+    public TaskExecuteNode(ToolExecutor toolExecutor, AgentProperties properties,
+                           TaskWorkflowRegistry workflowRegistry, ToolAccessPolicy accessPolicy) {
         this.toolExecutor = toolExecutor;
         this.properties = properties;
+        this.workflowRegistry = workflowRegistry;
+        this.accessPolicy = accessPolicy;
     }
 
     /** 按计划顺序调用工具，收集调用轨迹与证据；致命错误时提前停止。 */
@@ -51,12 +70,59 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
         log.info("[task-execute] start, planSteps={}, approved={}, conversation={}",
                 state.taskPlan().size(), state.taskApproved(), state.conversationId());
 
+        // 流程头节点复核：确认链路也要重新验证固定契约和整组权限，防止令牌内容或旧计划被篡改。
+        String workflowId = state.taskWorkflowId();
+        if (workflowId.isBlank()) {
+            workflowId = workflowRegistry.workflowIdOfPlan(state.taskPlan()).orElse("");
+        }
+        if (workflowId.isBlank()) {
+            log.warn("[task-execute] missing workflow contract, conversation={}", state.conversationId());
+            return fail("任务计划缺少固定工作流契约，拒绝执行", trace, evidence);
+        }
+        TaskWorkflow workflow = workflowRegistry.find(workflowId).orElse(null);
+        if (workflow == null) {
+            log.warn("[task-execute] unknown workflow, id={}", workflowId);
+            return fail("任务工作流不存在或已停用，拒绝执行", trace, evidence);
+        }
+        TaskWorkflowRegistry.Validation contract =
+                workflowRegistry.validatePlan(workflow, state.taskPlan());
+        if (!contract.valid()) {
+            log.warn("[task-execute] contract mismatch, workflow={}, reason={}",
+                    workflow.id(), contract.message());
+            return fail(contract.message(), trace, evidence);
+        }
+        ToolAccessPolicy.Decision access = accessPolicy.checkAll(workflow, UserContext.role());
+        if (!access.allowed()) {
+            log.warn("[task-execute] workflow access denied, workflow={}, status={}, tool={}",
+                    workflow.id(), access.status(), access.toolName());
+            return fail(access.message(), trace, evidence);
+        }
+
+        int maxSteps = Math.max(1, properties.getTool().getMaxStepsPerTask());
         // 步骤1：按计划顺序执行；每一步的结构化结果都写入 trace，成功步骤同时抽取证据
         for (Map<String, Object> step : state.taskPlan()) {
-            if (trace.size() >= properties.getLimits().getTaskTraceMaxEntries()) {
+            // 防御性二次截断：即使计划被外部篡改，也不能突破工具执行次数上限
+            if (trace.size() >= maxSteps
+                    || trace.size() >= properties.getLimits().getTaskTraceMaxEntries()) {
                 break;
             }
             String tool = String.valueOf(step.get("tool"));
+            // 每个子节点执行前再校验一次：权限可能在长任务执行期间被管理员收回。
+            ToolAccessPolicy.Decision stepAccess = accessPolicy.check(tool, UserContext.role());
+            if (!stepAccess.allowed()) {
+                Map<String, Object> traceItem = new LinkedHashMap<>();
+                traceItem.put("tool", tool);
+                traceItem.put("args", step.get("args") == null ? Map.of() : step.get("args"));
+                traceItem.put("purpose", step.get("purpose"));
+                traceItem.put("success", false);
+                traceItem.put("summary", stepAccess.message());
+                traceItem.put("errorCode", stepAccess.status().name());
+                traceItem.put("costMs", 0L);
+                trace.add(traceItem);
+                log.warn("[task-execute] step access denied, workflow={}, tool={}, status={}",
+                        workflow.id(), tool, stepAccess.status());
+                return fail(stepAccess.message(), trace, evidence);
+            }
             Object rawArgs = step.get("args");
             JsonNode args = JsonUtil.mapper().valueToTree(rawArgs == null ? Map.of() : rawArgs);
             ToolResult result = toolExecutor.invoke(context, tool, args);
@@ -66,7 +132,8 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
             traceItem.put("args", rawArgs == null ? Map.of() : rawArgs);
             traceItem.put("purpose", step.get("purpose"));
             traceItem.put("success", result.success());
-            traceItem.put("summary", truncate(result.summary(), properties.getLimits().getTaskSummaryMaxLength()));
+            traceItem.put("summary", Texts.truncate(result.summary(),
+                    properties.getLimits().getTaskSummaryMaxLength()));
             traceItem.put("errorCode", result.errorCode());
             traceItem.put("costMs", result.costMs());
             trace.add(traceItem);
@@ -86,7 +153,8 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
                     evidenceItem.put("type", item.type());
                     evidenceItem.put("sourceId", item.sourceId());
                     evidenceItem.put("title", item.title());
-                    evidenceItem.put("snippet", truncate(item.snippet(), properties.getLimits().getTaskSummaryMaxLength()));
+                    evidenceItem.put("snippet", Texts.truncate(item.snippet(),
+                            properties.getLimits().getTaskSummaryMaxLength()));
                     evidenceItem.put("score", item.score());
                     evidence.add(evidenceItem);
                 }
@@ -102,11 +170,13 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
                 WorkflowState.ERROR, "");
     }
 
-    /** 截断文本，避免轨迹和证据中的摘要过长。 */
-    private String truncate(String text, int max) {
-        if (text == null) {
-            return "";
-        }
-        return text.length() <= max ? text : text.substring(0, max) + "...";
+    /** 契约或权限失败：保留已产生轨迹，同时显式报错，避免回答节点把半份结果当成成功。 */
+    private Map<String, Object> fail(String message, List<Map<String, Object>> trace,
+                                     List<Map<String, Object>> evidence) {
+        return Map.of(
+                WorkflowState.TASK_TRACE, trace,
+                WorkflowState.TASK_EVIDENCE, evidence,
+                WorkflowState.ERROR, message);
     }
+
 }

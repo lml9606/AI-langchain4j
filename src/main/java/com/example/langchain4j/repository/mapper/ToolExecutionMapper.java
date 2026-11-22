@@ -16,6 +16,12 @@ public interface ToolExecutionMapper {
      */
     int insertRunning(ToolExecution execution);
 
+    /**
+     * 创建待确认动作：写入 PENDING 状态与计划快照。
+     * <p>唯一键冲突返回 0，说明同一确认 ID 已存在。
+     */
+    int insertPending(ToolExecution execution);
+
     ToolExecution selectByExecutionId(@Param("userId") String userId,
                                       @Param("executionId") String executionId);
 
@@ -28,12 +34,18 @@ public interface ToolExecutionMapper {
                    @Param("errorCode") String errorCode,
                    @Param("errorMessage") String errorMessage);
 
+    /** 用户取消确认：只允许从待确认/失败等未成功状态流转。 */
+    int markCancelled(@Param("userId") String userId,
+                      @Param("executionId") String executionId);
+
     /**
-     * 接管失败的或已失联的执行：FAILED 直接允许重试；RUNNING 超过 staleSeconds 视为进程崩溃。
+     * 接管待确认/失败/失联的执行：PENDING、FAILED 直接允许重试；
+     * RUNNING 超过 staleSeconds 视为进程崩溃。
      *
      * @return 1 = 接管成功，可以重新执行；0 = 仍在执行中
      */
     int tryReclaim(@Param("userId") String userId,
                    @Param("executionId") String executionId,
-                   @Param("staleSeconds") int staleSeconds);
+                   @Param("staleSeconds") int staleSeconds,
+                   @Param("argsHash") String argsHash);
 }

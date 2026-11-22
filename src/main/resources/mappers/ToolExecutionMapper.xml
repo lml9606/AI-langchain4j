@@ -10,6 +10,10 @@
         <result property="conversationId" column="conversation_id"/>
         <result property="tool" column="tool"/>
         <result property="argsHash" column="args_hash"/>
+        <result property="planJson" column="plan_json"/>
+        <result property="summary" column="summary"/>
+        <result property="risk" column="risk"/>
+        <result property="expiresAt" column="expires_at"/>
         <result property="status" column="status"/>
         <result property="result" column="result"/>
         <result property="errorCode" column="error_code"/>
@@ -25,9 +29,20 @@
         ON CONFLICT (user_id, execution_id) DO NOTHING
     </insert>
 
+    <!-- 创建待确认动作：先落 PENDING，保证用户看到确认卡片时数据库已有记录 -->
+    <insert id="insertPending" parameterType="com.example.langchain4j.repository.entity.ToolExecution">
+        INSERT INTO ai_tool_execution
+            (execution_id, user_id, conversation_id, tool, args_hash, plan_json, summary, risk,
+             expires_at, status)
+        VALUES
+            (#{executionId}, #{userId}, #{conversationId}, #{tool}, #{argsHash}, #{planJson},
+             #{summary}, #{risk}, #{expiresAt}, 'PENDING')
+        ON CONFLICT (user_id, execution_id) DO NOTHING
+    </insert>
+
     <select id="selectByExecutionId" resultMap="ToolExecutionMap">
-        SELECT id, execution_id, user_id, conversation_id, tool, args_hash, status, result,
-               error_code, error_message, created_at, updated_at
+        SELECT id, execution_id, user_id, conversation_id, tool, args_hash, plan_json, summary,
+               risk, expires_at, status, result, error_code, error_message, created_at, updated_at
         FROM ai_tool_execution
         WHERE user_id = #{userId}
           AND execution_id = #{executionId}
@@ -49,18 +64,28 @@
           AND status = 'RUNNING'
     </update>
 
+    <update id="markCancelled">
+        UPDATE ai_tool_execution
+        SET status = 'CANCELLED', updated_at = now()
+        WHERE user_id = #{userId}
+          AND execution_id = #{executionId}
+          AND status IN ('PENDING', 'APPROVED', 'FAILED')
+    </update>
+
     <!--
       接管执行权：
+      - PENDING / APPROVED：用户已确认，接管为执行中；
       - FAILED：上次业务已回滚，允许安全重试；
       - RUNNING 且超过 staleSeconds：进程崩溃留下的"僵尸执行"，允许重试（业务原子性由业务事务保证）。
     -->
     <update id="tryReclaim">
         UPDATE ai_tool_execution
-        SET status = 'RUNNING', error_code = NULL, error_message = NULL, updated_at = now()
+        SET status = 'RUNNING', args_hash = COALESCE(args_hash, #{argsHash}),
+            error_code = NULL, error_message = NULL, updated_at = now()
         WHERE user_id = #{userId}
           AND execution_id = #{executionId}
           AND (
-              status = 'FAILED'
+              status IN ('PENDING', 'APPROVED', 'FAILED')
               OR (status = 'RUNNING' AND updated_at &lt; now() - make_interval(secs =&gt; #{staleSeconds}))
           )
     </update>

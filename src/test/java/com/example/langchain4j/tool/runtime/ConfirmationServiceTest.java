@@ -4,6 +4,8 @@ import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.repository.entity.ToolExecution;
+import com.example.langchain4j.service.ToolExecutionService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -23,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -43,6 +46,8 @@ class ConfirmationServiceTest {
     private RedissonClient redissonClient;
     @Mock
     private RBucket<String> conversationBucket;
+    @Mock
+    private ToolExecutionService toolExecutionService;
 
     private final ObjectMapper objectMapper = JsonUtil.copyMapper();
     private ConfirmationService service;
@@ -51,9 +56,11 @@ class ConfirmationServiceTest {
     void setUp() {
         AgentProperties properties = new AgentProperties();
         properties.getTool().getConfirmation().setTtlSeconds(120);
-        service = new ConfirmationService(redissonClient, properties);
+        service = new ConfirmationService(redissonClient, properties, toolExecutionService);
         lenient().doReturn(conversationBucket).when(redissonClient).getBucket(anyString());
         lenient().when(conversationBucket.trySet(anyString(), anyLong(), eq(TimeUnit.SECONDS)))
+                .thenReturn(true);
+        lenient().when(toolExecutionService.recordPending(any(ToolExecution.class)))
                 .thenReturn(true);
     }
 
@@ -84,6 +91,18 @@ class ConfirmationServiceTest {
         assertThat(stored.userId()).isEqualTo("demo");
         assertThat(stored.conversationId()).isEqualTo("c1");
         assertThat(stored.plan()).hasSize(1);
+
+        ArgumentCaptor<ToolExecution> executionCaptor = ArgumentCaptor.forClass(ToolExecution.class);
+        verify(toolExecutionService).recordPending(executionCaptor.capture());
+        ToolExecution execution = executionCaptor.getValue();
+        assertThat(execution.getExecutionId()).isEqualTo(created.confirmationId());
+        assertThat(execution.getUserId()).isEqualTo("demo");
+        assertThat(execution.getConversationId()).isEqualTo("c1");
+        assertThat(execution.getTool()).isEqualTo("complete_demo_record");
+        assertThat(execution.getPlanJson()).contains("recordId");
+        assertThat(execution.getSummary()).isEqualTo("即将执行：完成演示记录。");
+        assertThat(execution.getRisk()).isEqualTo("WRITE");
+        assertThat(execution.getExpiresAt()).isNotNull();
     }
 
     @Test
@@ -110,6 +129,7 @@ class ConfirmationServiceTest {
                 .isInstanceOf(BizException.class)
                 .extracting(e -> ((BizException) e).getCode())
                 .isEqualTo(ErrorCode.CONFIRMATION_PENDING.getCode());
+        verify(toolExecutionService, never()).recordPending(any(ToolExecution.class));
     }
 
     @Test
@@ -190,5 +210,37 @@ class ConfirmationServiceTest {
                 .isInstanceOf(BizException.class)
                 .extracting(e -> ((BizException) e).getCode())
                 .isEqualTo(ErrorCode.CACHE_UNAVAILABLE.getCode());
+        verify(toolExecutionService, never()).recordPending(any(ToolExecution.class));
+    }
+
+    @Test
+    @DisplayName("台账写入失败 → 撤销 Redis key，不下发无记录的确认卡片")
+    void createRollsBackConversationKeyWhenPendingRecordRejected() {
+        when(toolExecutionService.recordPending(any(ToolExecution.class))).thenReturn(false);
+
+        assertThatThrownBy(() -> service.create(
+                "demo", "c1", "model-x", "complete_demo_record", List.of(),
+                "即将执行：完成演示记录。", "WRITE"))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.INTERNAL_ERROR.getCode());
+
+        verify(conversationBucket).delete();
+    }
+
+    @Test
+    @DisplayName("台账写入异常 → 撤销 Redis key，抛出数据库不可用")
+    void createRollsBackConversationKeyWhenPendingRecordFails() {
+        when(toolExecutionService.recordPending(any(ToolExecution.class)))
+                .thenThrow(new RuntimeException("db down"));
+
+        assertThatThrownBy(() -> service.create(
+                "demo", "c1", "model-x", "complete_demo_record", List.of(),
+                "即将执行：完成演示记录。", "WRITE"))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.DB_UNAVAILABLE.getCode());
+
+        verify(conversationBucket).delete();
     }
 }

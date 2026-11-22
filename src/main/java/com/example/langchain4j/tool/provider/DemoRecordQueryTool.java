@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 只读工具：查询当前用户的演示记录。
@@ -44,13 +45,14 @@ public class DemoRecordQueryTool implements AgentTool {
         return new ToolDefinition(
                 "query_demo_record",
                 "查询当前用户的演示任务记录（只读）。支持按状态过滤，默认返回最近 5 条。",
-                "{\"type\":\"object\",\"properties\":{"
+                "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{"
                         + "\"status\":{\"type\":\"string\",\"enum\":[\"OPEN\",\"DONE\"],\"description\":\"按状态过滤，不传表示全部\"},"
-                        + "\"limit\":{\"type\":\"integer\",\"description\":\"返回条数，1-" + MAX_LIMIT + "\",\"default\":" + DEFAULT_LIMIT
+                        + "\"limit\":{\"type\":\"integer\",\"description\":\"返回条数，1-" + MAX_LIMIT
+                        + "\",\"default\":" + DEFAULT_LIMIT + ",\"minimum\":1,\"maximum\":" + MAX_LIMIT
                         + "}}}",
-                List.of(),
                 ToolSideEffect.READ_ONLY,
-                5000);
+                5000,
+                new ToolDefinition.ToolPolicy(true, 30, Set.of()));
     }
 
     @Override

@@ -64,14 +64,6 @@ public class SessionLock {
     /**
      * 严格模式：确认写操作专用。
      *
-     * <p>与 {@link #executeWithLock(String, Supplier)} 的区别：
-     * <ul>
-     *   <li>启用 Redisson Watchdog（tryLock 只传 waitTime，不传固定 leaseTime），
-     *       执行期间自动续期，避免长任务执行到一半锁先过期；</li>
-     *   <li>Redis 不可用时 fail-closed，直接拒绝确认，而不是无锁执行。</li>
-     * </ul>
-     *
-     * <p>chat/resume 继续使用宽松模式，保持原有 fail-open 行为不变。
      */
     public <T> T executeWithLockStrict(String lockKey, Supplier<T> action) {
         RLock lock = redissonClient.getLock(KEY_PREFIX + sanitize(lockKey));

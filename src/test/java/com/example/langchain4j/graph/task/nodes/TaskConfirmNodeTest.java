@@ -2,12 +2,16 @@ package com.example.langchain4j.graph.task.nodes;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.tool.api.AgentTool;
 import com.example.langchain4j.tool.api.ToolDefinition;
 import com.example.langchain4j.tool.api.ToolSideEffect;
 import com.example.langchain4j.tool.runtime.ConfirmationService;
+import com.example.langchain4j.tool.runtime.ToolAccessPolicy;
 import com.example.langchain4j.tool.runtime.ToolRegistry;
+import com.example.langchain4j.tool.workflow.TaskWorkflow;
+import com.example.langchain4j.tool.workflow.TaskWorkflowRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -25,6 +29,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -38,16 +44,50 @@ class TaskConfirmNodeTest {
     @Mock
     private ToolRegistry toolRegistry;
     @Mock
+    private TaskWorkflowRegistry workflowRegistry;
+    @Mock
+    private ToolAccessPolicy accessPolicy;
+    @Mock
     private AgentTool agentTool;
 
+    private AgentProperties properties;
     private TaskConfirmNode node;
 
     @BeforeEach
     void setUp() {
-        node = new TaskConfirmNode(confirmationService, toolRegistry);
-        lenient().when(toolRegistry.find("write_tool")).thenReturn(Optional.of(agentTool));
+        properties = new AgentProperties();
+        properties.getTool().setWriteEnabled(true);
+        TaskWorkflow workflow = new TaskWorkflow() {
+            @Override
+            public String id() {
+                return "wf_write";
+            }
+
+            @Override
+            public String description() {
+                return "修改业务数据";
+            }
+
+            @Override
+            public List<Stage> stages() {
+                return List.of(new Stage("write", "修改", List.of("write_tool")));
+            }
+        };
+        node = new TaskConfirmNode(confirmationService, toolRegistry, workflowRegistry,
+                accessPolicy, properties);
+        lenient().when(workflowRegistry.find("wf_write")).thenReturn(Optional.of(workflow));
+        lenient().when(workflowRegistry.validatePlan(eq(workflow), any()))
+                .thenReturn(TaskWorkflowRegistry.Validation.ok());
+        lenient().when(accessPolicy.checkAll(eq(workflow), any())).thenReturn(
+                new ToolAccessPolicy.Decision(true, ToolAccessPolicy.Status.ALLOWED, "", ""));
+        lenient().when(accessPolicy.check(any(ToolDefinition.class), any())).thenReturn(
+                new ToolAccessPolicy.Decision(true, ToolAccessPolicy.Status.ALLOWED, "", ""));
+        lenient().when(toolRegistry.findRegistered("write_tool")).thenAnswer(invocation ->
+                Optional.of(new ToolRegistry.RegisteredTool(agentTool, agentTool.definition())));
         lenient().when(agentTool.definition()).thenReturn(new ToolDefinition(
-                "write_tool", "修改业务数据", "{}", List.of("entityId"),
+                "write_tool", "修改业务数据",
+                "{\"type\":\"object\",\"required\":[\"entityId\"],"
+                        + "\"properties\":{\"entityId\":{\"type\":\"string\"}}}",
                 ToolSideEffect.WRITE, 3000));
     }
 
@@ -58,7 +98,7 @@ class TaskConfirmNodeTest {
         pending.put("purpose", "修改业务数据");
         pending.put("risk", "WRITE");
         List<Map<String, Object>> plan = List.of(
-                Map.of("tool", "write_tool",
+                Map.of("workflowId", "wf_write", "tool", "write_tool",
                         "args", Map.of("entityId", "B1001", "reason", "不想要了"),
                         "purpose", "修改业务数据"));
         return new WorkflowState(Map.of(
@@ -66,6 +106,7 @@ class TaskConfirmNodeTest {
                 WorkflowState.MODEL, "test-model",
                 WorkflowState.USER_ID, "demo",
                 WorkflowState.CONVERSATION_ID, "c1",
+                WorkflowState.TASK_WORKFLOW_ID, "wf_write",
                 WorkflowState.TASK_PLAN, plan,
                 WorkflowState.TASK_PENDING_ACTION, pending));
     }
@@ -74,7 +115,7 @@ class TaskConfirmNodeTest {
     @DisplayName("写操作 → 生成 confirmationId 与确认话术")
     void createConfirmation() {
         List<Map<String, Object>> plan = List.of(
-                Map.of("tool", "write_tool",
+                Map.of("workflowId", "wf_write", "tool", "write_tool",
                         "args", Map.of("entityId", "B1001", "reason", "不想要了"),
                         "purpose", "修改业务数据"));
         ConfirmationService.PendingAction action = new ConfirmationService.PendingAction(
@@ -106,5 +147,27 @@ class TaskConfirmNodeTest {
         assertThat(String.valueOf(updates.get(WorkflowState.ERROR))).contains("确认请求创建失败");
         assertThat((Map<?, ?>) updates.get(WorkflowState.TASK_PENDING_ACTION)).isEmpty();
         assertThat(updates.get(WorkflowState.TASK_CONFIRMATION_REQUIRED)).isEqualTo(false);
+    }
+
+    @Test
+    @DisplayName("未知或只读工具 → 不创建确认令牌")
+    void rejectUnknownOrReadOnlyTool() {
+        when(toolRegistry.findRegistered("write_tool")).thenReturn(Optional.empty());
+
+        Map<String, Object> updates = node.apply(state());
+
+        assertThat(String.valueOf(updates.get(WorkflowState.ERROR))).contains("不存在或已停用");
+        verify(confirmationService, never()).create(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("全局写开关关闭 → 不创建确认令牌")
+    void rejectWhenWriteDisabled() {
+        properties.getTool().setWriteEnabled(false);
+
+        Map<String, Object> updates = node.apply(state());
+
+        assertThat(String.valueOf(updates.get(WorkflowState.ERROR))).contains("已禁用");
+        verify(confirmationService, never()).create(any(), any(), any(), any(), any(), any(), any());
     }
 }

@@ -50,6 +50,24 @@ public class ToolExecutionService {
     }
 
     /**
+     * 创建待确认动作台账：用户看到确认卡片时，数据库里已经有 PENDING 记录。
+     *
+     * <p>调用顺序必须是 Redis trySet 成功后；若这里返回 false，调用方要撤销 Redis key，
+     * 避免出现"有确认令牌、没有数据库记录"。
+     *
+     * @return true=写入成功；false=同一确认 ID 已存在
+     */
+    @Transactional
+    public boolean recordPending(ToolExecution execution) {
+        boolean inserted = executionMapper.insertPending(execution) == 1;
+        if (inserted) {
+            log.info("[tool-exec] pending recorded, executionTail={}, tool={}",
+                    idTail(execution.getExecutionId()), execution.getTool());
+        }
+        return inserted;
+    }
+
+    /**
      * 幂等闸门：抢占执行权、命中重放或判定冲突。
      * <p>必须在业务事务内调用，返回值决定调用方是继续执行还是直接返回上次结果。
      */
@@ -66,7 +84,9 @@ public class ToolExecutionService {
             // 唯一键冲突但查不到：并发事务尚未提交，交给调用方稍后重试
             return new BeginResult(BeginStatus.IN_PROGRESS, null);
         }
-        if (!Objects.equals(existing.getArgsHash(), execution.getArgsHash())) {
+        // PENDING 是用户确认前写入的，尚未计算参数指纹；接管时再补全。
+        if (existing.getArgsHash() != null
+                && !Objects.equals(existing.getArgsHash(), execution.getArgsHash())) {
             log.warn("[tool-exec] args mismatch, executionTail={}, tool={}",
                     idTail(execution.getExecutionId()), execution.getTool());
             return new BeginResult(BeginStatus.CONFLICT, existing);
@@ -76,8 +96,14 @@ public class ToolExecutionService {
                     idTail(execution.getExecutionId()), execution.getTool());
             return new BeginResult(BeginStatus.REPLAY, existing);
         }
+        if (ToolExecution.STATUS_CANCELLED.equals(existing.getStatus())) {
+            log.warn("[tool-exec] confirmation cancelled, executionTail={}, tool={}",
+                    idTail(execution.getExecutionId()), execution.getTool());
+            return new BeginResult(BeginStatus.CONFLICT, existing);
+        }
         int staleSeconds = Math.max(1, properties.getTool().getConfirmation().getStaleSeconds());
-        if (executionMapper.tryReclaim(execution.getUserId(), execution.getExecutionId(), staleSeconds) == 1) {
+        if (executionMapper.tryReclaim(execution.getUserId(), execution.getExecutionId(),
+                staleSeconds, execution.getArgsHash()) == 1) {
             log.info("[tool-exec] reclaimed, executionTail={}, tool={}",
                     idTail(execution.getExecutionId()), execution.getTool());
             return new BeginResult(BeginStatus.ACQUIRED, existing);
@@ -95,6 +121,16 @@ public class ToolExecutionService {
     @Transactional(propagation = Propagation.MANDATORY)
     public void fail(String userId, String executionId, String errorCode, String errorMessage) {
         executionMapper.markFailed(userId, executionId, errorCode, errorMessage);
+    }
+
+    /** 用户取消确认：PENDING/FAILED 流转为 CANCELLED；已经成功的记录不会被覆盖。 */
+    @Transactional
+    public void markCancelled(String userId, String executionId) {
+        int changed = executionMapper.markCancelled(userId, executionId);
+        if (changed == 0) {
+            log.info("[tool-exec] cancel skipped (not cancellable), executionTail={}",
+                    idTail(executionId));
+        }
     }
 
     /** 查询执行结果（令牌已删除时，用它回答"到底执行没执行"） */

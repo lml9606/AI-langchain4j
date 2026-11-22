@@ -371,22 +371,18 @@ public class AgentProperties {
     }
 
     /**
-     * 工具运行时配置：本版本只开放只读工具，写工具默认拒绝。
+     * 工具运行时全局配置。
+     *
+     * <p>工具自身的能力、写风险、超时和限流在 ToolDefinition 中声明；这里只保留
+     * 全局应急开关与默认预算，避免同一策略分散在配置文件和数据库两处。
      */
     @Data
     public static class Tool {
-        /**
-         * 工具白名单：非空时只有列出的工具会进入规划目录、也只有它们能被查找执行。
-         * 配置了不存在的名字会在启动期 fail-fast，避免写错名字后静默失效。
-         */
-        private List<String> enabledTools = List.of();
-        /** 全局只读开关：true 时任何 WRITE/DANGEROUS 工具都会被执行器拒绝 */
-        private boolean readOnly = true;
-        /** 写工具白名单：即使 readOnly=false，也只允许这里声明的写工具执行 */
-        private List<String> allowedWriteTools = List.of();
+        /** 全局写工具应急开关：false 时任何写工具都不能规划或执行（默认关闭） */
+        private boolean writeEnabled = false;
         /** 工具默认超时（毫秒），工具定义未显式配置时使用 */
         private int timeoutMs = 3000;
-        /** 单用户每分钟工具调用上限（Redis 固定窗口，多实例共享计数） */
+        /** 单用户单工具每分钟调用上限（Redis 固定窗口，多实例共享计数） */
         private int maxCallsPerMinute = 20;
         /** 单个任务最多执行计划步骤数（防模型输出超长计划导致成本失控） */
         private int maxStepsPerTask = 3;

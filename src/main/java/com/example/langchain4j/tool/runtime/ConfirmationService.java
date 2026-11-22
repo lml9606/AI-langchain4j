@@ -4,12 +4,17 @@ import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
+import com.example.langchain4j.repository.entity.ToolExecution;
+import com.example.langchain4j.service.ToolExecutionService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -24,8 +29,9 @@ import java.util.concurrent.TimeUnit;
  * 每个会话只有一个 {@code agent:confirm:{conversationId}} key，值本身就是当前待确认动作，
  * 创建新动作直接 trySet，已存在则拒绝，确认/取消后删除该 key。
  *
- * <p>令牌只是"用户同意过"的短期凭证，不是执行结果的事实源。执行是否成功由数据库台账
- * {@code ai_tool_execution} 回答——令牌被删、过期、Redis 重启都不会丢失这个事实。
+ * <p>令牌只是"用户同意过"的短期凭证，不是执行结果的事实源。创建令牌的同时会向
+ * {@code ai_tool_execution} 写入 PENDING 台账（含计划快照）；用户确认后由工具执行继续
+ * 流转状态。令牌被删、过期、Redis 重启都不会丢失这条业务记录。
  *
  * <p>故障策略：
  * <ul>
@@ -42,15 +48,19 @@ public class ConfirmationService {
 
     private final RedissonClient redissonClient;
     private final AgentProperties properties;
+    private final ToolExecutionService toolExecutionService;
     private final ObjectMapper objectMapper = JsonUtil.copyMapper();
 
-    public ConfirmationService(RedissonClient redissonClient, AgentProperties properties) {
+    public ConfirmationService(RedissonClient redissonClient, AgentProperties properties,
+                               ToolExecutionService toolExecutionService) {
         this.redissonClient = redissonClient;
         this.properties = properties;
+        this.toolExecutionService = toolExecutionService;
     }
 
     /**
-     * 创建待确认动作并写入 Redis。
+     * 创建待确认动作：先写 Redis 单会话 key，再写 PENDING 台账。
+     * <p>台账写失败会撤销 Redis key，保证不会下发"有令牌、无记录"的确认卡片。
      *
      * @return 含 confirmationId 与过期时间的待确认动作
      * @throws BizException Redis 不可用时抛出（fail-closed，不下发无法执行的令牌）
@@ -67,21 +77,60 @@ public class ConfirmationService {
         long expiresAt = System.currentTimeMillis() + ttlSeconds * 1000L;
         PendingAction action = new PendingAction(confirmationId, userId, conversationId,
                 model, tool, plan, summary, risk, expiresAt);
+        RBucket<String> bucket = conversationBucket(conversationId);
         try {
             String json = objectMapper.writeValueAsString(action);
             // 单会话单 key：key 存在就表示已有待确认动作，直接拒绝第二张令牌。
-            if (!conversationBucket(conversationId).trySet(json, ttlSeconds, TimeUnit.SECONDS)) {
+            if (!bucket.trySet(json, ttlSeconds, TimeUnit.SECONDS)) {
                 log.warn("[confirm] pending exists, conversation={}", conversationId);
                 throw new BizException(ErrorCode.CONFIRMATION_PENDING);
             }
-            log.info("[confirm] created, idTail={}, tool={}, ttl={}s",
-                    idTail(confirmationId), tool, ttlSeconds);
-            return action;
         } catch (BizException e) {
             throw e;
         } catch (Exception e) {
             log.error("[confirm] create failed, fail-closed: {}", e.getMessage());
             throw new BizException(ErrorCode.CACHE_UNAVAILABLE, "确认服务暂不可用，请稍后重试");
+        }
+
+        try {
+            if (!toolExecutionService.recordPending(toExecution(action))) {
+                deleteQuietly(bucket);
+                throw new BizException(ErrorCode.INTERNAL_ERROR,
+                        "确认记录写入失败，请重新发起操作");
+            }
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            deleteQuietly(bucket);
+            log.error("[confirm] pending record failed, rollback redis key: {}", e.getMessage());
+            throw new BizException(ErrorCode.DB_UNAVAILABLE, "确认记录保存失败，请稍后重试");
+        }
+        log.info("[confirm] created, idTail={}, tool={}, ttl={}s", idTail(confirmationId), tool,
+                ttlSeconds);
+        return action;
+    }
+
+    /** PendingAction → 待确认台账快照。 */
+    private ToolExecution toExecution(PendingAction action) {
+        ToolExecution execution = new ToolExecution();
+        execution.setExecutionId(action.confirmationId());
+        execution.setUserId(action.userId());
+        execution.setConversationId(action.conversationId());
+        execution.setTool(action.tool());
+        execution.setPlanJson(JsonUtil.toJson(action.plan()));
+        execution.setSummary(action.summary());
+        execution.setRisk(action.risk());
+        execution.setExpiresAt(OffsetDateTime.ofInstant(
+                Instant.ofEpochMilli(action.expiresAt()), ZoneOffset.UTC));
+        return execution;
+    }
+
+    /** 撤销刚写入的会话 key；失败只告警，原异常继续上抛。 */
+    private void deleteQuietly(RBucket<String> bucket) {
+        try {
+            bucket.delete();
+        } catch (Exception e) {
+            log.warn("[confirm] rollback redis key failed: {}", e.getMessage());
         }
     }
 

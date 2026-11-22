@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 写工具：把当前用户的一条演示记录标记为完成（需要人工确认 + 幂等键）。
@@ -40,12 +41,14 @@ public class DemoRecordCompleteTool implements AgentTool {
                 TOOL_NAME,
                 "把当前用户的一条演示任务记录标记为完成（写操作，必须经用户确认后执行）。"
                         + "recordId 与 title 二选一：优先 recordId，也可按标题精确匹配。",
-                "{\"type\":\"object\",\"properties\":{"
-                        + "\"recordId\":{\"type\":\"integer\",\"description\":\"要完成的记录 ID\"},"
-                        + "\"title\":{\"type\":\"string\",\"description\":\"记录标题（与 recordId 二选一，精确匹配）\"}}}",
-                List.of(),
+                "{\"type\":\"object\",\"additionalProperties\":false,"
+                        + "\"anyOf\":[{\"required\":[\"recordId\"]},{\"required\":[\"title\"]}],"
+                        + "\"properties\":{"
+                        + "\"recordId\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"要完成的记录 ID\"},"
+                        + "\"title\":{\"type\":\"string\",\"minLength\":1,\"description\":\"记录标题（与 recordId 二选一，精确匹配）\"}}}",
                 ToolSideEffect.WRITE,
-                5000);
+                5000,
+                new ToolDefinition.ToolPolicy(true, 10, Set.of()));
     }
 
     @Override

@@ -2,7 +2,9 @@ package com.example.langchain4j.llm;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
+import com.example.langchain4j.common.concurrent.BoundedCall;
 import com.example.langchain4j.common.metrics.AgentMetrics;
+import com.example.langchain4j.common.util.Throwables;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.guard.RateLimiter;
 import dev.langchain4j.data.message.ChatMessage;
@@ -17,11 +19,9 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 /**
  * LLM 单次逻辑调用执行器：模型路由 → 熔断检查 → 模型级限流 → 超时调用 → 重试 → 熔断计数。
@@ -105,38 +105,44 @@ public class LlmInvoker {
         return rateLimiter.tryAcquire("llm:" + modelName, properties.getLlm().getMaxCallsPerMinute());
     }
 
-    /** 单次模型调用：所有请求统一设置输出上限，避免某些调用绕过全局 token 防护。 */
+    /**
+     * 单次模型调用：所有请求统一设置输出上限，避免某些调用绕过全局 token 防护。
+     *
+     * <p>超时、取消和异常归一复用 {@link BoundedCall}；这里只负责把通用结果翻译成
+     * 模型调用语义，不再重复实现 FutureTask/get/cancel 模板。
+     */
     private LlmResult invokeOnce(String modelName, List<ChatMessage> messages,
                                  ResponseFormat responseFormat, Integer maxOutputTokens) throws Exception {
         ChatModel chatModel = modelRegistry.chatModel(modelName);
         long timeoutSeconds = Math.max(1, properties.getLlm().getTimeoutSeconds());
         ChatRequest request = buildRequest(messages, responseFormat, resolveOutputLimit(maxOutputTokens));
-        CompletableFuture<ChatResponse> future = CompletableFuture.supplyAsync(
-                () -> chatModel.chat(request), llmExecutor);
-        try {
-            ChatResponse response = future.get(timeoutSeconds, TimeUnit.SECONDS);
-            if (response == null || response.aiMessage() == null || response.aiMessage().text() == null) {
-                throw new IllegalStateException("模型返回空响应");
-            }
-            Integer tokens = response.tokenUsage() != null ? response.tokenUsage().totalTokenCount() : null;
-            Integer inputTokens = response.tokenUsage() != null ? response.tokenUsage().inputTokenCount() : null;
-            Integer outputTokens = response.tokenUsage() != null ? response.tokenUsage().outputTokenCount() : null;
-            FinishReason finishReason = response.finishReason();
-            if (FinishReason.LENGTH.equals(finishReason)) {
-                log.warn("[llm] output truncated by maxOutputTokens, model={}", modelName);
-                metrics.recordLlmTruncated(modelName);
-            }
-            return LlmResult.of(response.aiMessage().text(), tokens, finishReason, inputTokens, outputTokens);
-        } catch (TimeoutException e) {
-            future.cancel(true);
-            throw new IllegalStateException("模型调用超时（" + timeoutSeconds + "s）", e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            future.cancel(true);
-            throw new IllegalStateException("模型调用被中断", e);
-        } catch (java.util.concurrent.ExecutionException e) {
-            throw new IllegalStateException("模型调用执行失败: " + rootMessage(e), e);
+        BoundedCall.Outcome<ChatResponse> outcome = BoundedCall.execute(
+                () -> chatModel.chat(request), llmExecutor, timeoutSeconds * 1000L);
+        return switch (outcome.status()) {
+            case SUCCESS -> toResult(modelName, outcome.value());
+            case TIMEOUT -> throw new IllegalStateException(
+                    "模型调用超时（" + timeoutSeconds + "s）", outcome.error());
+            case INTERRUPTED -> throw new IllegalStateException("模型调用被中断", outcome.error());
+            case REJECTED -> throw new IllegalStateException("模型调用线程池已满", outcome.error());
+            case FAILED -> throw new IllegalStateException(
+                    "模型调用执行失败: " + Throwables.rootMessage(outcome.error()), outcome.error());
+        };
+    }
+
+    /** 响应解包：空响应、token 统计和截断指标统一在这里处理。 */
+    private LlmResult toResult(String modelName, ChatResponse response) {
+        if (response == null || response.aiMessage() == null || response.aiMessage().text() == null) {
+            throw new IllegalStateException("模型返回空响应");
         }
+        Integer tokens = response.tokenUsage() != null ? response.tokenUsage().totalTokenCount() : null;
+        Integer inputTokens = response.tokenUsage() != null ? response.tokenUsage().inputTokenCount() : null;
+        Integer outputTokens = response.tokenUsage() != null ? response.tokenUsage().outputTokenCount() : null;
+        FinishReason finishReason = response.finishReason();
+        if (FinishReason.LENGTH.equals(finishReason)) {
+            log.warn("[llm] output truncated by maxOutputTokens, model={}", modelName);
+            metrics.recordLlmTruncated(modelName);
+        }
+        return LlmResult.of(response.aiMessage().text(), tokens, finishReason, inputTokens, outputTokens);
     }
 
     /** 构建统一 ChatRequest：无论是否 JSON、是否显式传预算，都带 maxOutputTokens。 */
@@ -167,12 +173,4 @@ public class LlmInvoker {
         }
     }
 
-    /** 取异常链最深处的 message，便于定位供应商错误。 */
-    private String rootMessage(Throwable t) {
-        Throwable cur = t;
-        while (cur.getCause() != null && cur.getCause() != cur) {
-            cur = cur.getCause();
-        }
-        return String.valueOf(cur.getMessage());
-    }
 }

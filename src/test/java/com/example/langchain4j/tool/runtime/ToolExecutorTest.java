@@ -1,5 +1,6 @@
 package com.example.langchain4j.tool.runtime;
 
+import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.guard.RateLimiter;
@@ -23,8 +24,8 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -38,7 +39,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 工具执行器单测：只读门禁、必填参数、限流与成功执行是工具权限的四道防线。
+ * 工具执行器单测：写权限、角色、参数、限流、线程池拒绝、超时与成功执行。
  */
 @ExtendWith(MockitoExtension.class)
 class ToolExecutorTest {
@@ -50,46 +51,62 @@ class ToolExecutorTest {
     @Mock
     private ToolRegistry registry;
     @Mock
+    private ToolAccessPolicy accessPolicy;
+    @Mock
     private AuditService auditService;
     @Mock
     private AgentMetrics metrics;
-    @Mock
-    private ThreadPoolTaskExecutor taskExecutor;
     @Mock
     private RateLimiter rateLimiter;
     @Mock
     private AgentTool tool;
 
     private AgentProperties properties;
+    private ThreadPoolTaskExecutor taskExecutor;
     private ToolExecutor executor;
-    private ThreadPoolExecutor pool;
 
     @BeforeEach
     void setUp() throws Exception {
+        UserContext.set("demo", "USER");
         properties = new AgentProperties();
-        pool = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>());
-        lenient().when(taskExecutor.getThreadPoolExecutor()).thenReturn(pool);
-        executor = new ToolExecutor(registry, auditService, metrics, taskExecutor, properties, rateLimiter);
+        taskExecutor = new ThreadPoolTaskExecutor();
+        taskExecutor.setCorePoolSize(2);
+        taskExecutor.setMaxPoolSize(2);
+        taskExecutor.setQueueCapacity(10);
+        taskExecutor.setThreadNamePrefix("tool-test-");
+        taskExecutor.initialize();
+        executor = new ToolExecutor(registry, accessPolicy, auditService, metrics, taskExecutor,
+                properties, rateLimiter);
         lenient().when(rateLimiter.tryAcquire(anyString(), anyInt())).thenReturn(true);
-        lenient().when(registry.find(TOOL_NAME)).thenReturn(Optional.of(tool));
+        lenient().when(accessPolicy.check(any(ToolDefinition.class), any())).thenReturn(
+                new ToolAccessPolicy.Decision(true, ToolAccessPolicy.Status.ALLOWED, "", ""));
+        lenient().when(registry.findRegistered(TOOL_NAME)).thenAnswer(invocation ->
+                Optional.of(new ToolRegistry.RegisteredTool(tool, tool.definition())));
         lenient().when(tool.execute(any(), any(JsonNode.class)))
                 .thenReturn(ToolResult.success(Map.of("ok", true), "成功", List.of(), 1));
     }
 
     @AfterEach
     void tearDown() {
-        pool.shutdownNow();
+        UserContext.clear();
+        taskExecutor.shutdown();
     }
 
-    private ToolDefinition definition(ToolSideEffect sideEffect, List<String> required) {
-        return new ToolDefinition(TOOL_NAME, "演示工具", "{}", required, sideEffect, 3000);
+    private ToolDefinition definition(ToolSideEffect sideEffect, boolean requireEntityId) {
+        String schema = requireEntityId
+                ? "{\"type\":\"object\",\"required\":[\"entityId\"],"
+                        + "\"properties\":{\"entityId\":{\"type\":\"string\"}}}"
+                : "{\"type\":\"object\",\"properties\":{}}";
+        return new ToolDefinition(TOOL_NAME, "演示工具", schema, sideEffect, 3000);
     }
 
     @Test
-    @DisplayName("只读模式 → WRITE 工具被拒绝，且不执行")
-    void rejectWriteToolInReadOnlyMode() throws Exception {
-        when(tool.definition()).thenReturn(definition(ToolSideEffect.WRITE, List.of()));
+    @DisplayName("写工具在全局关闭时 → FORBIDDEN_WRITE，且不执行")
+    void rejectWriteToolWhenWriteDisabled() throws Exception {
+        when(accessPolicy.check(any(ToolDefinition.class), any())).thenReturn(
+                new ToolAccessPolicy.Decision(false, ToolAccessPolicy.Status.WRITE_DISABLED,
+                        TOOL_NAME, "写操作在当前环境已禁用"));
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.WRITE, false));
 
         ToolResult result = executor.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{}"));
 
@@ -100,7 +117,7 @@ class ToolExecutorTest {
     @Test
     @DisplayName("缺少必填参数 → INVALID_ARGS，且不执行")
     void rejectMissingRequiredArg() throws Exception {
-        when(tool.definition()).thenReturn(definition(ToolSideEffect.READ_ONLY, List.of("entityId")));
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.READ_ONLY, true));
 
         ToolResult result = executor.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{}"));
 
@@ -109,11 +126,31 @@ class ToolExecutorTest {
     }
 
     @Test
+    @DisplayName("参数不符合 Schema（枚举/类型）→ INVALID_ARGS，且不执行")
+    void rejectSchemaViolation() throws Exception {
+        when(tool.definition()).thenReturn(new ToolDefinition(TOOL_NAME, "状态查询",
+                "{\"type\":\"object\",\"additionalProperties\":false,"
+                        + "\"properties\":{\"status\":{\"type\":\"string\","
+                        + "\"enum\":[\"OPEN\",\"DONE\"]}}}",
+                ToolSideEffect.READ_ONLY, 3000));
+
+        ToolResult badEnum = executor.invoke(CONTEXT, TOOL_NAME,
+                MAPPER.readTree("{\"status\":\"BAD\"}"));
+        ToolResult badType = executor.invoke(CONTEXT, TOOL_NAME,
+                MAPPER.readTree("{\"status\":1}"));
+
+        assertThat(badEnum.errorCode()).isEqualTo("INVALID_ARGS");
+        assertThat(badType.errorCode()).isEqualTo("INVALID_ARGS");
+        verify(tool, never()).execute(any(), any(JsonNode.class));
+    }
+
+    @Test
     @DisplayName("正常只读调用 → 执行并返回结果")
     void invokeReadOnlyTool() throws Exception {
-        when(tool.definition()).thenReturn(definition(ToolSideEffect.READ_ONLY, List.of("entityId")));
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.READ_ONLY, true));
 
-        ToolResult result = executor.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{\"entityId\":\"B1001\"}"));
+        ToolResult result = executor.invoke(CONTEXT, TOOL_NAME,
+                MAPPER.readTree("{\"entityId\":\"B1001\"}"));
 
         assertThat(result.success()).isTrue();
         assertThat(result.summary()).isEqualTo("成功");
@@ -122,9 +159,8 @@ class ToolExecutorTest {
     @Test
     @DisplayName("写工具未确认 → CONFIRMATION_REQUIRED，且不执行")
     void rejectUnapprovedWriteTool() throws Exception {
-        properties.getTool().setReadOnly(false);
-        properties.getTool().setAllowedWriteTools(List.of(TOOL_NAME));
-        when(tool.definition()).thenReturn(definition(ToolSideEffect.WRITE, List.of()));
+        properties.getTool().setWriteEnabled(true);
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.WRITE, false));
 
         ToolResult result = executor.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{}"));
 
@@ -133,25 +169,10 @@ class ToolExecutorTest {
     }
 
     @Test
-    @DisplayName("写工具不在白名单 → FORBIDDEN_WRITE，即使已确认也拒绝")
-    void rejectWriteToolOutsideAllowlist() throws Exception {
-        properties.getTool().setReadOnly(false);
-        properties.getTool().setAllowedWriteTools(List.of("other_tool"));
-        when(tool.definition()).thenReturn(definition(ToolSideEffect.WRITE, List.of()));
-        ToolContext approved = new ToolContext("demo", "c1", true, "cfm_1");
-
-        ToolResult result = executor.invoke(approved, TOOL_NAME, MAPPER.readTree("{}"));
-
-        assertThat(result.errorCode()).isEqualTo("FORBIDDEN_WRITE");
-        verify(tool, never()).execute(any(), any(JsonNode.class));
-    }
-
-    @Test
-    @DisplayName("写工具已确认且在白名单 → 正常执行")
+    @DisplayName("写工具已确认且开启 → 正常执行")
     void invokeApprovedWriteTool() throws Exception {
-        properties.getTool().setReadOnly(false);
-        properties.getTool().setAllowedWriteTools(List.of(TOOL_NAME));
-        when(tool.definition()).thenReturn(definition(ToolSideEffect.WRITE, List.of()));
+        properties.getTool().setWriteEnabled(true);
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.WRITE, false));
         ToolContext approved = new ToolContext("demo", "c1", true, "cfm_1");
 
         ToolResult result = executor.invoke(approved, TOOL_NAME, MAPPER.readTree("{}"));
@@ -163,9 +184,8 @@ class ToolExecutorTest {
     @Test
     @DisplayName("写工具已确认但没有幂等键 → 拒绝执行（防重复落库）")
     void rejectWriteToolWithoutIdempotencyKey() throws Exception {
-        properties.getTool().setReadOnly(false);
-        properties.getTool().setAllowedWriteTools(List.of(TOOL_NAME));
-        when(tool.definition()).thenReturn(definition(ToolSideEffect.WRITE, List.of()));
+        properties.getTool().setWriteEnabled(true);
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.WRITE, false));
         ToolContext approved = new ToolContext("demo", "c1", true, "");
 
         ToolResult result = executor.invoke(approved, TOOL_NAME, MAPPER.readTree("{}"));
@@ -175,17 +195,96 @@ class ToolExecutorTest {
     }
 
     @Test
-    @DisplayName("单用户超过每分钟上限 → RATE_LIMITED")
+    @DisplayName("角色不匹配 → FORBIDDEN_TOOL，且不执行")
+    void rejectToolWhenRoleNotAllowed() throws Exception {
+        ToolDefinition adminOnly = new ToolDefinition(TOOL_NAME, "管理员工具",
+                "{\"type\":\"object\",\"properties\":{}}", ToolSideEffect.READ_ONLY,
+                3000, new ToolDefinition.ToolPolicy(true, 0, Set.of("ADMIN")));
+        when(accessPolicy.check(any(ToolDefinition.class), any())).thenReturn(
+                new ToolAccessPolicy.Decision(false, ToolAccessPolicy.Status.PERMISSION_REQUIRED,
+                        TOOL_NAME, "当前角色无权执行该任务"));
+        when(tool.definition()).thenReturn(adminOnly);
+
+        ToolResult result = executor.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{}"));
+
+        assertThat(result.errorCode()).isEqualTo("FORBIDDEN_TOOL");
+        verify(tool, never()).execute(any(), any(JsonNode.class));
+    }
+
+    @Test
+    @DisplayName("DANGEROUS 工具 → 永远拒绝执行")
+    void rejectDangerousTool() throws Exception {
+        properties.getTool().setWriteEnabled(true);
+        when(accessPolicy.check(any(ToolDefinition.class), any())).thenReturn(
+                new ToolAccessPolicy.Decision(false, ToolAccessPolicy.Status.DANGEROUS,
+                        TOOL_NAME, "任务包含禁止自动执行的危险工具"));
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.DANGEROUS, false));
+        ToolContext approved = new ToolContext("demo", "c1", true, "cfm_1");
+
+        ToolResult result = executor.invoke(approved, TOOL_NAME, MAPPER.readTree("{}"));
+
+        assertThat(result.errorCode()).isEqualTo("FORBIDDEN_TOOL");
+        verify(tool, never()).execute(any(), any(JsonNode.class));
+    }
+
+    @Test
+    @DisplayName("单用户单工具超过每分钟上限 → RATE_LIMITED")
     void rateLimitPerUser() throws Exception {
         properties.getTool().setMaxCallsPerMinute(1);
         when(rateLimiter.tryAcquire(anyString(), anyInt())).thenReturn(true, false);
-        when(tool.definition()).thenReturn(definition(ToolSideEffect.READ_ONLY, List.of()));
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.READ_ONLY, false));
 
         ToolResult first = executor.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{}"));
         ToolResult second = executor.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{}"));
 
         assertThat(first.success()).isTrue();
         assertThat(second.errorCode()).isEqualTo("RATE_LIMITED");
-        verify(rateLimiter, times(2)).tryAcquire("tool:demo", 1);
+        verify(rateLimiter, times(2)).tryAcquire("tool:demo:" + TOOL_NAME, 1);
+    }
+
+    @Test
+    @DisplayName("工具队列满 → OVERLOADED，而不是向图抛裸异常")
+    void rejectWhenToolQueueFull() throws Exception {
+        when(tool.definition()).thenReturn(definition(ToolSideEffect.READ_ONLY, false));
+        ThreadPoolTaskExecutor saturated = new ThreadPoolTaskExecutor();
+        saturated.setCorePoolSize(1);
+        saturated.setMaxPoolSize(1);
+        saturated.setQueueCapacity(0);
+        saturated.initialize();
+        CountDownLatch blocker = new CountDownLatch(1);
+        try {
+            saturated.execute(() -> {
+                try {
+                    blocker.await(2, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+
+            ToolExecutor overloaded = new ToolExecutor(registry, accessPolicy, auditService,
+                    metrics, saturated, properties, rateLimiter);
+            ToolResult result = overloaded.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{}"));
+
+            assertThat(result.errorCode()).isEqualTo("OVERLOADED");
+        } finally {
+            blocker.countDown();
+            saturated.shutdown();
+        }
+    }
+
+    @Test
+    @DisplayName("工具执行超时 → TIMEOUT 结构化返回")
+    void timeoutReturnsStructuredFailure() throws Exception {
+        ToolDefinition fastTimeout = new ToolDefinition(TOOL_NAME, "慢工具",
+                "{\"type\":\"object\",\"properties\":{}}", ToolSideEffect.READ_ONLY, 50);
+        when(tool.definition()).thenReturn(fastTimeout);
+        when(tool.execute(any(), any(JsonNode.class))).thenAnswer(invocation -> {
+            Thread.sleep(500);
+            return ToolResult.success(Map.of(), "晚到结果", List.of(), 500);
+        });
+
+        ToolResult result = executor.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{}"));
+
+        assertThat(result.errorCode()).isEqualTo("TIMEOUT");
     }
 }

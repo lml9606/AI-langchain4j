@@ -30,7 +30,7 @@
 | GET | `/api/agent/conversation/{id}/messages` | 会话历史（默认 50 条，上限 200） | `?limit=50` |
 
 安全：会话归属校验（403 防水平越权）；身份以 Token 为准（服务端从 Authorization 头解析，请求体不携带用户 ID）。
-`confirm` 的 `approved=true` 表示执行、`false` 表示取消；响应 `data.business.success/errorCode/errorMessage` 表示业务动作结果。
+`confirm` 的 `approved=true` 表示执行、`false` 表示取消；响应 `data.business.success/errorCode/errorMessage` 表示业务动作结果。确认卡片生成时 `ai_tool_execution=PENDING`，确认后为 `RUNNING`，最终为 `SUCCEEDED/FAILED/CANCELLED`；Redis 仅保存带 TTL 的待确认计划。
 
 ## 3. 知识库 `/api/knowledge`
 
@@ -87,6 +87,16 @@ curl -X POST "http://localhost:8082/api/knowledge/upload?documentId=refund-polic
 | DELETE | `/api/prompts/{key}` | 删除覆盖 → 回退代码默认值 **需 ADMIN** |
 
 key 必须为 `PromptTemplates` 已声明常量名（如 `INTENT_PLAN_SYSTEM`），防止任意 key 注入。
+
+## 6. 工具管理 `/api/tools`（需 ADMIN）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/tools` | 查看启动期注册的 `ToolDefinition` |
+| GET | `/api/tools/workflows` | 查看代码中固定声明的任务工作流及其工具集合 |
+| POST | `/api/tools/{name}/invoke` | 手工调用工具，仍经过角色、参数 Schema、超时、限流与审计；写工具默认返回 `CONFIRMATION_REQUIRED` |
+
+工具元数据、参数 Schema、副作用、超时、限流与角色策略以 `ToolDefinition` 为唯一事实源，不写入 `application.properties` 或数据库。数据库只保存执行事实：`ai_tool_execution`（写操作确认/执行台账）与 `ai_graph_execution`（节点/工具审计）。
 
 ## 通用错误码
 

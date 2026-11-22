@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 知识检索工具：包装现有混合检索，供任务 Agent 在需要资料时调用。
@@ -38,14 +39,16 @@ public class KnowledgeSearchTool implements AgentTool {
         return new ToolDefinition(
                 "search_knowledge",
                 "检索知识库文档，返回与问题相关的资料片段",
-                "{\"type\":\"object\",\"required\":[\"query\"],\"properties\":{"
+                "{\"type\":\"object\",\"additionalProperties\":false,"
+                        + "\"required\":[\"query\"],\"properties\":{"
                         + "\"query\":{\"type\":\"string\",\"description\":\"检索问题\"},"
                         + "\"topK\":{\"type\":\"integer\",\"description\":\"返回条数，1-" + MAX_TOP_K
-                        + "\",\"default\":" + DEFAULT_TOP_K + "}}}",
-                List.of("query"),
+                        + "\",\"default\":" + DEFAULT_TOP_K + ",\"minimum\":1,\"maximum\":"
+                        + MAX_TOP_K + "}}}",
                 ToolSideEffect.READ_ONLY,
                 // 本地 BGE-M3 单次嵌入本机约 2s；留足冷启动、DB 查询与网络抖动余量，避免误报 TIMEOUT
-                8000);
+                8000,
+                new ToolDefinition.ToolPolicy(true, 20, Set.of()));
     }
 
     @Override

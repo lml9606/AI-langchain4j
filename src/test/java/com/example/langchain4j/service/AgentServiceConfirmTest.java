@@ -200,6 +200,21 @@ class AgentServiceConfirmTest {
                 contains("取消确认"), eq("model-x"), isNull());
         verify(conversationService).saveMessage(eq("c1"), eq(Message.ROLE_ASSISTANT),
                 contains("未对业务数据"), eq("model-x"), isNull());
+        verify(toolExecutionService).markCancelled("demo", "cfm_1");
+        verify(confirmationService).finish("c1", "cfm_1");
+        verifyNoInteractions(taskConfirmGraph);
+    }
+
+    @Test
+    @DisplayName("取消时台账更新失败 → 仍完成用户取消，不阻断会话恢复")
+    void rejectStillSucceedsWhenLedgerUpdateFails() {
+        doThrow(new RuntimeException("db down"))
+                .when(toolExecutionService).markCancelled("demo", "cfm_1");
+
+        ChatResponse response = service.confirm(request(false));
+
+        assertThat(response.getResult()).contains("已取消");
+        assertThat(response.getBusiness().success()).isTrue();
         verify(confirmationService).finish("c1", "cfm_1");
         verifyNoInteractions(taskConfirmGraph);
     }
@@ -262,6 +277,34 @@ class AgentServiceConfirmTest {
 
         assertThat(response.getResult()).isEqualTo("已将记录 1 标记为完成");
         assertThat(response.getBusiness().success()).isTrue();
+        verifyNoInteractions(taskConfirmGraph);
+    }
+
+    @Test
+    @DisplayName("令牌已删除但台账仍为 PENDING → 视为未执行/已过期，返回 404")
+    void replayPendingExecutionIsTreatedAsNotFound() {
+        when(confirmationService.preview("c1", "cfm_1", "demo")).thenReturn(Optional.empty());
+        when(toolExecutionService.find("demo", "cfm_1"))
+                .thenReturn(Optional.of(execution(ToolExecution.STATUS_PENDING, null, null)));
+
+        assertThatThrownBy(() -> service.confirm(request(true)))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.NOT_FOUND.getCode());
+        verifyNoInteractions(taskConfirmGraph);
+    }
+
+    @Test
+    @DisplayName("令牌已删除且台账为 CANCELLED → 返回 404，不重复执行")
+    void replayCancelledExecutionIsTreatedAsNotFound() {
+        when(confirmationService.preview("c1", "cfm_1", "demo")).thenReturn(Optional.empty());
+        when(toolExecutionService.find("demo", "cfm_1"))
+                .thenReturn(Optional.of(execution(ToolExecution.STATUS_CANCELLED, null, null)));
+
+        assertThatThrownBy(() -> service.confirm(request(true)))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.NOT_FOUND.getCode());
         verifyNoInteractions(taskConfirmGraph);
     }
 

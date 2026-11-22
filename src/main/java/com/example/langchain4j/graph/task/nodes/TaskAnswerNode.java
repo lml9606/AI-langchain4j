@@ -1,6 +1,7 @@
 package com.example.langchain4j.graph.task.nodes;
 
 import com.example.langchain4j.common.exception.BizException;
+import com.example.langchain4j.common.util.Texts;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.guard.OutputGuardService;
@@ -125,7 +126,7 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
                 }
                 builder.append('[').append(index++).append("] ")
                         .append(item.get("title")).append("：")
-                        .append(truncate(String.valueOf(item.get("snippet")), maxSnippet()))
+                        .append(Texts.truncate(String.valueOf(item.get("snippet")), maxSnippet()))
                         .append('\n');
             }
         }
@@ -138,11 +139,11 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
                                        List<Map<String, Object>> evidence) {
         if (!evidence.isEmpty()) {
             return "已查询到相关业务数据，关键结果如下：\n\n"
-                    + truncate(String.valueOf(evidence.get(0).get("snippet")), maxSnippet());
+                    + Texts.truncate(String.valueOf(evidence.get(0).get("snippet")), maxSnippet());
         }
         if (!trace.isEmpty()) {
             return "本次查询未返回有效数据。\n\n"
-                    + truncate(String.valueOf(trace.get(0).get("summary")), maxSnippet());
+                    + Texts.truncate(String.valueOf(trace.get(0).get("summary")), maxSnippet());
         }
         return "未查询到相关业务数据，请确认查询条件或稍后重试。";
     }
@@ -189,14 +190,6 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
             return "未获得工具证据（成功调用 " + successCalls + " 次，失败 " + failures + " 次）";
         }
         return "基于 " + evidenceCount + " 条工具证据，工具调用成功 " + successCalls + " 次、失败 " + failures + " 次";
-    }
-
-    /** 截断回答或证据片段，控制响应长度。 */
-    private String truncate(String text, int max) {
-        if (text == null) {
-            return "";
-        }
-        return text.length() <= max ? text : text.substring(0, max) + "...";
     }
 
     private int maxEvidence() {

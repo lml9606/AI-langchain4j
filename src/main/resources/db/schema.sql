@@ -186,8 +186,8 @@ CREATE TABLE IF NOT EXISTS ai_tool_demo_record (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_demo_user ON ai_tool_demo_record (user_id, status, id);
 
--- 工具执行台账：写工具幂等与"执行结果可查询"的唯一事实源。
--- Redis 里的确认令牌只是短期授权；即使令牌被删/过期/Redis 重启，这张表仍能回答"到底执行没执行"。
+-- 工具确认/执行台账：从待确认到执行结束的唯一业务事实源。
+-- Redis 只保存当前待确认动作（含计划）作为短期授权；本表记录确认状态、计划快照与执行结果。
 CREATE TABLE IF NOT EXISTS ai_tool_execution (
     id              BIGSERIAL PRIMARY KEY,
     execution_id    VARCHAR(128) NOT NULL,                -- 幂等键（当前= confirmationId）
@@ -195,7 +195,11 @@ CREATE TABLE IF NOT EXISTS ai_tool_execution (
     conversation_id VARCHAR(64)  NOT NULL,
     tool            VARCHAR(64)  NOT NULL,
     args_hash       VARCHAR(64),                          -- 参数指纹：同键不同参直接拒绝
-    status          VARCHAR(16)  NOT NULL,                -- RUNNING / SUCCEEDED / FAILED
+    plan_json       TEXT,                                 -- 待确认计划快照（用户确认的内容）
+    summary         TEXT,                                 -- 确认卡片摘要
+    risk            VARCHAR(16),                          -- READ_ONLY / WRITE 等风险等级
+    expires_at      TIMESTAMPTZ,                          -- 待确认动作过期时间（展示/审计用）
+    status          VARCHAR(16)  NOT NULL,                -- PENDING / RUNNING / SUCCEEDED / FAILED / CANCELLED
     result          TEXT,                                 -- 成功结果（重放时原样返回）
     error_code      VARCHAR(64),
     error_message   TEXT,
@@ -203,8 +207,13 @@ CREATE TABLE IF NOT EXISTS ai_tool_execution (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uk_tool_execution UNIQUE (user_id, execution_id)
 );
+ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS plan_json TEXT;
+ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS summary TEXT;
+ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS risk VARCHAR(16);
+ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_tool_execution_user ON ai_tool_execution (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_execution_status ON ai_tool_execution (status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_tool_execution_pending ON ai_tool_execution (status, expires_at);
 
 -- 工单表（运营闭环：转人工自动建单，运营回复后结单；根因字段联动审计表驱动知识治理）
 CREATE TABLE IF NOT EXISTS ai_ticket (
