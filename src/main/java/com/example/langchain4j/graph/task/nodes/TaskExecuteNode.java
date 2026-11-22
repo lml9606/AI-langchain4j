@@ -2,17 +2,13 @@ package com.example.langchain4j.graph.task.nodes;
 
 import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.common.util.Texts;
-import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.tool.api.ToolContext;
 import com.example.langchain4j.tool.api.ToolEvidence;
 import com.example.langchain4j.tool.api.ToolResult;
-import com.example.langchain4j.tool.runtime.ToolAccessPolicy;
 import com.example.langchain4j.tool.runtime.ToolErrorCode;
 import com.example.langchain4j.tool.runtime.ToolExecutor;
-import com.example.langchain4j.tool.workflow.TaskWorkflow;
-import com.example.langchain4j.tool.workflow.TaskWorkflowRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
@@ -25,7 +21,10 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 任务执行节点：先复核整组工具契约与权限，再按计划逐步调用工具并收集轨迹。
+ * 任务执行节点：只负责按计划顺序调用工具并收集轨迹。
+ *
+ * <p>权限、参数 Schema、写契约由 {@link ToolExecutor} 在真正执行前最终校验；
+ * 计划契约在规划和确认阶段已经校验过，这里不再重复展开整个工作流。
  * <p>
  * 观察语义最小化：某一步失败不抛异常，继续执行后续步骤；工具结果为空也保留轨迹，
  * 由回答节点统一说明“未查询到/查询失败”，避免半途中断导致用户拿不到任何反馈。
@@ -48,16 +47,11 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
 
     private final ToolExecutor toolExecutor;
     private final AgentProperties properties;
-    private final TaskWorkflowRegistry workflowRegistry;
-    private final ToolAccessPolicy accessPolicy;
 
-    /** 注入统一工具执行器。 */
-    public TaskExecuteNode(ToolExecutor toolExecutor, AgentProperties properties,
-                           TaskWorkflowRegistry workflowRegistry, ToolAccessPolicy accessPolicy) {
+    /** 注入统一工具执行器与执行上限配置。 */
+    public TaskExecuteNode(ToolExecutor toolExecutor, AgentProperties properties) {
         this.toolExecutor = toolExecutor;
         this.properties = properties;
-        this.workflowRegistry = workflowRegistry;
-        this.accessPolicy = accessPolicy;
     }
 
     /** 按计划顺序调用工具，收集调用轨迹与证据；致命错误时提前停止。 */
@@ -69,33 +63,9 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
         List<Map<String, Object>> evidence = new ArrayList<>();
         log.info("[task-execute] start, planSteps={}, approved={}, conversation={}",
                 state.taskPlan().size(), state.taskApproved(), state.conversationId());
-
-        // 流程头节点复核：确认链路也要重新验证固定契约和整组权限，防止令牌内容或旧计划被篡改。
-        String workflowId = state.taskWorkflowId();
-        if (workflowId.isBlank()) {
-            workflowId = workflowRegistry.workflowIdOfPlan(state.taskPlan()).orElse("");
-        }
-        if (workflowId.isBlank()) {
-            log.warn("[task-execute] missing workflow contract, conversation={}", state.conversationId());
-            return fail("任务计划缺少固定工作流契约，拒绝执行", trace, evidence);
-        }
-        TaskWorkflow workflow = workflowRegistry.find(workflowId).orElse(null);
-        if (workflow == null) {
-            log.warn("[task-execute] unknown workflow, id={}", workflowId);
-            return fail("任务工作流不存在或已停用，拒绝执行", trace, evidence);
-        }
-        TaskWorkflowRegistry.Validation contract =
-                workflowRegistry.validatePlan(workflow, state.taskPlan());
-        if (!contract.valid()) {
-            log.warn("[task-execute] contract mismatch, workflow={}, reason={}",
-                    workflow.id(), contract.message());
-            return fail(contract.message(), trace, evidence);
-        }
-        ToolAccessPolicy.Decision access = accessPolicy.checkAll(workflow, UserContext.role());
-        if (!access.allowed()) {
-            log.warn("[task-execute] workflow access denied, workflow={}, status={}, tool={}",
-                    workflow.id(), access.status(), access.toolName());
-            return fail(access.message(), trace, evidence);
+        if (state.taskPlan().isEmpty()) {
+            log.warn("[task-execute] empty plan, conversation={}", state.conversationId());
+            return fail("执行计划为空，拒绝执行", trace, evidence);
         }
 
         int maxSteps = Math.max(1, properties.getTool().getMaxStepsPerTask());
@@ -107,22 +77,6 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
                 break;
             }
             String tool = String.valueOf(step.get("tool"));
-            // 每个子节点执行前再校验一次：权限可能在长任务执行期间被管理员收回。
-            ToolAccessPolicy.Decision stepAccess = accessPolicy.check(tool, UserContext.role());
-            if (!stepAccess.allowed()) {
-                Map<String, Object> traceItem = new LinkedHashMap<>();
-                traceItem.put("tool", tool);
-                traceItem.put("args", step.get("args") == null ? Map.of() : step.get("args"));
-                traceItem.put("purpose", step.get("purpose"));
-                traceItem.put("success", false);
-                traceItem.put("summary", stepAccess.message());
-                traceItem.put("errorCode", stepAccess.status().name());
-                traceItem.put("costMs", 0L);
-                trace.add(traceItem);
-                log.warn("[task-execute] step access denied, workflow={}, tool={}, status={}",
-                        workflow.id(), tool, stepAccess.status());
-                return fail(stepAccess.message(), trace, evidence);
-            }
             Object rawArgs = step.get("args");
             JsonNode args = JsonUtil.mapper().valueToTree(rawArgs == null ? Map.of() : rawArgs);
             ToolResult result = toolExecutor.invoke(context, tool, args);

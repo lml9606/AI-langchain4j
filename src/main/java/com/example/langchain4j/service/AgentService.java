@@ -138,11 +138,8 @@ public class AgentService {
         //    否则上一轮释放锁后、下一轮先读到历史时，上一轮回答尚未落库，
         //    会造成乱序（userA → userB → assistantA）与上下文丢失。
         WorkflowState state = sessionLock.executeWithLock(conversationId, () -> {
-            if (confirmationService.hasPending(conversationId)) {
-                log.warn("[agent] chat blocked by pending confirmation, conversation={}",
-                        conversationId);
-                throw new BizException(ErrorCode.CONFIRMATION_PENDING);
-            }
+            // 新用户消息视为放弃旧确认：先取消旧令牌/台账，再按新意图执行。
+            confirmationService.cancelPending(conversationId, userId, "USER_NEW_MESSAGE");
             WorkflowState result =
                     prepareAndInvoke(conversationId, userId, query, model, answerMode, visibility);
             // 助手消息持久化（结果已生成，落库失败降级不阻断响应）；
@@ -213,6 +210,18 @@ public class AgentService {
                 return replayFinished(conversationId, request.getConfirmationId(), userId, start);
             }
             ConfirmationService.PendingAction action = current.get();
+            // 自动取消后 Redis 令牌可能尚未删除（例如删除失败/Redis 恢复后旧值仍在）：
+            // 台账已 CANCELLED 时不能再执行确认图，直接按幂等重放返回取消结果。
+            ToolExecution currentExecution =
+                    toolExecutionService.find(userId, action.confirmationId()).orElse(null);
+            if (currentExecution != null
+                    && currentExecution.getStatus() == ToolExecution.Status.CANCELLED) {
+                log.info("[agent] confirm blocked by cancelled ledger, conversation={}, "
+                                + "confirmationTail={}", conversationId,
+                        idTail(action.confirmationId()));
+                confirmationService.finish(action.conversationId(), action.confirmationId());
+                return replayFinished(conversationId, request.getConfirmationId(), userId, start);
+            }
             log.info("[agent] confirm start, conversation={}, confirmationTail={}, approved={}, " +
                             "tool={}", conversationId, idTail(action.confirmationId()),
                     request.isApproved(), action.tool());
@@ -265,7 +274,7 @@ public class AgentService {
             ToolExecution execution =
                     toolExecutionService.find(userId, action.confirmationId()).orElse(null);
             boolean succeeded = execution != null &&
-                    ToolExecution.STATUS_SUCCEEDED.equals(execution.getStatus());
+                    execution.getStatus() == ToolExecution.Status.SUCCEEDED;
             // 成败以台账为准：工具失败但图正常返回时，不能把令牌当成已消费
             if (succeeded) {
                 // 令牌先完成：即使后续消息落库失败，客户端用同一 ID 重试也只会拿到台账里的同一结果
@@ -317,7 +326,7 @@ public class AgentService {
     private void auditConfirmOutcome(ConfirmationService.PendingAction action,
                                      ToolExecution execution, long start) {
         boolean succeeded =
-                execution != null && ToolExecution.STATUS_SUCCEEDED.equals(execution.getStatus());
+                execution != null && execution.getStatus() == ToolExecution.Status.SUCCEEDED;
         boolean failed = !succeeded;
         String error = failed ? failureReason(execution) : null;
         auditService.audit(action.conversationId(), "tool-confirm",
@@ -333,16 +342,16 @@ public class AgentService {
         if (execution == null) {
             return BusinessResult.failure("NO_EXECUTION_RECORD", "未找到执行台账，写操作未落地");
         }
-        if (ToolExecution.STATUS_SUCCEEDED.equals(execution.getStatus())) {
+        if (execution.getStatus() == ToolExecution.Status.SUCCEEDED) {
             return BusinessResult.ok();
         }
-        if (ToolExecution.STATUS_RUNNING.equals(execution.getStatus())) {
+        if (execution.getStatus() == ToolExecution.Status.RUNNING) {
             return BusinessResult.failure("IN_PROGRESS", "执行台账仍为 RUNNING");
         }
-        if (ToolExecution.STATUS_PENDING.equals(execution.getStatus())) {
+        if (execution.getStatus() == ToolExecution.Status.PENDING) {
             return BusinessResult.failure("NOT_EXECUTED", "确认尚未执行或已过期");
         }
-        if (ToolExecution.STATUS_CANCELLED.equals(execution.getStatus())) {
+        if (execution.getStatus() == ToolExecution.Status.CANCELLED) {
             return BusinessResult.failure("CANCELLED", "确认已取消");
         }
         return BusinessResult.failure(
@@ -357,13 +366,13 @@ public class AgentService {
         if (execution == null) {
             return "NO_EXECUTION_RECORD:未找到执行台账，写操作未落地";
         }
-        if (ToolExecution.STATUS_RUNNING.equals(execution.getStatus())) {
+        if (execution.getStatus() == ToolExecution.Status.RUNNING) {
             return "IN_PROGRESS:执行台账仍为 RUNNING";
         }
-        if (ToolExecution.STATUS_PENDING.equals(execution.getStatus())) {
+        if (execution.getStatus() == ToolExecution.Status.PENDING) {
             return "NOT_EXECUTED:确认尚未执行或已过期";
         }
-        if (ToolExecution.STATUS_CANCELLED.equals(execution.getStatus())) {
+        if (execution.getStatus() == ToolExecution.Status.CANCELLED) {
             return "CANCELLED:确认已取消";
         }
         return blankToDefault(execution.getErrorCode(), "EXECUTION_FAILED") + ":" +
@@ -380,7 +389,7 @@ public class AgentService {
             throw new BizException(ErrorCode.NOT_FOUND,
                     "确认请求不存在、已过期或已使用，请重新发起操作");
         }
-        if (ToolExecution.STATUS_SUCCEEDED.equals(execution.getStatus())) {
+        if (execution.getStatus() == ToolExecution.Status.SUCCEEDED) {
             log.info("[agent] confirm replay, conversation={}, confirmationTail={}",
                     execution.getConversationId(), idTail(confirmationId));
             ChatResponse response =
@@ -389,14 +398,14 @@ public class AgentService {
             response.setBusiness(BusinessResult.ok());
             return response;
         }
-        if (ToolExecution.STATUS_RUNNING.equals(execution.getStatus())) {
+        if (execution.getStatus() == ToolExecution.Status.RUNNING) {
             throw new BizException(ErrorCode.CONFIRMATION_IN_PROGRESS);
         }
-        if (ToolExecution.STATUS_PENDING.equals(execution.getStatus())) {
+        if (execution.getStatus() == ToolExecution.Status.PENDING) {
             throw new BizException(ErrorCode.NOT_FOUND,
                     "确认请求已过期且未执行，请重新发起操作");
         }
-        if (ToolExecution.STATUS_CANCELLED.equals(execution.getStatus())) {
+        if (execution.getStatus() == ToolExecution.Status.CANCELLED) {
             throw new BizException(ErrorCode.NOT_FOUND,
                     "确认请求已取消或已过期，请重新发起操作");
         }

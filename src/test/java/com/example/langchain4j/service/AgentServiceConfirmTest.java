@@ -13,8 +13,10 @@ import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.guard.RateLimiter;
 import com.example.langchain4j.guard.SessionLock;
 import com.example.langchain4j.llm.ModelRegistry;
+import com.example.langchain4j.repository.entity.ConversationSummary;
 import com.example.langchain4j.repository.entity.Message;
 import com.example.langchain4j.repository.entity.ToolExecution;
+import com.example.langchain4j.service.model.RewriteResult;
 import com.example.langchain4j.tool.runtime.ConfirmationService;
 import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.RunnableConfig;
@@ -37,6 +39,7 @@ import java.util.concurrent.CompletableFuture;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
@@ -108,7 +111,7 @@ class AgentServiceConfirmTest {
                 .thenReturn(Optional.of(completedState("业务对象 B1001 已取消")));
         // 确认链路以台账判定成败：默认模拟写工具已成功落账
         lenient().when(toolExecutionService.find("demo", "cfm_1"))
-                .thenReturn(Optional.of(execution(ToolExecution.STATUS_SUCCEEDED, null, null)));
+                .thenReturn(Optional.of(execution(ToolExecution.Status.SUCCEEDED, null, null)));
     }
 
     @AfterEach
@@ -155,7 +158,8 @@ class AgentServiceConfirmTest {
                 WorkflowState.TASK_CLARIFY, false));
     }
 
-    private ToolExecution execution(String status, String errorCode, String errorMessage) {
+    private ToolExecution execution(ToolExecution.Status status, String errorCode,
+                                    String errorMessage) {
         ToolExecution execution = new ToolExecution();
         execution.setExecutionId("cfm_1");
         execution.setUserId("demo");
@@ -165,6 +169,12 @@ class AgentServiceConfirmTest {
         execution.setErrorCode(errorCode);
         execution.setErrorMessage(errorMessage);
         return execution;
+    }
+
+    private Message message(long id) {
+        Message message = new Message();
+        message.setId(id);
+        return message;
     }
 
     private void passThroughLock() {
@@ -269,7 +279,7 @@ class AgentServiceConfirmTest {
         execution.setExecutionId("cfm_1");
         execution.setUserId("demo");
         execution.setConversationId("c1");
-        execution.setStatus(ToolExecution.STATUS_SUCCEEDED);
+        execution.setStatus(ToolExecution.Status.SUCCEEDED);
         execution.setResult("已将记录 1 标记为完成");
         when(toolExecutionService.find("demo", "cfm_1")).thenReturn(Optional.of(execution));
 
@@ -285,7 +295,7 @@ class AgentServiceConfirmTest {
     void replayPendingExecutionIsTreatedAsNotFound() {
         when(confirmationService.preview("c1", "cfm_1", "demo")).thenReturn(Optional.empty());
         when(toolExecutionService.find("demo", "cfm_1"))
-                .thenReturn(Optional.of(execution(ToolExecution.STATUS_PENDING, null, null)));
+                .thenReturn(Optional.of(execution(ToolExecution.Status.PENDING, null, null)));
 
         assertThatThrownBy(() -> service.confirm(request(true)))
                 .isInstanceOf(BizException.class)
@@ -299,7 +309,7 @@ class AgentServiceConfirmTest {
     void replayCancelledExecutionIsTreatedAsNotFound() {
         when(confirmationService.preview("c1", "cfm_1", "demo")).thenReturn(Optional.empty());
         when(toolExecutionService.find("demo", "cfm_1"))
-                .thenReturn(Optional.of(execution(ToolExecution.STATUS_CANCELLED, null, null)));
+                .thenReturn(Optional.of(execution(ToolExecution.Status.CANCELLED, null, null)));
 
         assertThatThrownBy(() -> service.confirm(request(true)))
                 .isInstanceOf(BizException.class)
@@ -359,7 +369,7 @@ class AgentServiceConfirmTest {
         when(taskConfirmGraph.invoke(anyMap(), any(RunnableConfig.class)))
                 .thenReturn(Optional.of(completedState("写操作失败：数据库暂时不可用")));
         when(toolExecutionService.find("demo", "cfm_1"))
-                .thenReturn(Optional.of(execution(ToolExecution.STATUS_FAILED, "DB_DOWN", "数据库不可用")));
+                .thenReturn(Optional.of(execution(ToolExecution.Status.FAILED, "DB_DOWN", "数据库不可用")));
 
         ChatResponse response = service.confirm(request(true));
 
@@ -371,15 +381,43 @@ class AgentServiceConfirmTest {
     }
 
     @Test
-    @DisplayName("存在待确认令牌 → 新对话在入口被拒绝，不进入图")
-    void chatBlockedWhenConfirmationPending() {
+    @DisplayName("存在待确认令牌 → 新消息先取消旧确认，再按新意图执行")
+    void chatCancelsPendingConfirmationBeforeNewIntent() {
         when(conversationService.ensureConversation("demo", "c1", "继续")).thenReturn("c1");
-        when(confirmationService.hasPending("c1")).thenReturn(true);
+        when(modelRegistry.resolve(null)).thenReturn("model-x");
+        when(conversationService.saveMessage(eq("c1"), eq(Message.ROLE_USER), eq("继续"),
+                eq("model-x"), isNull())).thenReturn(message(1L));
+        when(conversationService.rewriteHistoryView(eq("c1"), anyInt(), anyInt()))
+                .thenReturn(List.of());
+        when(segmentService.listSegments("c1")).thenReturn(List.of());
+        when(queryRewriter.rewrite(eq("继续"), eq(List.of()), eq(List.of()), eq("model-x")))
+                .thenReturn(new RewriteResult("继续", null, false));
+        ConversationSummary segment = new ConversationSummary();
+        segment.setSegmentId(1);
+        when(segmentService.resolveSegment(eq("c1"), eq(List.of()), any(RewriteResult.class),
+                eq(1L))).thenReturn(segment);
+        when(conversationService.generationHistoryView(eq("c1"), anyInt(), anyInt(), anyInt(),
+                anyInt())).thenReturn(List.of());
+        when(agentGraph.invoke(anyMap(), any(RunnableConfig.class)))
+                .thenReturn(Optional.of(completedState("这是新意图的回答")));
 
-        assertThatThrownBy(() -> service.chat(chatRequest()))
-                .isInstanceOf(BizException.class)
-                .extracting(e -> ((BizException) e).getCode())
-                .isEqualTo(ErrorCode.CONFIRMATION_PENDING.getCode());
-        verifyNoInteractions(agentGraph);
+        ChatResponse response = service.chat(chatRequest());
+
+        assertThat(response.getResult()).isEqualTo("这是新意图的回答");
+        verify(confirmationService).cancelPending("c1", "demo", "USER_NEW_MESSAGE");
+        verify(agentGraph).invoke(anyMap(), any(RunnableConfig.class));
+    }
+
+    @Test
+    @DisplayName("旧令牌还在 Redis 但台账已取消 → 不执行确认图")
+    void cancelledLedgerBlocksStaleConfirm() {
+        when(toolExecutionService.find("demo", "cfm_1")).thenReturn(Optional.of(
+                execution(ToolExecution.Status.CANCELLED, null, null)));
+
+        assertThatThrownBy(() -> service.confirm(request(true)))
+                .isInstanceOf(BizException.class);
+
+        verify(confirmationService).finish("c1", "cfm_1");
+        verifyNoInteractions(taskConfirmGraph);
     }
 }

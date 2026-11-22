@@ -8,6 +8,7 @@ import com.example.langchain4j.service.PromptTemplateService;
 import com.example.langchain4j.tool.api.ToolDefinition;
 import com.example.langchain4j.tool.api.ToolSideEffect;
 import com.example.langchain4j.tool.runtime.ToolAccessPolicy;
+import com.example.langchain4j.tool.workflow.TaskPlanValidator;
 import com.example.langchain4j.tool.workflow.TaskWorkflow;
 import com.example.langchain4j.tool.workflow.TaskWorkflowRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -61,8 +62,9 @@ class TaskPlanNodeTest {
         properties.getTool().setWriteEnabled(true);
         readWorkflow = workflow("wf_read", READ_TOOL);
         readDefinition = definition(READ_TOOL, ToolSideEffect.READ_ONLY);
+        TaskPlanValidator planValidator = new TaskPlanValidator(workflowRegistry, List.of());
         node = new TaskPlanNode(llmGateway, promptTemplateService, workflowRegistry,
-                accessPolicy, properties);
+                accessPolicy, planValidator, properties);
 
         lenient().when(promptTemplateService.resolve(anyString(), anyString()))
                 .thenAnswer(invocation -> invocation.getArgument(1));
@@ -72,6 +74,8 @@ class TaskPlanNodeTest {
         lenient().when(workflowRegistry.all()).thenReturn(List.of(readWorkflow));
         lenient().when(workflowRegistry.find("wf_read")).thenReturn(Optional.of(readWorkflow));
         lenient().when(workflowRegistry.definitions(readWorkflow)).thenReturn(List.of(readDefinition));
+        lenient().when(workflowRegistry.validatePlan(any(TaskWorkflow.class), any()))
+                .thenReturn(TaskWorkflowRegistry.Validation.ok());
         lenient().when(accessPolicy.checkAll(eq(readWorkflow), any()))
                 .thenReturn(allowed());
     }

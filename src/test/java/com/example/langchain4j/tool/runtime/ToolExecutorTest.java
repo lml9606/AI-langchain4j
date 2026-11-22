@@ -27,6 +27,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Callable;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -60,6 +61,8 @@ class ToolExecutorTest {
     private RateLimiter rateLimiter;
     @Mock
     private AgentTool tool;
+    @Mock
+    private WriteExecutionTemplate writeExecutionTemplate;
 
     private AgentProperties properties;
     private ThreadPoolTaskExecutor taskExecutor;
@@ -76,7 +79,7 @@ class ToolExecutorTest {
         taskExecutor.setThreadNamePrefix("tool-test-");
         taskExecutor.initialize();
         executor = new ToolExecutor(registry, accessPolicy, auditService, metrics, taskExecutor,
-                properties, rateLimiter);
+                properties, rateLimiter, writeExecutionTemplate);
         lenient().when(rateLimiter.tryAcquire(anyString(), anyInt())).thenReturn(true);
         lenient().when(accessPolicy.check(any(ToolDefinition.class), any())).thenReturn(
                 new ToolAccessPolicy.Decision(true, ToolAccessPolicy.Status.ALLOWED, "", ""));
@@ -84,6 +87,12 @@ class ToolExecutorTest {
                 Optional.of(new ToolRegistry.RegisteredTool(tool, tool.definition())));
         lenient().when(tool.execute(any(), any(JsonNode.class)))
                 .thenReturn(ToolResult.success(Map.of("ok", true), "成功", List.of(), 1));
+        lenient().when(writeExecutionTemplate.execute(any(), anyString(), any(JsonNode.class), any()))
+                .thenAnswer(invocation -> {
+                    @SuppressWarnings("unchecked")
+                    Callable<ToolResult> business = invocation.getArgument(3);
+                    return business.call();
+                });
     }
 
     @AfterEach
@@ -262,7 +271,7 @@ class ToolExecutorTest {
             });
 
             ToolExecutor overloaded = new ToolExecutor(registry, accessPolicy, auditService,
-                    metrics, saturated, properties, rateLimiter);
+                    metrics, saturated, properties, rateLimiter, writeExecutionTemplate);
             ToolResult result = overloaded.invoke(CONTEXT, TOOL_NAME, MAPPER.readTree("{}"));
 
             assertThat(result.errorCode()).isEqualTo("OVERLOADED");

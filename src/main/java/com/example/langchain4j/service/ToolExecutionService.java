@@ -91,12 +91,12 @@ public class ToolExecutionService {
                     idTail(execution.getExecutionId()), execution.getTool());
             return new BeginResult(BeginStatus.CONFLICT, existing);
         }
-        if (ToolExecution.STATUS_SUCCEEDED.equals(existing.getStatus())) {
+        if (existing.getStatus() == ToolExecution.Status.SUCCEEDED) {
             log.info("[tool-exec] replay, executionTail={}, tool={}",
                     idTail(execution.getExecutionId()), execution.getTool());
             return new BeginResult(BeginStatus.REPLAY, existing);
         }
-        if (ToolExecution.STATUS_CANCELLED.equals(existing.getStatus())) {
+        if (existing.getStatus() == ToolExecution.Status.CANCELLED) {
             log.warn("[tool-exec] confirmation cancelled, executionTail={}, tool={}",
                     idTail(execution.getExecutionId()), execution.getTool());
             return new BeginResult(BeginStatus.CONFLICT, existing);
@@ -131,6 +131,26 @@ public class ToolExecutionService {
             log.info("[tool-exec] cancel skipped (not cancellable), executionTail={}",
                     idTail(executionId));
         }
+    }
+
+    /**
+     * 新用户消息放弃旧确认：按会话取消仍处于 PENDING 的台账。
+     * <p>即使用户确认令牌已过期或 Redis 丢失，数据库里也不会留下悬空的待确认记录。
+     *
+     * @return 实际取消的记录数
+     */
+    @Transactional
+    public int cancelPendingByConversation(String userId, String conversationId) {
+        if (userId == null || userId.isBlank()
+                || conversationId == null || conversationId.isBlank()) {
+            return 0;
+        }
+        int changed = executionMapper.markCancelledByConversation(userId, conversationId);
+        if (changed > 0) {
+            log.info("[tool-exec] pending cancelled by new message, conversation={}, count={}",
+                    conversationId, changed);
+        }
+        return changed;
     }
 
     /** 查询执行结果（令牌已删除时，用它回答"到底执行没执行"） */

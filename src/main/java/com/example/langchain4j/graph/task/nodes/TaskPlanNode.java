@@ -10,12 +10,11 @@ import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.service.PromptTemplateService;
 import com.example.langchain4j.tool.api.ToolDefinition;
-import com.example.langchain4j.tool.api.ToolSideEffect;
 import com.example.langchain4j.tool.runtime.ToolAccessPolicy;
-import com.example.langchain4j.tool.runtime.ToolInputValidator;
 import com.example.langchain4j.tool.workflow.TaskWorkflow;
+import com.example.langchain4j.tool.workflow.TaskPlanPhase;
+import com.example.langchain4j.tool.workflow.TaskPlanValidator;
 import com.example.langchain4j.tool.workflow.TaskWorkflowRegistry;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
@@ -40,15 +39,18 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
     private final PromptTemplateService promptTemplateService;
     private final TaskWorkflowRegistry workflowRegistry;
     private final ToolAccessPolicy accessPolicy;
+    private final TaskPlanValidator planValidator;
     private final AgentProperties properties;
 
     public TaskPlanNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService,
                         TaskWorkflowRegistry workflowRegistry, ToolAccessPolicy accessPolicy,
+                        TaskPlanValidator planValidator,
                         AgentProperties properties) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
         this.workflowRegistry = workflowRegistry;
         this.accessPolicy = accessPolicy;
+        this.planValidator = planValidator;
         this.properties = properties;
     }
 
@@ -165,81 +167,41 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
                 return updates;
             }
 
-            // 步骤5：严格校验固定工具序列，多一个、少一个、换一个、顺序错都拒绝。
-            JsonNode stepsNode = node.get("steps");
-            if (stepsNode == null || !stepsNode.isArray()) {
-                return error("任务计划格式错误：steps 必须是数组");
+            // 步骤5：统一解析固定工具序列和参数 Schema；解析失败直接 fail-closed。
+            TaskPlanValidator.ParseResult parsed = planValidator.parseSteps(
+                    node.get("steps"), workflow, definitions, stageByTool);
+            if (!parsed.valid()) {
+                log.warn("[task-plan] invalid steps, workflow={}, reason={}",
+                        workflow.id(), parsed.message());
+                return error(parsed.message());
             }
-            if (stepsNode.size() != requiredSteps) {
-                log.warn("[task-plan] workflow contract mismatch, workflow={}, expected={}, actual={}",
-                        workflow.id(), requiredSteps, stepsNode.size());
-                return error("任务计划与固定工具契约不一致：应包含 " + requiredSteps
-                        + " 步，实际 " + stepsNode.size() + " 步");
-            }
+            List<Map<String, Object>> plan = parsed.plan();
 
-            List<Map<String, Object>> plan = new ArrayList<>(requiredSteps);
-            for (int index = 0; index < requiredSteps; index++) {
-                JsonNode stepNode = stepsNode.get(index);
-                String expectedTool = workflow.requiredTools().get(index);
-                String actualTool = stepNode.path("tool").asText("").trim();
-                if (!expectedTool.equals(actualTool)) {
-                    log.warn("[task-plan] step tool mismatch, index={}, expected={}, actual={}",
-                            index, expectedTool, actualTool);
-                    return error("任务计划与固定工具契约不一致：第 " + (index + 1)
-                            + " 步应为 " + expectedTool + "，实际为 " + actualTool);
-                }
-                ToolDefinition definition = definitions.get(expectedTool);
-                JsonNode argsNode = stepNode.get("args");
-                if (argsNode != null && !argsNode.isNull() && !argsNode.isObject()) {
-                    return error("工具 " + expectedTool + " 的参数必须是 JSON 对象");
-                }
-                ToolInputValidator.Result validation =
-                        ToolInputValidator.validate(definition, argsNode == null ? null : argsNode);
-                if (!validation.valid()) {
-                    log.warn("[task-plan] invalid args, tool={}, reason={}",
-                            expectedTool, validation.message());
-                    return error("工具 " + expectedTool + " 参数不合法：" + validation.message());
-                }
-                Map<String, Object> args = argsNode != null && argsNode.isObject()
-                        ? JsonUtil.mapper().convertValue(argsNode,
-                        new TypeReference<Map<String, Object>>() {
-                        }) : Map.of();
-                Map<String, Object> step = new LinkedHashMap<>();
-                step.put("workflowId", workflow.id());
-                step.put("stage", stageByTool.get(expectedTool));
-                step.put("tool", expectedTool);
-                step.put("args", args);
-                step.put("purpose", stepNode.path("purpose").asText(""));
-                step.put("sideEffect", definition.sideEffect().name());
-                plan.add(step);
+            // 步骤6：统一复核写操作数量、pending 一致性和可插拔业务规则。
+            TaskPlanValidator.PlanValidationResult planValidation = planValidator.validate(
+                    TaskPlanPhase.PLAN, workflow, plan, definitions, Map.of());
+            if (!planValidation.valid()) {
+                log.warn("[task-plan] plan rejected, workflow={}, reason={}",
+                        workflow.id(), planValidation.message());
+                return error(planValidation.message());
             }
-
-            // 步骤6：写操作不直接执行，保留完整计划并转确认节点。
-            List<Map<String, Object>> writeSteps = new ArrayList<>();
-            for (Map<String, Object> step : plan) {
-                ToolDefinition definition = definitions.get(String.valueOf(step.get("tool")));
-                if (definition.sideEffect() != ToolSideEffect.READ_ONLY) {
-                    Map<String, Object> writeStep = new LinkedHashMap<>(step);
-                    writeStep.put("risk", definition.sideEffect().name());
-                    writeSteps.add(writeStep);
-                }
-            }
-            if (writeSteps.size() > 1) {
-                log.warn("[task-plan] multiple write steps rejected, workflow={}, count={}",
-                        workflow.id(), writeSteps.size());
-                return error("一次只能确认一个写操作，请拆分为多轮处理");
+            Map<String, Object> writeStep = planValidation.writeStep();
+            Map<String, Object> pendingAction = Map.of();
+            boolean confirmationRequired = writeStep != null;
+            if (confirmationRequired) {
+                pendingAction = new LinkedHashMap<>(writeStep);
+                pendingAction.put("risk", planValidation.writeDefinition().sideEffect().name());
             }
 
             updates.put(WorkflowState.TASK_ENTITIES, entities);
             updates.put(WorkflowState.TASK_MISSING, List.of());
             updates.put(WorkflowState.TASK_PLAN, plan);
-            updates.put(WorkflowState.TASK_PENDING_ACTION,
-                    writeSteps.isEmpty() ? Map.of() : writeSteps.get(0));
-            updates.put(WorkflowState.TASK_CONFIRMATION_REQUIRED, !writeSteps.isEmpty());
+            updates.put(WorkflowState.TASK_PENDING_ACTION, pendingAction);
+            updates.put(WorkflowState.TASK_CONFIRMATION_REQUIRED, confirmationRequired);
             updates.put(WorkflowState.TASK_CLARIFY, false);
             updates.put(WorkflowState.ERROR, "");
             log.info("[task-plan] done, workflow={}, steps={}, writeConfirmation={}, entities={}",
-                    workflow.id(), plan.size(), !writeSteps.isEmpty(), entities.keySet());
+                    workflow.id(), plan.size(), confirmationRequired, entities.keySet());
             return updates;
         } catch (BizException e) {
             log.warn("[task-plan] llm failed: {}", e.getMessage());

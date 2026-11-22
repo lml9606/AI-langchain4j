@@ -72,6 +72,15 @@
           AND status IN ('PENDING', 'APPROVED', 'FAILED')
     </update>
 
+    <!-- 用户发来新消息即视为放弃旧确认：只取消仍待确认的记录，避免覆盖已执行结果 -->
+    <update id="markCancelledByConversation">
+        UPDATE ai_tool_execution
+        SET status = 'CANCELLED', updated_at = now()
+        WHERE user_id = #{userId}
+          AND conversation_id = #{conversationId}
+          AND status IN ('PENDING', 'APPROVED')
+    </update>
+
     <!--
       接管执行权：
       - PENDING / APPROVED：用户已确认，接管为执行中；

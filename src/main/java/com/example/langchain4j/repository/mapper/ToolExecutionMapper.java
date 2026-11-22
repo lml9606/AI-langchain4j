@@ -38,6 +38,10 @@ public interface ToolExecutionMapper {
     int markCancelled(@Param("userId") String userId,
                       @Param("executionId") String executionId);
 
+    /** 新用户消息放弃旧确认：按会话把仍处于待确认的台账统一取消。 */
+    int markCancelledByConversation(@Param("userId") String userId,
+                                    @Param("conversationId") String conversationId);
+
     /**
      * 接管待确认/失败/失联的执行：PENDING、FAILED 直接允许重试；
      * RUNNING 超过 staleSeconds 视为进程崩溃。

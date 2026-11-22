@@ -18,11 +18,14 @@ import java.time.OffsetDateTime;
 @Data
 public class ToolExecution {
 
-    public static final String STATUS_RUNNING = "RUNNING";
-    public static final String STATUS_SUCCEEDED = "SUCCEEDED";
-    public static final String STATUS_FAILED = "FAILED";
-    public static final String STATUS_PENDING = "PENDING";
-    public static final String STATUS_CANCELLED = "CANCELLED";
+    /** 写操作台账状态；数据库仍按枚举名存字符串，便于检索和兼容存量数据。 */
+    public enum Status {
+        PENDING,
+        RUNNING,
+        SUCCEEDED,
+        FAILED,
+        CANCELLED
+    }
 
     private Long id;
     /** 幂等键（当前实现 = confirmationId） */
@@ -40,8 +43,8 @@ public class ToolExecution {
     private String risk;
     /** 待确认动作过期时间（展示/审计用；Redis TTL 是运行时过期事实源） */
     private OffsetDateTime expiresAt;
-    /** PENDING / RUNNING / SUCCEEDED / FAILED / CANCELLED */
-    private String status;
+    /** 当前执行状态；MyBatis 使用 EnumTypeHandler 按枚举名读写。 */
+    private Status status;
     /** 成功结果（重放时原样返回） */
     private String result;
     private String errorCode;

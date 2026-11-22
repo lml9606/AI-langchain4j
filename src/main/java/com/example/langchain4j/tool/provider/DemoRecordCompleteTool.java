@@ -55,20 +55,15 @@ public class DemoRecordCompleteTool implements AgentTool {
     public ToolResult execute(ToolContext context, JsonNode args) {
         long start = System.currentTimeMillis();
         String userId = context.userId();
-        String executionId = context.idempotencyKey();
         if (userId == null || userId.isBlank()) {
             return ToolResult.failure("UNAUTHORIZED_USER", "缺少用户身份，拒绝执行", elapsed(start));
-        }
-        if (executionId == null || executionId.isBlank()) {
-            return ToolResult.failure("MISSING_IDEMPOTENCY_KEY", "写工具缺少幂等键，拒绝执行", elapsed(start));
         }
         Long recordId = resolveRecordId(userId, args);
         if (recordId == null) {
             return ToolResult.failure("INVALID_ARGS", "recordId 与 title 必须二选一并有效", elapsed(start));
         }
 
-        DemoRecordService.CompleteOutcome outcome = demoRecordService.complete(
-                userId, context.conversationId(), executionId, TOOL_NAME, recordId);
+        DemoRecordService.CompleteOutcome outcome = demoRecordService.complete(userId, recordId);
         if (!outcome.success()) {
             return ToolResult.failure(outcome.errorCode(), outcome.errorMessage(), elapsed(start));
         }

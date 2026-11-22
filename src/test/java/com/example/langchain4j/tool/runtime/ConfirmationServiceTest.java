@@ -199,6 +199,33 @@ class ConfirmationServiceTest {
     }
 
     @Test
+    @DisplayName("新消息取消待确认：删除会话令牌并同步取消台账")
+    void cancelPendingDeletesTokenAndLedger() throws Exception {
+        when(conversationBucket.get()).thenReturn(objectMapper.writeValueAsString(action("demo")));
+        when(toolExecutionService.cancelPendingByConversation("demo", "c1")).thenReturn(1);
+
+        Optional<ConfirmationService.PendingAction> cancelled =
+                service.cancelPending("c1", "demo", "USER_NEW_MESSAGE");
+
+        assertThat(cancelled).isPresent();
+        assertThat(cancelled.get().confirmationId()).isEqualTo("cfm_1");
+        verify(conversationBucket).delete();
+        verify(toolExecutionService).cancelPendingByConversation("demo", "c1");
+    }
+
+    @Test
+    @DisplayName("新消息取消时 Redis 故障：仍按数据库兜底取消，不阻断新意图")
+    void cancelPendingFallsBackToLedgerWhenRedisFails() {
+        when(conversationBucket.get()).thenThrow(new RuntimeException("redis down"));
+        when(toolExecutionService.cancelPendingByConversation("demo", "c1")).thenReturn(1);
+
+        assertThatCode(() -> service.cancelPending("c1", "demo", "USER_NEW_MESSAGE"))
+                .doesNotThrowAnyException();
+
+        verify(toolExecutionService).cancelPendingByConversation("demo", "c1");
+    }
+
+    @Test
     @DisplayName("Redis 创建异常 → fail-closed，抛出缓存不可用")
     void createFailsClosedOnRedisError() {
         doThrow(new RuntimeException("redis down"))

@@ -7,10 +7,12 @@ import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.tool.api.AgentTool;
 import com.example.langchain4j.tool.api.ToolDefinition;
 import com.example.langchain4j.tool.api.ToolSideEffect;
+import com.example.langchain4j.tool.runtime.ConfirmationPolicy;
 import com.example.langchain4j.tool.runtime.ConfirmationService;
 import com.example.langchain4j.tool.runtime.ToolAccessPolicy;
 import com.example.langchain4j.tool.runtime.ToolRegistry;
 import com.example.langchain4j.tool.workflow.TaskWorkflow;
+import com.example.langchain4j.tool.workflow.TaskPlanValidator;
 import com.example.langchain4j.tool.workflow.TaskWorkflowRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -51,6 +53,7 @@ class TaskConfirmNodeTest {
     private AgentTool agentTool;
 
     private AgentProperties properties;
+    private ToolDefinition writeDefinition;
     private TaskConfirmNode node;
 
     @BeforeEach
@@ -73,9 +76,20 @@ class TaskConfirmNodeTest {
                 return List.of(new Stage("write", "修改", List.of("write_tool")));
             }
         };
-        node = new TaskConfirmNode(confirmationService, toolRegistry, workflowRegistry,
-                accessPolicy, properties);
+        writeDefinition = new ToolDefinition(
+                "write_tool", "修改业务数据",
+                "{\"type\":\"object\",\"required\":[\"entityId\"],"
+                        + "\"properties\":{\"entityId\":{\"type\":\"string\"}}}",
+                ToolSideEffect.WRITE, 3000);
+        ConfirmationPolicy confirmationPolicy =
+                new ConfirmationPolicy(toolRegistry, accessPolicy, properties);
+        TaskPlanValidator planValidator = new TaskPlanValidator(workflowRegistry, List.of());
+        node = new TaskConfirmNode(confirmationService, confirmationPolicy, planValidator);
         lenient().when(workflowRegistry.find("wf_write")).thenReturn(Optional.of(workflow));
+        lenient().when(workflowRegistry.workflowIdOfPlan(any()))
+                .thenReturn(Optional.of("wf_write"));
+        lenient().when(workflowRegistry.definitions(workflow))
+                .thenReturn(List.of(writeDefinition));
         lenient().when(workflowRegistry.validatePlan(eq(workflow), any()))
                 .thenReturn(TaskWorkflowRegistry.Validation.ok());
         lenient().when(accessPolicy.checkAll(eq(workflow), any())).thenReturn(
@@ -84,11 +98,7 @@ class TaskConfirmNodeTest {
                 new ToolAccessPolicy.Decision(true, ToolAccessPolicy.Status.ALLOWED, "", ""));
         lenient().when(toolRegistry.findRegistered("write_tool")).thenAnswer(invocation ->
                 Optional.of(new ToolRegistry.RegisteredTool(agentTool, agentTool.definition())));
-        lenient().when(agentTool.definition()).thenReturn(new ToolDefinition(
-                "write_tool", "修改业务数据",
-                "{\"type\":\"object\",\"required\":[\"entityId\"],"
-                        + "\"properties\":{\"entityId\":{\"type\":\"string\"}}}",
-                ToolSideEffect.WRITE, 3000));
+        lenient().when(agentTool.definition()).thenReturn(writeDefinition);
     }
 
     private WorkflowState state() {

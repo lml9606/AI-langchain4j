@@ -5,10 +5,7 @@ import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.tool.api.ToolContext;
 import com.example.langchain4j.tool.api.ToolEvidence;
 import com.example.langchain4j.tool.api.ToolResult;
-import com.example.langchain4j.tool.runtime.ToolAccessPolicy;
 import com.example.langchain4j.tool.runtime.ToolExecutor;
-import com.example.langchain4j.tool.workflow.TaskWorkflow;
-import com.example.langchain4j.tool.workflow.TaskWorkflowRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -20,13 +17,13 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 /** 任务执行节点单测：整组契约复核、逐节点权限、轨迹与证据沉淀。 */
@@ -35,43 +32,12 @@ class TaskExecuteNodeTest {
 
     @Mock
     private ToolExecutor toolExecutor;
-    @Mock
-    private TaskWorkflowRegistry workflowRegistry;
-    @Mock
-    private ToolAccessPolicy accessPolicy;
 
-    private TaskWorkflow workflow;
     private TaskExecuteNode node;
 
     @BeforeEach
     void setUp() {
-        workflow = new TaskWorkflow() {
-            @Override
-            public String id() {
-                return "wf_test";
-            }
-
-            @Override
-            public String description() {
-                return "测试任务";
-            }
-
-            @Override
-            public List<Stage> stages() {
-                return List.of(new Stage("main", "主阶段", List.of("read_tool", "http_tool")));
-            }
-        };
-        node = new TaskExecuteNode(toolExecutor, new AgentProperties(), workflowRegistry,
-                accessPolicy);
-        lenient().when(workflowRegistry.find("wf_test")).thenReturn(Optional.of(workflow));
-        lenient().when(workflowRegistry.validatePlan(eq(workflow), any()))
-                .thenReturn(TaskWorkflowRegistry.Validation.ok());
-        lenient().when(accessPolicy.checkAll(eq(workflow), any())).thenReturn(allowed(""));
-        lenient().when(accessPolicy.check(anyString(), any())).thenReturn(allowed(""));
-    }
-
-    private ToolAccessPolicy.Decision allowed(String tool) {
-        return new ToolAccessPolicy.Decision(true, ToolAccessPolicy.Status.ALLOWED, tool, "");
+        node = new TaskExecuteNode(toolExecutor, new AgentProperties());
     }
 
     private WorkflowState stateWithPlan() {
@@ -157,42 +123,29 @@ class TaskExecuteNodeTest {
     }
 
     @Test
-    @DisplayName("缺少工作流契约 -> 不执行任何工具")
-    void rejectMissingWorkflowContract() {
+    @DisplayName("空计划 -> 不执行任何工具")
+    void rejectEmptyPlan() {
         WorkflowState state = new WorkflowState(Map.of(
                 WorkflowState.QUERY, "执行",
                 WorkflowState.USER_ID, "demo",
-                WorkflowState.TASK_PLAN, List.of(Map.of("tool", "read_tool"))));
+                WorkflowState.TASK_PLAN, List.of()));
 
         Map<String, Object> updates = node.apply(state);
 
-        assertThat(String.valueOf(updates.get(WorkflowState.ERROR))).contains("缺少固定工作流契约");
+        assertThat(String.valueOf(updates.get(WorkflowState.ERROR))).contains("执行计划为空");
         org.mockito.Mockito.verifyNoInteractions(toolExecutor);
     }
 
     @Test
-    @DisplayName("执行期契约不一致 -> 整组拒绝，不执行半份计划")
-    void rejectPlanMismatchBeforeExecution() {
-        when(workflowRegistry.validatePlan(eq(workflow), any()))
-                .thenReturn(TaskWorkflowRegistry.Validation.invalid("契约不一致"));
+    @DisplayName("工具返回致命错误 -> 停止后续步骤并保留轨迹")
+    void stopOnFatalToolError() {
+        when(toolExecutor.invoke(any(), eq("read_tool"), any(JsonNode.class)))
+                .thenReturn(ToolResult.failure("FORBIDDEN_TOOL", "当前角色无权执行该任务", 1));
 
         Map<String, Object> updates = node.apply(stateWithPlan());
 
-        assertThat(String.valueOf(updates.get(WorkflowState.ERROR))).contains("契约不一致");
-        org.mockito.Mockito.verifyNoInteractions(toolExecutor);
-    }
-
-    @Test
-    @DisplayName("子节点权限被收回 -> 停止执行并返回明确错误")
-    void rejectWhenStepPermissionRevoked() {
-        when(accessPolicy.check(eq("read_tool"), any())).thenReturn(
-                new ToolAccessPolicy.Decision(false,
-                        ToolAccessPolicy.Status.PERMISSION_REQUIRED, "read_tool",
-                        "当前角色无权执行该任务"));
-
-        Map<String, Object> updates = node.apply(stateWithPlan());
-
-        assertThat(String.valueOf(updates.get(WorkflowState.ERROR))).contains("无权");
-        org.mockito.Mockito.verifyNoInteractions(toolExecutor);
+        assertThat((List<?>) updates.get(WorkflowState.TASK_TRACE)).hasSize(1);
+        org.mockito.Mockito.verify(toolExecutor, never())
+                .invoke(any(), eq("http_tool"), any(JsonNode.class));
     }
 }

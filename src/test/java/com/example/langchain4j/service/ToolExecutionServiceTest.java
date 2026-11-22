@@ -35,7 +35,7 @@ class ToolExecutionServiceTest {
         service = new ToolExecutionService(executionMapper, properties);
     }
 
-    private ToolExecution execution(String status) {
+    private ToolExecution execution(ToolExecution.Status status) {
         ToolExecution execution = new ToolExecution();
         execution.setExecutionId("cfm_1");
         execution.setUserId("demo");
@@ -49,7 +49,7 @@ class ToolExecutionServiceTest {
     @Test
     @DisplayName("记录待确认动作 → 成功返回 true")
     void recordPendingReturnsTrueWhenInserted() {
-        ToolExecution pending = execution(ToolExecution.STATUS_PENDING);
+        ToolExecution pending = execution(ToolExecution.Status.PENDING);
         when(executionMapper.insertPending(pending)).thenReturn(1);
 
         assertThat(service.recordPending(pending)).isTrue();
@@ -59,7 +59,7 @@ class ToolExecutionServiceTest {
     @Test
     @DisplayName("确认 ID 已存在 → 返回 false，由确认服务撤销 Redis key")
     void recordPendingReturnsFalseWhenDuplicate() {
-        ToolExecution pending = execution(ToolExecution.STATUS_PENDING);
+        ToolExecution pending = execution(ToolExecution.Status.PENDING);
         when(executionMapper.insertPending(pending)).thenReturn(0);
 
         assertThat(service.recordPending(pending)).isFalse();
@@ -68,8 +68,8 @@ class ToolExecutionServiceTest {
     @Test
     @DisplayName("用户确认后从 PENDING 接管为 RUNNING")
     void pendingExecutionCanBeReclaimed() {
-        ToolExecution running = execution(ToolExecution.STATUS_RUNNING);
-        ToolExecution pending = execution(ToolExecution.STATUS_PENDING);
+        ToolExecution running = execution(ToolExecution.Status.RUNNING);
+        ToolExecution pending = execution(ToolExecution.Status.PENDING);
         when(executionMapper.insertRunning(running)).thenReturn(0);
         when(executionMapper.selectByExecutionId("demo", "cfm_1")).thenReturn(pending);
         when(executionMapper.tryReclaim("demo", "cfm_1", 60, "hash-1")).thenReturn(1);
@@ -83,8 +83,8 @@ class ToolExecutionServiceTest {
     @Test
     @DisplayName("已取消的确认 ID → 冲突，不能再次执行")
     void cancelledExecutionIsRejected() {
-        ToolExecution running = execution(ToolExecution.STATUS_RUNNING);
-        ToolExecution cancelled = execution(ToolExecution.STATUS_CANCELLED);
+        ToolExecution running = execution(ToolExecution.Status.RUNNING);
+        ToolExecution cancelled = execution(ToolExecution.Status.CANCELLED);
         when(executionMapper.insertRunning(running)).thenReturn(0);
         when(executionMapper.selectByExecutionId("demo", "cfm_1")).thenReturn(cancelled);
 

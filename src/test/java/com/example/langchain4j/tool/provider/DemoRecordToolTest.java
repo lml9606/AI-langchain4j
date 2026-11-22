@@ -16,15 +16,17 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 演示工具单测：用户隔离、空结果表达、写工具幂等键与参数校验。
+ * 演示工具单测：用户隔离、空结果表达、参数定位。
+ *
+ * <p>确认、幂等键和台账由执行层统一负责，不在业务工具里重复校验；
+ * 对应行为见 ToolExecutorTest 与 WriteExecutionTemplateTest。
  */
 @ExtendWith(MockitoExtension.class)
 class DemoRecordToolTest {
@@ -58,18 +60,6 @@ class DemoRecordToolTest {
     }
 
     @Test
-    @DisplayName("写工具：缺少幂等键 → 拒绝执行，不触碰业务数据")
-    void completeRejectsWithoutIdempotencyKey() throws Exception {
-        DemoRecordCompleteTool tool = new DemoRecordCompleteTool(demoRecordService);
-        JsonNode args = MAPPER.readTree("{\"recordId\":1}");
-
-        ToolResult result = tool.execute(new ToolContext("demo", "c1", true, ""), args);
-
-        assertThat(result.errorCode()).isEqualTo("MISSING_IDEMPOTENCY_KEY");
-        verify(demoRecordService, never()).complete(anyString(), anyString(), anyString(), anyString(), anyLong());
-    }
-
-    @Test
     @DisplayName("写工具：参数非法 → INVALID_ARGS")
     void completeRejectsInvalidRecordId() throws Exception {
         DemoRecordCompleteTool tool = new DemoRecordCompleteTool(demoRecordService);
@@ -78,6 +68,7 @@ class DemoRecordToolTest {
         ToolResult result = tool.execute(new ToolContext("demo", "c1", true, "cfm_1"), args);
 
         assertThat(result.errorCode()).isEqualTo("INVALID_ARGS");
+        verify(demoRecordService, never()).complete(anyString(), anyLong());
     }
 
     @Test
@@ -85,7 +76,7 @@ class DemoRecordToolTest {
     void completeSuccess() throws Exception {
         DemoRecordCompleteTool tool = new DemoRecordCompleteTool(demoRecordService);
         JsonNode args = MAPPER.readTree("{\"recordId\":1}");
-        when(demoRecordService.complete("demo", "c1", "cfm_1", "complete_demo_record", 1L))
+        when(demoRecordService.complete("demo", 1L))
                 .thenReturn(new DemoRecordService.CompleteOutcome(
                         true, false, "已将记录 1 标记为完成", "", ""));
 
@@ -93,6 +84,7 @@ class DemoRecordToolTest {
 
         assertThat(result.success()).isTrue();
         assertThat(result.summary()).contains("标记为完成");
+        verify(demoRecordService).complete("demo", 1L);
     }
 
     @Test
@@ -101,14 +93,14 @@ class DemoRecordToolTest {
         DemoRecordCompleteTool tool = new DemoRecordCompleteTool(demoRecordService);
         JsonNode args = MAPPER.readTree("{\"title\":\"演示任务 A\"}");
         when(demoRecordService.findByTitle("demo", "演示任务 A")).thenReturn(List.of(record(1L)));
-        when(demoRecordService.complete("demo", "c1", "cfm_1", "complete_demo_record", 1L))
+        when(demoRecordService.complete("demo", 1L))
                 .thenReturn(new DemoRecordService.CompleteOutcome(
                         true, false, "已将记录 1 标记为完成", "", ""));
 
         ToolResult result = tool.execute(new ToolContext("demo", "c1", true, "cfm_1"), args);
 
         assertThat(result.success()).isTrue();
-        verify(demoRecordService).complete("demo", "c1", "cfm_1", "complete_demo_record", 1L);
+        verify(demoRecordService).complete("demo", 1L);
     }
 
     @Test
@@ -121,7 +113,7 @@ class DemoRecordToolTest {
         ToolResult result = tool.execute(new ToolContext("demo", "c1", true, "cfm_1"), args);
 
         assertThat(result.errorCode()).isEqualTo("INVALID_ARGS");
-        verify(demoRecordService, never()).complete(anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(demoRecordService, never()).complete(anyString(), anyLong());
     }
 
     private ToolDemoRecord record(long id) {

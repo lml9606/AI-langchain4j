@@ -135,22 +135,52 @@ public class ConfirmationService {
     }
 
     /**
-     * 会话是否存在待确认动作。
+     * 新用户消息到达：当前会话的旧待确认动作视为放弃。
      *
-     * <p>这是聊天入口的体验层前置检查：Redis 读失败时 fail-open，允许继续执行普通问答；
-     * 真正防止第二张令牌的原子闸门在 {@link #create} 的 trySet，那里 Redis 故障会 fail-closed。
+     * <p>先删 Redis 令牌，再按会话兜底取消数据库 PENDING 台账。这样即使 Redis
+     * 令牌已过期/丢失，也不会留下"用户已经改主意、台账却还在等待确认"的悬空记录。
+     *
+     * <p>Redis 读失败不阻断新消息：新意图优先，数据库取消仍会执行。返回的 action
+     * 仅用于调用方记录被放弃的具体动作；没有可读令牌时为空。
      */
-    public boolean hasPending(String conversationId) {
-        if (conversationId == null || conversationId.isBlank()) {
-            return false;
+    public Optional<PendingAction> cancelPending(String conversationId, String userId,
+                                                 String reason) {
+        if (conversationId == null || conversationId.isBlank()
+                || userId == null || userId.isBlank()) {
+            return Optional.empty();
+        }
+        PendingAction cancelled = null;
+        RBucket<String> bucket = conversationBucket(conversationId);
+        try {
+            String json = bucket.get();
+            if (json != null && !json.isBlank()) {
+                PendingAction action = objectMapper.readValue(json, PendingAction.class);
+                if (userId.equals(action.userId())) {
+                    cancelled = action;
+                    bucket.delete();
+                } else {
+                    log.warn("[confirm] cancel skipped, user mismatch, conversation={}",
+                            conversationId);
+                }
+            }
+        } catch (Exception e) {
+            // 新消息优先：Redis 不可用时继续走数据库兜底，不让会话卡死
+            log.warn("[confirm] cancel read failed, continue db fallback, conversation={}: {}",
+                    conversationId, e.getMessage());
         }
         try {
-            return conversationBucket(conversationId).get() != null;
+            int changed = toolExecutionService.cancelPendingByConversation(userId, conversationId);
+            if (cancelled != null || changed > 0) {
+                log.info("[confirm] cancelled by new message, conversation={}, idTail={}, "
+                                + "reason={}, ledgerChanged={}", conversationId,
+                        cancelled == null ? "" : idTail(cancelled.confirmationId()), reason,
+                        changed);
+            }
         } catch (Exception e) {
-            log.warn("[confirm] pending check failed, fail-open, conversation={}: {}",
-                    conversationId, e.getMessage());
-            return false;
+            log.warn("[confirm] cancel ledger failed, conversation={}, reason={}: {}",
+                    conversationId, reason, e.getMessage());
         }
+        return Optional.ofNullable(cancelled);
     }
 
     /**

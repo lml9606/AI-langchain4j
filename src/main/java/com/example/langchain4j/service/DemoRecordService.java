@@ -1,29 +1,24 @@
 package com.example.langchain4j.service;
 
 import com.example.langchain4j.repository.entity.ToolDemoRecord;
-import com.example.langchain4j.repository.entity.ToolExecution;
 import com.example.langchain4j.repository.mapper.ToolDemoRecordMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 
 /**
  * 工具演示业务服务：读工具的查询源 + 写工具的幂等业务写。
  *
- * <p>写路径是生产级模板：
+ * <p>写路径只负责业务写入；幂等台账由 {@code WriteExecutionTemplate} 统一包裹：
  * <pre>
  * @Transactional
- *   ├─ 幂等闸门（台账 RUNNING，与业务同事务）
+ *   ├─ 幂等闸门（由 WriteExecutionTemplate 完成）
  *   ├─ 业务写（UPDATE ... WHERE user_id = ?）
- *   └─ 台账 SUCCEEDED + 结果
+ *   └─ 台账 SUCCEEDED/FAILED（由 WriteExecutionTemplate 完成）
  * </pre>
- * 任何一步失败整体回滚，台账不会留下"成功但业务没改"的假象。
+ * 业务服务不再依赖 confirmationId，也不直接操作执行台账。
  */
 @Slf4j
 @Service
@@ -43,11 +38,9 @@ public class DemoRecordService {
     }
 
     private final ToolDemoRecordMapper recordMapper;
-    private final ToolExecutionService executionService;
 
-    public DemoRecordService(ToolDemoRecordMapper recordMapper, ToolExecutionService executionService) {
+    public DemoRecordService(ToolDemoRecordMapper recordMapper) {
         this.recordMapper = recordMapper;
-        this.executionService = executionService;
     }
 
     /** 读工具：按用户查询，status 为空表示全部 */
@@ -86,74 +79,28 @@ public class DemoRecordService {
     /**
      * 写工具：把记录标记为完成。
      *
-     * <p>{@code executionId} 是幂等键（当前等于 confirmationId）。同一键重复调用：
-     * 已成功 → 返回上次结果；执行中 → 提示稍后；参数不同 → 拒绝。
+     * <p>幂等重放在 {@code WriteExecutionTemplate} 完成；本方法只保证业务状态幂等：
+     * 记录已经是 DONE 时不再重复修改。
      */
     @Transactional(rollbackFor = Exception.class)
-    public CompleteOutcome complete(String userId, String conversationId, String executionId,
-                                    String tool, long recordId) {
-        ToolExecution execution = new ToolExecution();
-        execution.setExecutionId(executionId);
-        execution.setUserId(userId);
-        execution.setConversationId(conversationId);
-        execution.setTool(tool);
-        execution.setArgsHash(argsHash(recordId));
-
-        ToolExecutionService.BeginResult begin = executionService.begin(execution);
-        switch (begin.status()) {
-            case REPLAY:
-                return CompleteOutcome.ok(begin.execution().getResult(), true);
-            case IN_PROGRESS:
-                return CompleteOutcome.failure("IN_PROGRESS", "该操作正在执行中，请稍后查询结果");
-            case CONFLICT:
-                return CompleteOutcome.failure("IDEMPOTENCY_CONFLICT",
-                        "同一确认标识对应了不同的操作参数，已拒绝执行");
-            case ACQUIRED:
-                break;
-            default:
-                return CompleteOutcome.failure("IDEMPOTENCY_ERROR", "幂等校验失败");
-        }
-
+    public CompleteOutcome complete(String userId, long recordId) {
         ToolDemoRecord record = recordMapper.selectById(recordId, userId);
         if (record == null) {
-            executionService.fail(userId, executionId, "NOT_FOUND", "记录不存在或无权操作");
             return CompleteOutcome.failure("NOT_FOUND", "记录不存在或无权操作");
         }
         if (ToolDemoRecord.STATUS_DONE.equals(record.getStatus())) {
             String result = "记录 " + recordId + " 已经是完成状态，未重复修改";
-            executionService.succeed(userId, executionId, result);
             return CompleteOutcome.ok(result, true);
         }
         if (recordMapper.markDone(recordId, userId) == 0) {
             // 并发下可能被另一条确认先完成，按"已完成"处理，保持业务幂等
             ToolDemoRecord latest = recordMapper.selectById(recordId, userId);
             if (latest == null || !ToolDemoRecord.STATUS_DONE.equals(latest.getStatus())) {
-                executionService.fail(userId, executionId, "UPDATE_FAILED", "记录状态更新失败");
                 return CompleteOutcome.failure("UPDATE_FAILED", "记录状态更新失败");
             }
         }
         String result = "已将记录 " + recordId + "（" + record.getTitle() + "）标记为完成";
-        executionService.succeed(userId, executionId, result);
-        log.info("[demo-record] completed, user={}, recordId={}, executionTail={}",
-                userId, recordId, idTail(executionId));
+        log.info("[demo-record] completed, user={}, recordId={}", userId, recordId);
         return CompleteOutcome.ok(result, false);
-    }
-
-    /** 参数指纹：同一幂等键换了 recordId 必须被识别出来 */
-    private String argsHash(long recordId) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(digest.digest(
-                    ("recordId=" + recordId).getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException e) {
-            return "recordId=" + recordId;
-        }
-    }
-
-    private String idTail(String id) {
-        if (id == null || id.isBlank()) {
-            return "";
-        }
-        return id.length() <= 8 ? "***" : id.substring(id.length() - 8);
     }
 }

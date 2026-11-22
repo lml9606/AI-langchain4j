@@ -18,6 +18,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
+import java.util.concurrent.Callable;
+
 /**
  * 工具执行器：权限、写契约、参数、限流、隔离线程池、超时、审计统一收口。
  *
@@ -38,6 +40,7 @@ public class ToolExecutor {
     private final ThreadPoolTaskExecutor executor;
     private final AgentProperties properties;
     private final RateLimiter rateLimiter;
+    private final WriteExecutionTemplate writeExecutionTemplate;
     private final ToolExecutionRecorder recorder;
 
     public ToolExecutor(ToolRegistry registry,
@@ -46,12 +49,14 @@ public class ToolExecutor {
                         AgentMetrics metrics,
                         @Qualifier("toolExecutorPool") ThreadPoolTaskExecutor executor,
                         AgentProperties properties,
-                        RateLimiter rateLimiter) {
+                        RateLimiter rateLimiter,
+                        WriteExecutionTemplate writeExecutionTemplate) {
         this.registry = registry;
         this.accessPolicy = accessPolicy;
         this.executor = executor;
         this.properties = properties;
         this.rateLimiter = rateLimiter;
+        this.writeExecutionTemplate = writeExecutionTemplate;
         this.recorder = new ToolExecutionRecorder(auditService, metrics);
     }
 
@@ -114,8 +119,12 @@ public class ToolExecutor {
         // 第六步：隔离线程池 + 超时取消；异常由 BoundedCall 归一，不向图抛裸异常。
         int timeoutMs = definition.timeoutMs() > 0
                 ? definition.timeoutMs() : properties.getTool().getTimeoutMs();
-        BoundedCall.Outcome<ToolResult> outcome = BoundedCall.execute(
-                () -> registered.tool().execute(context, safeArgs), executor, timeoutMs);
+        Callable<ToolResult> call = () -> registered.tool().execute(context, safeArgs);
+        BoundedCall.Outcome<ToolResult> outcome = definition.sideEffect() == ToolSideEffect.READ_ONLY
+                ? BoundedCall.execute(call, executor, timeoutMs)
+                : BoundedCall.execute(
+                        () -> writeExecutionTemplate.execute(context, toolName, safeArgs, call),
+                        executor, timeoutMs);
         ToolResult result = toToolResult(outcome, toolName, timeoutMs, start);
 
         // 第七步：统一记录。record 同时处理指标、审计和日志，任何失败路径都不会漏记。
