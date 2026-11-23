@@ -15,8 +15,7 @@ import java.util.concurrent.TimeoutException;
  * <p>工具执行、模型调用和图执行都需要同一套语义：
  * <ul>
  *   <li>任务提交到指定线程池，保留线程池的 TaskDecorator（traceId / 用户身份透传）；</li>
- *   <li>等待超过预算后 {@code cancel(true)}，尽量中断工作线程；</li>
- *   <li>取消失败说明任务刚好完成，再尝试取回真实结果，避免误报超时；</li>
+ *   <li>等待超过预算后 {@code cancel(true)}，尽量中断工作线程，并统一返回 TIMEOUT；</li>
  *   <li>不向调用方抛裸异常，统一返回 {@link Outcome}，由调用方翻译成自己的结果类型。</li>
  * </ul>
  *
@@ -26,37 +25,6 @@ import java.util.concurrent.TimeoutException;
 public final class BoundedCall {
 
     private BoundedCall() {
-    }
-
-    /** 调用结果状态。REJECTED 表示线程池队列已满，任务从未开始执行。 */
-    public enum Status {
-        SUCCESS,
-        TIMEOUT,
-        REJECTED,
-        INTERRUPTED,
-        FAILED
-    }
-
-    /**
-     * 一次有界调用的结果。
-     *
-     * @param status    结果状态
-     * @param value     成功时的返回值，允许为 null
-     * @param error     失败原因，成功时为 null
-     * @param cancelled 是否成功取消了任务
-     * @param timedOut  是否曾经达到超时边界；为 true 且 success 时表示“超时后取回了晚到结果”
-     * @param elapsedMs 从提交/开始等待到返回结果的墙钟耗时
-     */
-    public record Outcome<T>(Status status,
-                             T value,
-                             Throwable error,
-                             boolean cancelled,
-                             boolean timedOut,
-                             long elapsedMs) {
-
-        public boolean success() {
-            return status == Status.SUCCESS;
-        }
     }
 
     /**
@@ -72,52 +40,35 @@ public final class BoundedCall {
         try {
             executor.execute(task);
         } catch (RejectedExecutionException e) {
-            return new Outcome<>(Status.REJECTED, null, e, false, false, elapsed(start));
+            return new Outcome<>(Status.REJECTED, null, e, false, elapsed(start));
         } catch (RuntimeException e) {
-            return new Outcome<>(Status.FAILED, null, e, false, false, elapsed(start));
+            return new Outcome<>(Status.FAILED, null, e, false, elapsed(start));
         }
-        return await(task, timeoutMs, start);
+        return await(task, timeoutMs);
     }
 
     /**
      * 等待一个已经提交的 Future。
      *
-     * <p>适用于“提交和等待分离”的调用方，例如图执行需要先 submit 再等待；
-     * 语义与 {@link #execute(Callable, Executor, long)} 完全一致。
+     * <p>适用于“提交和等待分离”的调用方，例如图执行需要先 submit 再等待。
+     * 超时后取消并返回 TIMEOUT，不回捞晚到结果；业务补偿由调用方处理。
      */
     public static <T> Outcome<T> await(Future<T> future, long timeoutMs) {
-        return await(future, timeoutMs, System.currentTimeMillis());
-    }
-
-    private static <T> Outcome<T> await(Future<T> future, long timeoutMs, long start) {
+        long start = System.currentTimeMillis();
         try {
             T value = future.get(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
-            return new Outcome<>(Status.SUCCESS, value, null, false, false, elapsed(start));
+            return new Outcome<>(Status.SUCCESS, value, null, false, elapsed(start));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             boolean cancelled = future.cancel(true);
-            return new Outcome<>(Status.INTERRUPTED, null, e, cancelled, false, elapsed(start));
+            return new Outcome<>(Status.INTERRUPTED, null, e, cancelled, elapsed(start));
         } catch (TimeoutException e) {
             boolean cancelled = future.cancel(true);
-            // 任务可能恰好在超时边界完成：cancel=false 时尝试取回真实结果，避免误报超时。
-            if (!cancelled) {
-                try {
-                    T value = future.get(0, TimeUnit.MILLISECONDS);
-                    return new Outcome<>(Status.SUCCESS, value, null, false, true, elapsed(start));
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    return new Outcome<>(Status.INTERRUPTED, null, interrupted, false, true, elapsed(start));
-                } catch (ExecutionException failed) {
-                    return new Outcome<>(Status.FAILED, null, causeOf(failed), false, true, elapsed(start));
-                } catch (Exception ignored) {
-                    // 取消失败但结果仍未就绪，或已被其他线程取消，统一按超时处理。
-                }
-            }
-            return new Outcome<>(Status.TIMEOUT, null, e, cancelled, true, elapsed(start));
+            return new Outcome<>(Status.TIMEOUT, null, e, cancelled, elapsed(start));
         } catch (ExecutionException e) {
-            return new Outcome<>(Status.FAILED, null, causeOf(e), false, false, elapsed(start));
+            return new Outcome<>(Status.FAILED, null, causeOf(e), false, elapsed(start));
         } catch (RuntimeException e) {
-            return new Outcome<>(Status.FAILED, null, e, false, false, elapsed(start));
+            return new Outcome<>(Status.FAILED, null, e, false, elapsed(start));
         }
     }
 
@@ -127,5 +78,29 @@ public final class BoundedCall {
 
     private static long elapsed(long start) {
         return System.currentTimeMillis() - start;
+    }
+
+    /**
+     * 调用结果状态。REJECTED 表示线程池队列已满，任务从未开始执行。
+     */
+    public enum Status {
+        SUCCESS, TIMEOUT, REJECTED, INTERRUPTED, FAILED
+    }
+
+    /**
+     * 一次有界调用的结果。
+     *
+     * @param status    结果状态
+     * @param value     成功时的返回值，允许为 null
+     * @param error     失败原因，成功时为 null
+     * @param cancelled 是否成功取消了任务
+     * @param elapsedMs 从提交/开始等待到返回结果的墙钟耗时
+     */
+    public record Outcome<T>(Status status, T value, Throwable error, boolean cancelled,
+                             long elapsedMs) {
+
+        public boolean success() {
+            return status == Status.SUCCESS;
+        }
     }
 }

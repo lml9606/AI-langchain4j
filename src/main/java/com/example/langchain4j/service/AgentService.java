@@ -86,7 +86,7 @@ public class AgentService {
     /**
      * 注入图执行、会话、限流、审计、模型与确认等编排依赖。
      */
-    public AgentService(@Qualifier("agentGraph") CompiledGraph<WorkflowState> agentGraph,
+    public AgentService(CompiledGraph<WorkflowState> agentGraph,
                         TaskConfirmService taskConfirmService,
                         RateLimiter rateLimiter, SessionLock sessionLock,
                         ConversationService conversationService, QueryRewriter queryRewriter,
@@ -998,10 +998,6 @@ public class AgentService {
         BoundedCall.Outcome<WorkflowState> outcome =
                 BoundedCall.await(future, timeoutSeconds * 1000L);
         if (outcome.status() == BoundedCall.Status.SUCCESS) {
-            if (outcome.timedOut()) {
-                log.info("[agent] confirm completed just after timeout, thread={}",
-                        conversationId);
-            }
             return completeGraph(outcome.value(), conversationId, query, start);
         }
         if (outcome.status() == BoundedCall.Status.INTERRUPTED) {
@@ -1060,10 +1056,6 @@ public class AgentService {
         BoundedCall.Outcome<WorkflowState> outcome =
                 BoundedCall.await(future, timeoutSeconds * 1000L);
         if (outcome.status() == BoundedCall.Status.SUCCESS) {
-            if (outcome.timedOut()) {
-                log.info("[agent] execution completed just after timeout, thread={}",
-                        conversationId);
-            }
             return completeGraph(outcome.value(), conversationId, query, start);
         }
         if (outcome.status() == BoundedCall.Status.INTERRUPTED) {
@@ -1076,7 +1068,7 @@ public class AgentService {
             throw new BizException(ErrorCode.TOO_MANY_REQUESTS, "系统繁忙，请稍后重试");
         }
 
-        // TIMEOUT：cancel 成功，工作线程已停止；返回降级应答保证一问一答闭环。
+        // TIMEOUT：已请求取消，但不保证工作线程立即停止；返回降级应答保证一问一答闭环。
         long costMs = System.currentTimeMillis() - start;
         auditService.record(AuditEntry.text(conversationId, "workflow",
                 GraphExecution.STATUS_FAILED, query, null, "执行超时已中止", costMs, null));

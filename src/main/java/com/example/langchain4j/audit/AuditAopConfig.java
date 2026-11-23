@@ -25,9 +25,13 @@ public class AuditAopConfig {
     @Bean
     public static DefaultAdvisorAutoProxyCreator auditAdvisorAutoProxyCreator() {
         DefaultAdvisorAutoProxyCreator creator = new DefaultAdvisorAutoProxyCreator();
-        creator.setProxyTargetClass(false);
-        // 只应用审计 advisor，避免把事务等其他 Advisor 一并接管导致重复代理
+        // 强制 CGLIB：被代理的 Bean 可能按具体类型注入，JDK 动态代理会导致
+        // "bean is a JDK dynamic proxy" 注入失败。
+        creator.setProxyTargetClass(true);
+        // 只应用审计 advisor。注意 setAdvisorBeanNamePrefix 只设值，必须配合
+        // usePrefix=true 才生效；否则会接管事务等其他 Advisor，给 Bean 套第二层代理。
         creator.setAdvisorBeanNamePrefix("auditStepAdvisor");
+        creator.setUsePrefix(true);
         return creator;
     }
 }

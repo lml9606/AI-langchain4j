@@ -12,12 +12,6 @@ import java.util.List;
  * 工具演示业务服务：读工具的查询源 + 写工具的幂等业务写。
  *
  * <p>写路径只负责业务写入；幂等台账由 {@code WriteExecutionTemplate} 统一包裹：
- * <pre>
- * @Transactional
- *   ├─ 幂等闸门（由 WriteExecutionTemplate 完成）
- *   ├─ 业务写（UPDATE ... WHERE user_id = ?）
- *   └─ 台账 SUCCEEDED/FAILED（由 WriteExecutionTemplate 完成）
- * </pre>
  * 业务服务不再依赖 confirmationId，也不直接操作执行台账。
  */
 @Slf4j

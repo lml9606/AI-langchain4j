@@ -177,11 +177,6 @@ public class ToolExecutor {
                                     int timeoutMs, long start) {
         return switch (outcome.status()) {
             case SUCCESS -> {
-                if (outcome.timedOut()) {
-                    // cancel=false 说明任务恰好在超时边界完成，结果有效，但保留日志便于观察慢工具。
-                    log.warn("[tool] completed just after timeout, name={}, cost={}ms",
-                            toolName, elapsed(start));
-                }
                 ToolResult result = outcome.value();
                 yield result == null
                         ? ToolResult.failure(ToolErrorCode.EMPTY_RESULT.name(),
