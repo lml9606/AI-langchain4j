@@ -284,26 +284,4 @@ public class AgentGraphBuilder {
         return value == null ? "" : String.valueOf(value);
     }
 
-    /**
-     * 确认执行图：用户确认后只跑“执行 → 回答 → 收尾”，不重新做意图识别和规划。
-     * <p>
-     * 独立小图的原因：确认后的计划已经过人工审核，必须严格按 TASK_PLAN 执行，
-     * 不能再让模型重新规划，否则会出现“用户确认 A、系统执行 B”的越权风险。
-     * 该图不挂 checkpointSaver：确认令牌本身一次性，执行结果由 AgentService 落库。
-     */
-    public CompiledGraph<WorkflowState> buildTaskConfirmGraph() {
-        StateGraph<WorkflowState> graph = new StateGraph<>(stateSerializer);
-        try {
-            graph.addNode(NODE_TASK_EXECUTE, audited(NODE_TASK_EXECUTE, taskExecuteNode));
-            graph.addNode(NODE_TASK_ANSWER, audited(NODE_TASK_ANSWER, taskAnswerNode));
-            graph.addNode(NODE_FINALIZE, audited(NODE_FINALIZE, finalizeNode));
-            graph.addEdge(START, NODE_TASK_EXECUTE);
-            graph.addEdge(NODE_TASK_EXECUTE, NODE_TASK_ANSWER);
-            graph.addEdge(NODE_TASK_ANSWER, NODE_FINALIZE);
-            graph.addEdge(NODE_FINALIZE, END);
-            return graph.compile(CompileConfig.builder().recursionLimit(10).build());
-        } catch (GraphStateException e) {
-            throw new IllegalStateException("Task confirm graph assembly failed", e);
-        }
-    }
 }

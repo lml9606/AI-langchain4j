@@ -106,9 +106,9 @@ public class WorkflowState extends AgentState {
     public static final String TASK_CONFIRMATION_REQUIRED = "taskConfirmationRequired";
     /** 确认令牌 ID（TaskConfirmNode 写入，响应透出给前端） */
     public static final String TASK_CONFIRMATION_ID = "taskConfirmationId";
-    /** 本次执行是否已获用户确认（确认执行图入参；普通规划阶段必须为 false） */
+    /** 本次执行是否已获用户确认（确认执行链路入参；普通规划阶段必须为 false） */
     public static final String TASK_APPROVED = "taskApproved";
-    /** 写工具幂等键（确认执行图入参，等于 confirmationId） */
+    /** 写工具幂等键（确认执行链路入参，等于 confirmationId） */
     public static final String TASK_IDEMPOTENCY_KEY = "taskIdempotencyKey";
     /** 固定任务工作流 ID（TaskPlanNode 写入；确认链路据此复核工具契约） */
     public static final String TASK_WORKFLOW_ID = "taskWorkflowId";
@@ -638,7 +638,7 @@ public class WorkflowState extends AgentState {
         return value(TASK_CONFIRMATION_ID, "");
     }
 
-    /** 本次执行是否已获确认（确认执行图入参） */
+    /** 本次执行是否已获确认（确认执行链路入参） */
     public boolean taskApproved() {
         return Boolean.parseBoolean(String.valueOf(value(TASK_APPROVED).orElse(false)));
     }

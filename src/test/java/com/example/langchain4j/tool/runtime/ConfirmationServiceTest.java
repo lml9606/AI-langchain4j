@@ -227,30 +227,45 @@ class ConfirmationServiceTest {
     }
 
     @Test
-    @DisplayName("新消息取消待确认：删除会话令牌并同步取消台账")
-    void cancelPendingDeletesTokenAndLedger() throws Exception {
+    @DisplayName("新消息取消前只读令牌，不提前删除")
+    void findPendingForCancellationDoesNotDeleteToken() throws Exception {
         when(conversationBucket.get()).thenReturn(objectMapper.writeValueAsString(action("demo")));
-        when(toolExecutionService.cancelPendingByConversation("demo", "c1")).thenReturn(1);
 
-        Optional<ConfirmationService.PendingAction> cancelled =
-                service.cancelPending("c1", "demo", "USER_NEW_MESSAGE");
+        Optional<ConfirmationService.PendingAction> pending =
+                service.findPendingForCancellation("c1", "demo");
 
-        assertThat(cancelled).isPresent();
-        assertThat(cancelled.get().confirmationId()).isEqualTo("cfm_1");
-        verify(conversationBucket).delete();
-        verify(toolExecutionService).cancelPendingByConversation("demo", "c1");
+        assertThat(pending).isPresent();
+        assertThat(pending.get().confirmationId()).isEqualTo("cfm_1");
+        verify(conversationBucket, never()).delete();
     }
 
     @Test
-    @DisplayName("新消息取消时 Redis 故障：仍按数据库兜底取消，不阻断新意图")
-    void cancelPendingFallsBackToLedgerWhenRedisFails() {
+    @DisplayName("取消前读取令牌遇到 Redis 故障 -> 返回空，由数据库兜底取消")
+    void findPendingForCancellationFailsOpenWhenRedisFails() {
         when(conversationBucket.get()).thenThrow(new RuntimeException("redis down"));
-        when(toolExecutionService.cancelPendingByConversation("demo", "c1")).thenReturn(1);
 
-        assertThatCode(() -> service.cancelPending("c1", "demo", "USER_NEW_MESSAGE"))
+        assertThatCode(() -> service.findPendingForCancellation("c1", "demo"))
                 .doesNotThrowAnyException();
+    }
 
-        verify(toolExecutionService).cancelPendingByConversation("demo", "c1");
+    @Test
+    @DisplayName("数据库取消提交后按 confirmationId 精准删除旧令牌")
+    void deletePendingIfMatchesDeletesSameToken() throws Exception {
+        when(conversationBucket.get()).thenReturn(objectMapper.writeValueAsString(action("demo")));
+
+        service.deletePendingIfMatches("c1", "demo", "cfm_1");
+
+        verify(conversationBucket).delete();
+    }
+
+    @Test
+    @DisplayName("令牌已被替换 -> 不误删新令牌")
+    void deletePendingIfMatchesSkipsChangedToken() throws Exception {
+        when(conversationBucket.get()).thenReturn(objectMapper.writeValueAsString(action("demo")));
+
+        service.deletePendingIfMatches("c1", "demo", "cfm_new");
+
+        verify(conversationBucket, never()).delete();
     }
 
     @Test

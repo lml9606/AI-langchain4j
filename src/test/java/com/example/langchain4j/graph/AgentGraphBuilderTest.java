@@ -82,7 +82,6 @@ class AgentGraphBuilderTest {
         assertThat(AgentGraphBuilder.NODE_INTENT_PLAN).isEqualTo("intent_plan");
         assertThat(AgentGraphBuilder.NODE_RETRIEVAL_PROBE).isEqualTo("retrieval_probe");
         assertThat(AgentGraphBuilder.NODE_RETRIEVAL_FULL).isEqualTo("retrieval_full");
-        assertThat(builder.buildTaskConfirmGraph()).isNotNull();
     }
 
     @Test

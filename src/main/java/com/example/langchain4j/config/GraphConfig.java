@@ -80,13 +80,4 @@ public class GraphConfig {
         return builder.build(checkpointSaver);
     }
 
-    /**
-     * 确认执行图：用户确认写操作后只跑执行/回答/收尾，不重新规划。
-     * 不挂 checkpoint：确认令牌本身是一次性执行凭证，失败后应重新规划而不是重放旧写操作。
-     */
-    @Bean("taskConfirmGraph")
-    public CompiledGraph<WorkflowState> taskConfirmGraph(AgentGraphBuilder builder) {
-        return builder.buildTaskConfirmGraph();
-    }
-
 }

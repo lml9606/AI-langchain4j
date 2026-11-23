@@ -27,7 +27,7 @@ import java.util.Map;
 /**
  * 写操作确认节点：不执行工具，只生成一次性确认令牌和确认话术。
  * <p>
- * 真正的执行发生在 POST /api/agent/confirm 之后，由确认执行图携带 approved=true 完成；
+ * 真正的执行发生在 POST /api/agent/confirm 之后，由确认执行链路携带 approved=true 完成；
  * 这样规划阶段即使被 prompt injection 诱导，也无法直接修改业务数据。
  */
 @Slf4j

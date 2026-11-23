@@ -10,7 +10,7 @@
 | 规划 | `TaskPlanNode` 先选固定 `TaskWorkflow`，再只在该工作流的工具契约内抽取实体、判断缺参并填参 |
 | 澄清 | 缺参时不调用工具，直接生成追问并结束本轮 |
 | 工具权限 | 三层校验：规划头节点整组预检 → 每个执行步骤前复核 → `ToolExecutor` 最终校验（角色/写开关/确认/Schema/超时/限流） |
-| 写操作确认 | 规划阶段生成 `pendingAction` + 一次性 `confirmationId`，并写 `ai_tool_execution=PENDING`；用户确认后由独立执行图落库并流转台账 |
+| 写操作确认 | 规划阶段生成 `pendingAction` + 一次性 `confirmationId`，并写 `ai_tool_execution=PENDING`；用户确认后由 `TaskConfirmService` 直接推进任务并流转台账 |
 | 多步骤执行 | `ai_task_run` + `ai_task_step` 记录任务游标和每步结果；只读步骤先执行，写步骤批量确认后串行推进 |
 | 步骤级幂等 | 写步骤使用 `runId:stepNo` 作为幂等键；重新确认不会重复执行已成功步骤 |
 | 失败续跑 | 某步失败后后续步骤标记 `SKIPPED`，重试时恢复并从失败步骤继续；租约过期由恢复 worker 接管 |
@@ -29,8 +29,8 @@ START → entry → intent ──task──→ task_plan ──缺参──→ f
                                               ├──有未确认写步骤──→ task_confirm → finalize → END
                                               └──无写步骤────────→ task_answer → finalize → END
 
-用户确认后独立执行图：
-START → task_execute（approved=true，执行剩余写步骤）→ task_answer → finalize → END
+用户确认后直接执行（不重新建图）：
+task_execute（approved=true，执行剩余写步骤）→ task_answer → finalize
 intent ──knowledge_qa/code_generate──→ retrieval_probe ──证据不足──→ retrieval_full → generate → validate → finalize
 ```
 
@@ -105,7 +105,7 @@ TaskWorkflow myWorkflow() {
 
 确认阶段：POST /api/agent/confirm（conversationId + confirmationId + approved）
           → 校验会话归属 → 严格会话锁内只读一次当前动作
-          → 任务存在时以 ai_task_run 为事实源，approved=true 进入确认图
+          → 任务存在时以 ai_task_run 为事实源，approved=true 进入确认执行链路
           → TaskRunExecutor 获取执行租约，恢复 SKIPPED 步骤，从当前游标继续；每步续租
           → ToolExecutor 二次校验注册表 + approved + JSON Schema 参数
           → 写步骤按 runId:stepNo 幂等；失败即停，后续步骤 SKIPPED
@@ -154,7 +154,7 @@ agent.task.recovery.batch-size=10
 src/main/java/com/example/langchain4j
 ├── graph/task/nodes/        任务规划、确认、执行、回答四个图节点
 ├── graph/qa/nodes/          知识问答主图节点（入口、意图、检索、生成、校验等）
-├── graph/common/nodes/      主图与任务确认图共用的收尾节点
+├── graph/common/nodes/      主图与确认执行链路共用的收尾节点
 ├── task/                    任务租约过期恢复 worker
 ├── tool/
 │   ├── api/                 工具契约：AgentTool、ToolDefinition、ToolContext、ToolResult 等

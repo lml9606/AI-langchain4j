@@ -213,52 +213,68 @@ public class ConfirmationService {
     }
 
     /**
-     * 新用户消息到达：当前会话的旧待确认动作视为放弃。
-     *
-     * <p>先删 Redis 令牌，再按会话兜底取消数据库 PENDING 台账。这样即使 Redis
-     * 令牌已过期/丢失，也不会留下"用户已经改主意、台账却还在等待确认"的悬空记录。
-     *
-     * <p>Redis 读失败不阻断新消息：新意图优先，数据库取消仍会执行。返回的 action
-     * 仅用于调用方记录被放弃的具体动作；没有可读令牌时为空。
+     * 新消息取消旧确认前读取令牌：只读、不删除。
+     * <p>Redis 读失败返回空，不阻断数据库取消；真正的删除在数据库事务提交后执行。
      */
-    public Optional<PendingAction> cancelPending(String conversationId, String userId,
-                                                 String reason) {
+    public Optional<PendingAction> findPendingForCancellation(String conversationId,
+                                                              String userId) {
         if (conversationId == null || conversationId.isBlank()
                 || userId == null || userId.isBlank()) {
             return Optional.empty();
         }
-        PendingAction cancelled = null;
-        RBucket<String> bucket = conversationBucket(conversationId);
         try {
-            String json = bucket.get();
-            if (json != null && !json.isBlank()) {
-                PendingAction action = objectMapper.readValue(json, PendingAction.class);
-                if (userId.equals(action.userId())) {
-                    cancelled = action;
-                    bucket.delete();
-                } else {
-                    log.warn("[confirm] cancel skipped, user mismatch, conversation={}",
-                            conversationId);
-                }
+            String json = conversationBucket(conversationId).get();
+            if (json == null || json.isBlank()) {
+                return Optional.empty();
             }
+            PendingAction action = objectMapper.readValue(json, PendingAction.class);
+            if (!userId.equals(action.userId())) {
+                log.warn("[confirm] cancel skipped, user mismatch, conversation={}",
+                        conversationId);
+                return Optional.empty();
+            }
+            return Optional.of(action);
         } catch (Exception e) {
-            // 新消息优先：Redis 不可用时继续走数据库兜底，不让会话卡死
-            log.warn("[confirm] cancel read failed, continue db fallback, conversation={}: {}",
+            log.warn("[confirm] cancel read failed, continue db cancel, conversation={}: {}",
+                    conversationId, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 数据库取消提交后精准删除旧令牌。
+     * <p>先比对 confirmationId 与 userId，避免误删期间新创建的令牌；Redis 删除失败只告警，
+     * 数据库已是 CANCELLED，确认链路会拒绝执行，令牌由 TTL 兜底过期。
+     */
+    public void deletePendingIfMatches(String conversationId, String userId,
+                                       String confirmationId) {
+        if (conversationId == null || conversationId.isBlank()
+                || userId == null || userId.isBlank()
+                || confirmationId == null || confirmationId.isBlank()) {
+            return;
+        }
+        try {
+            RBucket<String> bucket = conversationBucket(conversationId);
+            String json = bucket.get();
+            if (json == null || json.isBlank()) {
+                return;
+            }
+            PendingAction current = objectMapper.readValue(json, PendingAction.class);
+            if (!confirmationId.equals(current.confirmationId())) {
+                log.warn("[confirm] skip token delete, confirmation changed, conversation={}",
+                        conversationId);
+                return;
+            }
+            if (!userId.equals(current.userId())) {
+                log.warn("[confirm] skip token delete, user mismatch, conversation={}",
+                        conversationId);
+                return;
+            }
+            bucket.delete();
+        } catch (Exception e) {
+            log.warn("[confirm] token delete failed after db cancel, wait ttl, conversation={}: {}",
                     conversationId, e.getMessage());
         }
-        try {
-            int changed = toolExecutionService.cancelPendingByConversation(userId, conversationId);
-            if (cancelled != null || changed > 0) {
-                log.info("[confirm] cancelled by new message, conversation={}, idTail={}, "
-                                + "reason={}, ledgerChanged={}", conversationId,
-                        cancelled == null ? "" : idTail(cancelled.confirmationId()), reason,
-                        changed);
-            }
-        } catch (Exception e) {
-            log.warn("[confirm] cancel ledger failed, conversation={}, reason={}: {}",
-                    conversationId, reason, e.getMessage());
-        }
-        return Optional.ofNullable(cancelled);
     }
 
     /**

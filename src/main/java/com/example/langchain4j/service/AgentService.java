@@ -46,6 +46,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Supplier;
 
 /**
  * Agent 编排服务：限流 → 会话 → 锁 → 图执行 → 审计 → 响应组装。
@@ -63,7 +64,7 @@ import java.util.concurrent.RejectedExecutionException;
 public class AgentService {
 
     private final CompiledGraph<WorkflowState> agentGraph;
-    private final CompiledGraph<WorkflowState> taskConfirmGraph;
+    private final TaskConfirmService taskConfirmService;
     private final RateLimiter rateLimiter;
     private final SessionLock sessionLock;
     private final ConversationService conversationService;
@@ -78,6 +79,7 @@ public class AgentService {
     private final AgentMetrics metrics;
     private final PromptTemplateService promptTemplateService;
     private final ConfirmationService confirmationService;
+    private final ConfirmationCancellationService confirmationCancellationService;
     private final ToolExecutionService toolExecutionService;
     private final TaskRunService taskRunService;
 
@@ -85,7 +87,7 @@ public class AgentService {
      * 注入图执行、会话、限流、审计、模型与确认等编排依赖。
      */
     public AgentService(@Qualifier("agentGraph") CompiledGraph<WorkflowState> agentGraph,
-                        @Qualifier("taskConfirmGraph") CompiledGraph<WorkflowState> taskConfirmGraph,
+                        TaskConfirmService taskConfirmService,
                         RateLimiter rateLimiter, SessionLock sessionLock,
                         ConversationService conversationService, QueryRewriter queryRewriter,
                         SegmentService segmentService, AuditService auditService,
@@ -94,10 +96,11 @@ public class AgentService {
                         AgentProperties properties, AgentMetrics metrics,
                         PromptTemplateService promptTemplateService,
                         ConfirmationService confirmationService,
+                        ConfirmationCancellationService confirmationCancellationService,
                         ToolExecutionService toolExecutionService,
                         TaskRunService taskRunService) {
         this.agentGraph = agentGraph;
-        this.taskConfirmGraph = taskConfirmGraph;
+        this.taskConfirmService = taskConfirmService;
         this.rateLimiter = rateLimiter;
         this.sessionLock = sessionLock;
         this.conversationService = conversationService;
@@ -112,6 +115,7 @@ public class AgentService {
         this.metrics = metrics;
         this.promptTemplateService = promptTemplateService;
         this.confirmationService = confirmationService;
+        this.confirmationCancellationService = confirmationCancellationService;
         this.toolExecutionService = toolExecutionService;
         this.taskRunService = taskRunService;
     }
@@ -147,16 +151,8 @@ public class AgentService {
         //    否则上一轮释放锁后、下一轮先读到历史时，上一轮回答尚未落库，
         //    会造成乱序（userA → userB → assistantA）与上下文丢失。
         WorkflowState state = sessionLock.executeWithLock(conversationId, () -> {
-            // 新用户消息视为放弃旧确认：先取消旧令牌/台账，再按新意图执行。
-            confirmationService.cancelPending(conversationId, userId, "USER_NEW_MESSAGE");
-            try {
-                // 旧确认令牌删除后，任务表也必须同步取消；否则 ai_task_run 会一直停在
-                // WAITING_CONFIRM，任务进度接口和恢复 worker 都会看到一条永远不结束的任务。
-                taskRunService.cancelByConversation(userId, conversationId);
-            } catch (RuntimeException e) {
-                log.warn("[agent] cancel stale task runs failed, conversation={}, reason={}",
-                        conversationId, e.getMessage());
-            }
+            // 新用户消息视为放弃旧确认：数据库先取消并提交，最后才清理 Redis 令牌。
+            confirmationCancellationService.cancelByNewMessage(conversationId, userId);
             WorkflowState result =
                     prepareAndInvoke(conversationId, userId, query, model, answerMode, visibility);
             // 助手消息持久化（结果已生成，落库失败降级不阻断响应）；
@@ -201,7 +197,7 @@ public class AgentService {
      *   <li>{@code preview} 只读校验令牌，不消耗；</li>
      *   <li>会话归属校验；</li>
      *   <li>严格会话锁内再次校验令牌：使用 Watchdog 自动续期，Redis 故障 fail-closed；</li>
-     *   <li>执行确认图：写工具在同一数据库事务里写业务数据 + 执行台账；</li>
+     *   <li>确认后直接推进任务：写工具在同一数据库事务里写业务数据 + 执行台账；</li>
      *   <li>成功 {@code finish} 删除令牌；失败保留令牌供重试。</li>
      * </ol>
      *
@@ -230,7 +226,7 @@ public class AgentService {
             }
             ConfirmationService.PendingAction action = current.get();
             // 自动取消后 Redis 令牌可能尚未删除（例如删除失败/Redis 恢复后旧值仍在）：
-            // 任务或台账已 CANCELLED 时不能再执行确认图，直接按幂等重放返回取消结果。
+            // 任务或台账已 CANCELLED 时不能再进入确认执行链路，直接按幂等重放返回取消结果。
             TaskRun currentRun = action.runId().isBlank() ? null
                     : taskRunService.find(userId, action.runId()).orElse(null);
             ToolExecution currentExecution = action.runId().isBlank()
@@ -358,7 +354,7 @@ public class AgentService {
     }
 
     /**
-     * 执行路径：执行确认图，并以数据库台账判定成败。
+     * 执行路径：按已确认计划推进任务，并以数据库台账判定成败。
      *
      * <p>成功（台账 SUCCEEDED）删除令牌；失败或没有台账时保留令牌，
      * 用户可以用同一个 confirmationId 重试。重复执行由台账唯一键拦截。
@@ -370,7 +366,7 @@ public class AgentService {
         try {
             conversationService.saveMessage(action.conversationId(), Message.ROLE_USER,
                     confirmQuery, action.model(), null);
-            WorkflowState state = invokeTaskConfirmGraph(action, userId, confirmQuery);
+            WorkflowState state = invokeTaskConfirm(action, userId, confirmQuery, start);
             // 多步骤任务以 ai_task_run 为事实源；旧版单写继续用 ai_tool_execution。
             run = action.runId().isBlank() ? null
                     : taskRunService.find(userId, action.runId()).orElse(null);
@@ -383,7 +379,7 @@ public class AgentService {
             boolean succeeded = run != null
                     ? run.getStatus() == TaskRun.Status.SUCCEEDED
                     : execution != null && execution.getStatus() == ToolExecution.Status.SUCCEEDED;
-            // 成败以台账为准：工具失败但图正常返回时，不能把令牌当成已消费
+            // 成败以台账为准：工具失败但确认执行链路正常返回时，不能把令牌当成已消费
             if (succeeded) {
                 // 令牌先完成：即使后续消息落库失败，客户端用同一 ID 重试也只会拿到台账里的同一结果
                 confirmationService.finish(action.conversationId(), action.confirmationId());
@@ -612,34 +608,15 @@ public class AgentService {
     }
 
     /**
-     * 确认执行图入参：只带已确认计划与授权标记，不重新走 intent/task_plan
+     * 确认执行入口：不再进入独立确认图，直接按已确认计划推进任务。
+     * <p>
+     * 执行事实以 ai_task_run / ai_task_step 为准；TaskConfirmService 只顺序调用
+     * 执行、回答、收尾三个节点，保留审计和整体超时边界。
      */
-    private WorkflowState invokeTaskConfirmGraph(ConfirmationService.PendingAction action,
-                                                 String userId, String query) {
-        Map<String, Object> inputs = new LinkedHashMap<>();
-        inputs.put(WorkflowState.QUERY, query);
-        inputs.put(WorkflowState.MODEL, action.model());
-        inputs.put(WorkflowState.USER_ID, userId);
-        inputs.put(WorkflowState.CONVERSATION_ID, action.conversationId());
-        // 置信度透出依赖 intent=task；确认图不跑 IntentPlanNode，这里显式补齐
-        inputs.put(WorkflowState.INTENT, QaIntent.TASK);
-        inputs.put(WorkflowState.TASK_PLAN, action.plan());
-        action.plan().stream().findFirst()
-                .map(step -> step.get("workflowId"))
-                .filter(value -> value != null && !String.valueOf(value).isBlank())
-                .ifPresent(value -> inputs.put(WorkflowState.TASK_WORKFLOW_ID,
-                        String.valueOf(value)));
-        inputs.put(WorkflowState.TASK_APPROVED, true);
-        inputs.put(WorkflowState.TASK_IDEMPOTENCY_KEY, action.confirmationId());
-        if (!action.runId().isBlank()) {
-            inputs.put(WorkflowState.TASK_RUN_ID, action.runId());
-            inputs.put(WorkflowState.TASK_RUN_STATUS, TaskRun.Status.RUNNING.name());
-        }
-        inputs.put(WorkflowState.TASK_PENDING_ACTION, Map.of());
-        inputs.put(WorkflowState.TASK_CONFIRMATION_REQUIRED, false);
-        RunnableConfig config = RunnableConfig.builder().threadId(action.conversationId()).build();
-        long start = System.currentTimeMillis();
-        return executeConfirmGraphWithTimeout(taskConfirmGraph, inputs, config,
+    private WorkflowState invokeTaskConfirm(ConfirmationService.PendingAction action,
+                                            String userId, String query, long start) {
+        return executeConfirmWithTimeout(
+                () -> taskConfirmService.execute(action, userId, query),
                 action.conversationId(), query, start);
     }
 
@@ -841,17 +818,32 @@ public class AgentService {
     }
 
     /**
-     * 锁内准备并执行图（同步路径）：保存用户消息 → 双视图装配 → 改写 → 图执行。
+     * 锁内准备并执行图（同步路径）：保存用户消息 → 双视图装配 → 改写/话题归属 → 图执行。
      *
-     * @param conversationId 会话 ID（threadId）
-     * @param userId         当前用户 ID（需要按用户隔离数据的节点使用）
-     * @param query          原始用户输入
-     * @param model          本轮模型名（已解析）
-     * @return 图执行最终状态
+     * <p>调用约束：必须已在 {@code sessionLock.executeWithLock(...)} 内调用。<br>
+     * 会话锁覆盖“用户消息落库 → 图执行 → 助手消息落库”整轮闭环，保证同一会话
+     * 不会并发进入，也不会出现上一轮回答尚未落库、下一轮就读历史的乱序问题。
+     *
+     * <p>职责边界：
+     * <ul>
+     *   <li>不处理限流、输入清洗、模型解析、会话创建——这些已在 chat() 入口完成；</li>
+     *   <li>不负责助手消息落库、指标上报、转人工建单，由调用方拿到结果后处理；</li>
+     *       其他异常转成业务错误码抛出。</li>
+     * </ul>
+     *
+     * @param conversationId 会话 ID（同时作为 LangGraph threadId 与 checkpoint 隔离维度）
+     * @param userId         当前用户 ID（入图后按用户隔离知识库与工具数据）
+     * @param query          清洗后的原始用户输入（用于落库、改写与审计）
+     * @param model          本轮模型名（已由 ModelRegistry 解析）
+     * @param answerMode     回答模式（已归一，白名单外回默认）
+     * @param visibility     检索可见范围（已归一，白名单外回默认）
+     * @return 图执行最终状态；超时路径返回 {@code fallback=true} 的降级状态
      */
     private WorkflowState prepareAndInvoke(String conversationId, String userId, String query,
                                            String model, String answerMode, String visibility) {
+        // 步骤1：锁内准备本轮上下文：落用户消息、装配改写/生成双视图、改写与话题段归属、写改写审计
         PreparedTurn turn = prepareTurn(conversationId, query, model);
+        // 步骤2：把原始输入、改写句、生成视图交给完整图执行（意图 → 检索/工具 → 生成 → 校验 → 收尾）
         return invokeGraph(conversationId, userId, query, turn.rewrite().rewritten(),
                 turn.history(), turn.summary(), model, answerMode, visibility);
     }
@@ -994,17 +986,15 @@ public class AgentService {
     }
 
     /**
-     * 确认图有界执行：写链路同样必须有整体超时。
+     * 确认执行有界执行：写链路同样必须有整体超时。
      * <p>超时不能伪装成业务失败：写步骤可能已经提交，任务台账会保留 RUNNING，
      * 由恢复 worker 完成并补偿会话回复。调用方收到“执行中”后应查询任务状态。
      */
-    private WorkflowState executeConfirmGraphWithTimeout(CompiledGraph<WorkflowState> graph,
-                                                         Map<String, Object> inputs,
-                                                         RunnableConfig config,
-                                                         String conversationId, String query,
-                                                         long start) {
+    private WorkflowState executeConfirmWithTimeout(Supplier<WorkflowState> task,
+                                                    String conversationId, String query,
+                                                    long start) {
         long timeoutSeconds = Math.max(10, properties.getConfirmTimeoutSeconds());
-        Future<WorkflowState> future = submitGraph(graph, inputs, config, conversationId);
+        Future<WorkflowState> future = submitTask(task, conversationId);
         BoundedCall.Outcome<WorkflowState> outcome =
                 BoundedCall.await(future, timeoutSeconds * 1000L);
         if (outcome.status() == BoundedCall.Status.SUCCESS) {
@@ -1045,8 +1035,14 @@ public class AgentService {
     private Future<WorkflowState> submitGraph(CompiledGraph<WorkflowState> graph,
                                               Map<String, Object> inputs, RunnableConfig config,
                                               String conversationId) {
+        return submitTask(() -> graph.invoke(inputs, config).orElse(null), conversationId);
+    }
+
+    /** 统一提交任务到专用线程池；图执行与确认执行共用同一拒绝策略。 */
+    private Future<WorkflowState> submitTask(Supplier<WorkflowState> task,
+                                             String conversationId) {
         try {
-            return agentExecutor.submit(() -> graph.invoke(inputs, config).orElse(null));
+            return agentExecutor.submit(task::get);
         } catch (RejectedExecutionException e) {
             log.warn("[agent] executor overloaded, reject request, thread={}", conversationId);
             throw new BizException(ErrorCode.TOO_MANY_REQUESTS, "系统繁忙，请稍后重试");
@@ -1056,7 +1052,6 @@ public class AgentService {
     /**
      * 等待结果；超时、取消、异常归一由 {@link BoundedCall} 统一处理。
      *
-     * <p>提交阶段仍由 {@link #submitGraph} 负责队列满转 429；这里只把通用 Outcome
      * 翻译成图执行语义：成功完成、超时降级、中断、失败。
      */
     private WorkflowState awaitGraph(Future<WorkflowState> future, long timeoutSeconds,
