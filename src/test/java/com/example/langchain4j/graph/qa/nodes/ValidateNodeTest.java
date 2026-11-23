@@ -141,4 +141,14 @@ class ValidateNodeTest {
         assertThat(updates.get(WorkflowState.FINAL_CONFIDENCE)).isEqualTo(0.8);
         verifyNoInteractions(llmGateway);
     }
+
+    @Test
+    @DisplayName("正常致歉表达不应被关键词黑名单误杀")
+    void apologyPhraseIsNotFormatFailure() {
+        Map<String, Object> updates = node.apply(
+                stateOf("抱歉，我暂时无法确认这个细节，建议您提供更多上下文。",
+                        QaIntent.CHITCHAT));
+
+        assertThat(validationOf(updates).validated()).isTrue();
+    }
 }

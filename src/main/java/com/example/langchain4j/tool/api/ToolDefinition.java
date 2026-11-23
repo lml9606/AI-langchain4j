@@ -1,6 +1,7 @@
 package com.example.langchain4j.tool.api;
 
 import java.util.Set;
+import java.util.Locale;
 import java.util.stream.Collectors;
 
 /**
@@ -43,7 +44,7 @@ public record ToolDefinition(String name,
             allowedRoles = allowedRoles == null ? Set.of() : allowedRoles.stream()
                     .filter(role -> role != null && !role.isBlank())
                     .map(String::trim)
-                    .map(String::toUpperCase)
+                    .map(role -> role.toUpperCase(Locale.ROOT))
                     .collect(Collectors.toUnmodifiableSet());
         }
 
@@ -52,7 +53,11 @@ public record ToolDefinition(String name,
         }
 
         public boolean allowsRole(String role) {
-            return allowedRoles.isEmpty() || (role != null && allowedRoles.contains(role));
+            if (allowedRoles.isEmpty()) {
+                return true;
+            }
+            String normalized = role == null ? "" : role.trim().toUpperCase(Locale.ROOT);
+            return !normalized.isEmpty() && allowedRoles.contains(normalized);
         }
     }
 }

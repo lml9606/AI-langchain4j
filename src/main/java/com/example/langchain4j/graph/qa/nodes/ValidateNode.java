@@ -151,8 +151,9 @@ public class ValidateNode implements NodeAction<WorkflowState> {
                 && trimmed.length() < properties.getLimits().getMinResultLength()) {
             return false;
         }
-        return !trimmed.contains("抱歉，我暂时无法")
-                && !trimmed.contains("I apologize");
+        // 不做“致歉短语”黑名单：正常回答也可能礼貌表达不确定。
+        // 真正的模型失败由生成节点抛错并走 fallback，不能靠关键词猜测。
+        return true;
     }
 
     private record QaResult(boolean valid, String issue, String reason) {

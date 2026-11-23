@@ -161,7 +161,11 @@ public class SummaryService {
         String userPrompt = "已有摘要：\n" + (segment.getContent().isBlank() ? "（无）" : segment.getContent())
                 + "\n\n" + sb;
         // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
-        String output = llmGateway.generate(LlmRequest.of(properties.getLlm().getDefaultModel(),
+        String summaryModel = properties.getHistory().getSummaryModel();
+        if (summaryModel == null || summaryModel.isBlank()) {
+            summaryModel = properties.getLlm().getDefaultModel();
+        }
+        String output = llmGateway.generate(LlmRequest.of(summaryModel,
                 promptTemplateService.resolve("SUMMARY_SYSTEM", PromptTemplates.SUMMARY_SYSTEM),
                 userPrompt).scene("summary")).text();
         if (output == null) {

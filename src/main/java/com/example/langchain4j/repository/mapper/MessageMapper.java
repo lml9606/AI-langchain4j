@@ -14,6 +14,9 @@ public interface MessageMapper {
 
     int insert(Message message);
 
+    /** 按幂等键查已落库消息；用于并发插入冲突后取回既有记录。 */
+    Message selectByDedupeKey(@Param("dedupeKey") String dedupeKey);
+
     List<Message> selectByConversationId(@Param("conversationId") String conversationId,
                                          @Param("limit") int limit);
 

@@ -60,6 +60,7 @@ public class TaskRunService {
         run.setWorkflowId(workflowId == null ? "" : workflowId);
         run.setStatus(TaskRun.Status.PLANNING);
         run.setCurrentStep(0);
+        run.setReplySaved(false);
         run.setPlanJson(planJson);
         run.setPlanHash(sha256(planJson));
         runMapper.insert(run);
@@ -138,6 +139,12 @@ public class TaskRunService {
         runMapper.saveResult(userId, runId, result);
     }
 
+    /** 标记会话回答已补偿；重复调用幂等。 */
+    @Transactional
+    public void markReplySaved(String userId, String runId) {
+        runMapper.markReplySaved(userId, runId);
+    }
+
     @Transactional
     public void cancelByConversation(String userId, String conversationId) {
         int changed = runMapper.markCancelledByConversation(userId, conversationId);
@@ -191,6 +198,10 @@ public class TaskRunService {
 
     public List<TaskRun> findLeaseExpired(int limit) {
         return runMapper.findLeaseExpired(Math.max(1, limit));
+    }
+
+    public List<TaskRun> findUnreplied(int limit) {
+        return runMapper.findUnreplied(Math.max(1, limit));
     }
 
     // ---- 步骤状态：集中封装，避免执行器散落 SQL 语义 ----

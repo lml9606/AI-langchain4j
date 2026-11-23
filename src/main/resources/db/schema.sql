@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS ai_message (
     model           VARCHAR(64),
     token_usage     INTEGER,                               -- 该条消息消耗 token 数
     segment_id      INTEGER,                               -- 话题段归属（user 落库后回填；assistant 继承同轮 user）
+    dedupe_key      VARCHAR(160),                          -- 系统消息幂等键（恢复补偿等）；普通对话为空
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_message_conversation ON ai_message (conversation_id, id);
@@ -49,6 +50,9 @@ ALTER TABLE ai_message ADD COLUMN IF NOT EXISTS segment_id INTEGER;
 -- 已存在表补列（幂等）：assistant 消息的检索上下文快照（截断存储），
 -- 改写视图锚定资料原文用（追问指代消解不锚定可能带偏的生成答案）；user 消息为空
 ALTER TABLE ai_message ADD COLUMN IF NOT EXISTS context TEXT;
+ALTER TABLE ai_message ADD COLUMN IF NOT EXISTS dedupe_key VARCHAR(160);
+-- 系统消息幂等键：多个恢复实例并发补偿同一任务时，最多落一条助手回复；NULL 不参与唯一约束
+CREATE UNIQUE INDEX IF NOT EXISTS uk_message_dedupe ON ai_message (dedupe_key);
 
 -- 会话段摘要表（话题段索引：不存对话内容，只记段的 topic/摘要/起点/摘要进度，
 -- 消息内容全在 ai_message，靠消息的 segment_id 与段号关联）
@@ -241,6 +245,7 @@ CREATE TABLE IF NOT EXISTS ai_task_run (
     plan_hash       VARCHAR(64),                           -- 计划指纹：确认后参数被篡改会被发现
     confirmation_id VARCHAR(128),                          -- 批量确认 ID（一个 run 一个）
     result          TEXT,                                  -- 最终回答快照（确认重放时原样返回）
+      reply_saved     BOOLEAN      NOT NULL DEFAULT TRUE,    -- 终态回答是否已补偿到会话消息；新 run 由 mapper 显式写 false
     lease_owner     VARCHAR(64),                           -- 执行租约持有者（多实例防重复跑）
     lease_until     TIMESTAMPTZ,                           -- 租约到期时间
     error_code      VARCHAR(64),
@@ -249,6 +254,8 @@ CREATE TABLE IF NOT EXISTS ai_task_run (
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 ALTER TABLE ai_task_run ADD COLUMN IF NOT EXISTS result TEXT;
+-- 存量任务默认视为已回复，避免升级后恢复 worker 给历史任务补发消息
+ALTER TABLE ai_task_run ADD COLUMN IF NOT EXISTS reply_saved BOOLEAN NOT NULL DEFAULT TRUE;
 CREATE INDEX IF NOT EXISTS idx_task_run_user ON ai_task_run (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_task_run_conversation ON ai_task_run (conversation_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_task_run_status ON ai_task_run (status, updated_at);

@@ -46,24 +46,39 @@ public class ConversationService {
      */
     @Transactional(rollbackFor = Exception.class)
     public String ensureConversation(String userId, String conversationId, String firstQuery) {
-        if (conversationId != null && !conversationId.isBlank()) {
-            Conversation existing = conversationMapper.selectByConversationId(conversationId);
+        String requestedId = conversationId == null || conversationId.isBlank()
+                ? null : conversationId;
+        if (requestedId != null) {
+            Conversation existing = conversationMapper.selectByConversationId(requestedId);
             if (existing != null) {
                 if (!userId.equals(existing.getUserId())) {
-                    log.warn("[conversation] forbid cross-user access, conversation={}, user={}", conversationId, userId);
+                    log.warn("[conversation] forbid cross-user access, conversation={}, user={}",
+                            requestedId, userId);
                     throw new BizException(ErrorCode.FORBIDDEN, "无权访问该会话");
                 }
                 return existing.getConversationId();
             }
-            // 传入的会话不存在：按新会话处理（防御脏参数）
-            log.warn("[conversation] conversationId not found, create new: {}", conversationId);
+            // 外部传入了会话 ID 但库里没有：用同一个 ID 幂等补建，避免每次请求都新建会话导致历史丢失。
+            log.warn("[conversation] conversationId not found, bootstrap with same id: {}",
+                    requestedId);
         }
         Conversation conversation = new Conversation();
-        conversation.setConversationId(UUID.randomUUID().toString().replace("-", ""));
+        conversation.setConversationId(requestedId != null ? requestedId
+                : UUID.randomUUID().toString().replace("-", ""));
         conversation.setUserId(userId);
         conversation.setTitle(deriveTitle(firstQuery));
         conversation.setStatus(Conversation.STATUS_ACTIVE);
         conversationMapper.insert(conversation);
+        // 并发补建时另一请求可能先插入；ON CONFLICT + 重查保证同一 ID 只对应一个会话。
+        Conversation persisted = conversationMapper.selectByConversationId(conversation.getConversationId());
+        if (persisted != null) {
+            if (!userId.equals(persisted.getUserId())) {
+                log.warn("[conversation] concurrent owner conflict, conversation={}, user={}",
+                        persisted.getConversationId(), userId);
+                throw new BizException(ErrorCode.FORBIDDEN, "无权访问该会话");
+            }
+            return persisted.getConversationId();
+        }
         return conversation.getConversationId();
     }
 
@@ -90,6 +105,18 @@ public class ConversationService {
     @Transactional(rollbackFor = Exception.class)
     public Message saveMessage(String conversationId, String role, String content,
                                String model, Integer tokenUsage, String context) {
+        return saveMessage(conversationId, role, content, model, tokenUsage, context, null);
+    }
+
+    /**
+     * 带幂等键的消息写入：唯一键冲突时返回已存在的同键消息。
+     * <p>用于恢复 worker 补发回答。Redis 会话锁 fail-open、多个实例同时补偿时，
+     * 数据库唯一键仍能保证同一任务最多产生一条回复。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public Message saveMessage(String conversationId, String role, String content,
+                               String model, Integer tokenUsage, String context,
+                               String dedupeKey) {
         Message message = new Message();
         message.setConversationId(conversationId);
         message.setRole(role);
@@ -97,10 +124,19 @@ public class ConversationService {
         message.setModel(model);
         message.setTokenUsage(tokenUsage);
         message.setContext(context);
+        String normalizedKey = dedupeKey == null || dedupeKey.isBlank() ? null : dedupeKey.trim();
+        message.setDedupeKey(normalizedKey);
         if (Message.ROLE_ASSISTANT.equals(role)) {
             message.setSegmentId(messageMapper.selectLatestUserSegmentId(conversationId));
         }
         messageMapper.insert(message);
+        if (normalizedKey != null && message.getId() == null) {
+            Message persisted = messageMapper.selectByDedupeKey(normalizedKey);
+            if (persisted == null) {
+                throw new BizException(ErrorCode.DB_UNAVAILABLE, "消息幂等写入失败");
+            }
+            return persisted;
+        }
         return message;
     }
 
@@ -116,6 +152,12 @@ public class ConversationService {
             return true;
         }
         return Message.ROLE_ASSISTANT.equals(latest.get(0).getRole());
+    }
+
+    /** 最近一条消息；恢复补偿用它判断“确认轮是否仍在等待助手回复”。 */
+    public Message latestMessage(String conversationId) {
+        List<Message> latest = messageMapper.selectRecentByConversationId(conversationId, 1);
+        return latest == null || latest.isEmpty() ? null : latest.get(0);
     }
 
     /** 查询会话历史消息（倒序取 limit 条） */

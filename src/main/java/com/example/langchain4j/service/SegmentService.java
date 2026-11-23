@@ -110,6 +110,12 @@ public class SegmentService {
         summary.setContent("");
         summary.setStartMessageId(startMessageId);
         summaryMapper.insert(summary);
+        ConversationSummary persisted = summaryMapper.selectBySegment(conversationId, segmentId);
+        if (persisted != null) {
+            log.info("[segment] existing topic segment reused, thread={}, segment={}",
+                    conversationId, segmentId);
+            return persisted;
+        }
         log.info("[segment] new topic segment created, thread={}, segment={}, topic={}",
                 conversationId, segmentId, topic);
         return summary;

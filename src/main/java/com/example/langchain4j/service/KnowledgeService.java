@@ -26,7 +26,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.ArrayList;
@@ -111,6 +113,7 @@ public class KnowledgeService {
     private final KnowledgeFileParser fileParser;
     private final AgentProperties properties;
     private final ThreadPoolTaskExecutor importExecutor;
+    private final TransactionTemplate transactionTemplate;
 
     public KnowledgeService(KnowledgeChunkMapper knowledgeChunkMapper,
                             KnowledgeDocumentMapper knowledgeDocumentMapper,
@@ -119,7 +122,8 @@ public class KnowledgeService {
                             VectorSearchService vectorSearchService,
                             KnowledgeFileParser fileParser,
                             AgentProperties properties,
-                            @Qualifier("knowledgeImportExecutor") ThreadPoolTaskExecutor importExecutor) {
+                            @Qualifier("knowledgeImportExecutor") ThreadPoolTaskExecutor importExecutor,
+                            PlatformTransactionManager transactionManager) {
         this.knowledgeChunkMapper = knowledgeChunkMapper;
         this.knowledgeDocumentMapper = knowledgeDocumentMapper;
         this.embeddingService = embeddingService;
@@ -128,6 +132,7 @@ public class KnowledgeService {
         this.fileParser = fileParser;
         this.properties = properties;
         this.importExecutor = importExecutor;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
     /** 语义检索（topK 有界防御），检索失败降级为空列表由上游处理 */
@@ -350,7 +355,6 @@ public class KnowledgeService {
      * 更新知识块：归属校验（仅本人私有块可改，公共库块 403）→ 重嵌 → 更新。
      * SQL 层再按 user_id 过滤（双保险，防 TOCTOU 越权）。
      */
-    @Transactional(rollbackFor = Exception.class)
     public void updateChunk(long id, KnowledgeUpdateRequest request) {
         String userId = UserContext.require();
         KnowledgeChunk existing = knowledgeChunkMapper.selectById(id, userId);
@@ -411,19 +415,20 @@ public class KnowledgeService {
      */
     private void updateParentAndRebuildChildren(KnowledgeChunk parent, String content,
                                                 String metadata, String userId) {
+        // 远程 embedding 必须在事务外完成：先算好全部新子块，再进入短事务替换父子块。
         List<KnowledgeChunk> newChildren = buildChildren(parent, content, metadata, userId);
         if (newChildren.isEmpty()) {
             throw new BizException(ErrorCode.BAD_REQUEST, "父块内容无法切出有效子块");
         }
-        if (knowledgeChunkMapper.updateParentContent(parent.getId(), content, metadata, userId) == 0) {
-            throw new BizException(ErrorCode.NOT_FOUND, "父块不存在或已被删除");
-        }
-        int removedChildren = knowledgeChunkMapper.deleteChildrenByParentId(parent.getId(), userId);
-        if (!newChildren.isEmpty()) {
+        transactionTemplate.executeWithoutResult(status -> {
+            if (knowledgeChunkMapper.updateParentContent(parent.getId(), content, metadata, userId) == 0) {
+                throw new BizException(ErrorCode.NOT_FOUND, "父块不存在或已被删除");
+            }
+            int removedChildren = knowledgeChunkMapper.deleteChildrenByParentId(parent.getId(), userId);
             knowledgeChunkMapper.insertBatch(newChildren);
-        }
-        log.info("[knowledge] parent updated and children rebuilt, id={}, removedChildren={}, newChildren={}",
-                parent.getId(), removedChildren, newChildren.size());
+            log.info("[knowledge] parent updated and children rebuilt, id={}, removedChildren={}, newChildren={}",
+                    parent.getId(), removedChildren, newChildren.size());
+        });
     }
 
     /**
@@ -438,30 +443,34 @@ public class KnowledgeService {
             throw new BizException(ErrorCode.BAD_REQUEST, "子块正文不能为空");
         }
         String childText = withChildTitle(child.getTitle(), newBody);
+        float[] denseVector = embeddingService.embed(childText);
+        String sparseVector = sparseEmbeddingService.embed(childText);
         KnowledgeChunk update = new KnowledgeChunk();
         update.setId(child.getId());
         update.setContent(childText);
         // 双向量同步重算：内容变更后稠密/稀疏任一不重算都会造成该通道命中错位
-        update.setEmbedding(embeddingService.embed(childText));
-        update.setSparseVector(sparseEmbeddingService.embed(childText));
+        update.setEmbedding(denseVector);
+        update.setSparseVector(sparseVector);
         update.setMetadata(metadata);
         update.setUserId(userId);
-        if (knowledgeChunkMapper.updateContent(update) == 0) {
-            throw new BizException(ErrorCode.NOT_FOUND, "知识块不存在或已被删除");
-        }
-        if (child.getParentId() == null) {
-            return;
-        }
-        KnowledgeChunk parent = knowledgeChunkMapper.selectParentById(child.getParentId(), userId);
-        if (parent == null) {
-            return;
-        }
-        String updatedParentContent = replaceOnce(parent.getContent(), oldBody, newBody);
-        if (updatedParentContent == null) {
-            updatedParentContent = mergeChildBodies(
-                    knowledgeChunkMapper.selectChildrenByParentId(parent.getId(), userId));
-        }
-        updateParentContentOrThrow(parent, updatedParentContent, userId);
+        transactionTemplate.executeWithoutResult(status -> {
+            if (knowledgeChunkMapper.updateContent(update) == 0) {
+                throw new BizException(ErrorCode.NOT_FOUND, "知识块不存在或已被删除");
+            }
+            if (child.getParentId() == null) {
+                return;
+            }
+            KnowledgeChunk parent = knowledgeChunkMapper.selectParentById(child.getParentId(), userId);
+            if (parent == null) {
+                return;
+            }
+            String updatedParentContent = replaceOnce(parent.getContent(), oldBody, newBody);
+            if (updatedParentContent == null) {
+                updatedParentContent = mergeChildBodies(
+                        knowledgeChunkMapper.selectChildrenByParentId(parent.getId(), userId));
+            }
+            updateParentContentOrThrow(parent, updatedParentContent, userId);
+        });
     }
 
     /** 子块删除后同步父块：没有兄弟子块则删除父块；否则移除旧正文，定位失败时按剩余子块重建。 */

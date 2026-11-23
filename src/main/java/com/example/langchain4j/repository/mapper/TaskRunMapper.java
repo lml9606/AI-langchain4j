@@ -45,6 +45,9 @@ public interface TaskRunMapper {
                    @Param("id") String id,
                    @Param("result") String result);
 
+    /** 标记终态回答已补偿到会话消息，避免恢复 worker 重复补发。 */
+    int markReplySaved(@Param("userId") String userId, @Param("id") String id);
+
     /** 抢占执行租约；返回 1 表示当前实例获得执行权。 */
     int acquireLease(@Param("id") String id,
                      @Param("owner") String owner,
@@ -59,6 +62,9 @@ public interface TaskRunMapper {
 
     /** 崩溃恢复：执行中但租约已过期（或从未写入租约）的任务。 */
     List<TaskRun> findLeaseExpired(@Param("limit") int limit);
+
+    /** 终态任务但回答消息尚未补偿的记录（用于恢复 worker 补发）。 */
+    List<TaskRun> findUnreplied(@Param("limit") int limit);
 
     /** 取消一条尚未进入终态的任务；返回 1 表示本次确实完成流转。 */
     int markCancelled(@Param("userId") String userId, @Param("id") String id);

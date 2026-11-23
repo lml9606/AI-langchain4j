@@ -95,6 +95,17 @@ class ToolAccessPolicyTest {
                 .isEqualTo(ToolAccessPolicy.Status.NOT_FOUND);
     }
 
+    @Test
+    @DisplayName("工具角色匹配忽略首尾空格与大小写")
+    void roleComparisonIsCaseInsensitive() {
+        ToolDefinition.ToolPolicy policy = new ToolDefinition.ToolPolicy(
+                true, 0, Set.of("admin"));
+
+        assertThat(policy.allowsRole(" Admin ")).isTrue();
+        assertThat(policy.allowsRole("ADMIN")).isTrue();
+        assertThat(policy.allowsRole("user")).isFalse();
+    }
+
     private AgentProperties properties(boolean writeEnabled) {
         AgentProperties properties = new AgentProperties();
         properties.getTool().setWriteEnabled(writeEnabled);

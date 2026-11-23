@@ -29,6 +29,8 @@ public class Message {
     private Integer segmentId;
     /** 检索上下文快照（仅 assistant 消息：本轮的检索资料原文截断；仅用于排查取证，不参与改写/生成） */
     private String context;
+    /** 幂等键：恢复补偿等系统生成消息用唯一键防重复插入；普通对话消息为空 */
+    private String dedupeKey;
     /** 创建时间 */
     private OffsetDateTime createdAt;
 }

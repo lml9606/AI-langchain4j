@@ -1,6 +1,7 @@
 package com.example.langchain4j.dto.request;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 
@@ -19,5 +20,6 @@ public class ConfirmRequest {
     private String confirmationId;
 
     /** true=确认执行；false=取消，不修改任何业务数据 */
-    private boolean approved;
+    @NotNull(message = "approved 不能为空")
+    private Boolean approved;
 }

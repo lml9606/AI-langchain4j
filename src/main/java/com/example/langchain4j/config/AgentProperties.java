@@ -69,6 +69,9 @@ public class AgentProperties {
     /** 单次图执行整体超时（秒）；超时即中止本轮：取消后台任务并返回降级应答，一问一答照常闭环，用户可直接重发 */
     private int executionTimeoutSeconds = 240;
 
+    /** 确认写链路整体超时（秒）：超时返回“执行中”，令牌不消费，由任务台账和恢复 worker 收敛 */
+    private int confirmTimeoutSeconds = 180;
+
     /** 跨节点通用运行上限：输入/输出/审计/候选集等，避免散落在各节点的魔法值 */
     private Limits limits = new Limits();
 
@@ -159,6 +162,8 @@ public class AgentProperties {
         private int summaryMinRefinedLength = 50;
         /** 摘要缩水比例：低于已有摘要的 1/N 视为异常 */
         private int summaryMinRetainRatio = 3;
+        /** 段摘要专用模型；为空时使用 agent.llm.default-model，便于摘要走低成本模型 */
+        private String summaryModel = "";
     }
 
     @Data
@@ -320,6 +325,8 @@ public class AgentProperties {
     public static class CircuitBreaker {
         private int failureThreshold = 5;
         private int cooldownSeconds = 60;
+        /** 失败计数窗口（秒）：窗口内累计达到阈值才熔断，避免偶发失败永久累积 */
+        private int failureWindowSeconds = 60;
     }
 
     /**

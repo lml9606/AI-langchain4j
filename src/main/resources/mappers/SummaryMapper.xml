@@ -21,6 +21,7 @@
             (conversation_id, segment_id, topic, content, start_message_id, covered_message_id)
         VALUES
             (#{conversationId}, #{segmentId}, #{topic}, #{content}, #{startMessageId}, #{coveredMessageId})
+        ON CONFLICT (conversation_id, segment_id) DO NOTHING
     </insert>
 
     <!-- 增量覆盖：只更新 content/锚点，不碰 topic（补名走 updateTopic，防异步摘要用旧 topic 覆盖新名） -->

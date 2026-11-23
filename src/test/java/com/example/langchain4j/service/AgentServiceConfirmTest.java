@@ -536,4 +536,21 @@ class AgentServiceConfirmTest {
 
         verifyNoInteractions(taskConfirmGraph);
     }
+
+    @Test
+    @DisplayName("确认执行中 -> 不落失败助手消息，保留令牌等待恢复补偿")
+    void inProgressConfirmDoesNotPersistFailureReply() {
+        when(taskConfirmGraph.invoke(anyMap(), any(RunnableConfig.class)))
+                .thenThrow(new BizException(ErrorCode.CONFIRMATION_IN_PROGRESS));
+
+        assertThatThrownBy(() -> service.confirm(request(true)))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.CONFIRMATION_IN_PROGRESS.getCode());
+
+        verify(conversationService, never()).saveMessage(eq("c1"),
+                eq(Message.ROLE_ASSISTANT), anyString(), anyString(), any(), any());
+        verify(confirmationService, never()).finish("c1", "cfm_1");
+        verify(taskRunService, never()).markReplySaved(anyString(), anyString());
+    }
 }

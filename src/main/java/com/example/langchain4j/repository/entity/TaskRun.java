@@ -47,6 +47,8 @@ public class TaskRun {
     private String confirmationId;
     /** 最终回答快照：确认令牌过期后重放仍能返回同一结果 */
     private String result;
+    /** 终态回答是否已写入会话消息（恢复 worker 幂等补偿标记） */
+    private boolean replySaved;
     private String leaseOwner;
     private OffsetDateTime leaseUntil;
     private String errorCode;

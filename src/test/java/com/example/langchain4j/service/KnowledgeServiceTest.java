@@ -20,6 +20,8 @@ import org.mockito.Mock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 
 import java.util.List;
 
@@ -30,6 +32,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 /**
@@ -55,13 +58,18 @@ class KnowledgeServiceTest {
     private AgentProperties properties;
     @Mock
     private ThreadPoolTaskExecutor importExecutor;
+    @Mock
+    private PlatformTransactionManager transactionManager;
 
     private KnowledgeService service;
 
     @BeforeEach
     void setUp() {
+        lenient().when(transactionManager.getTransaction(any()))
+                .thenReturn(new SimpleTransactionStatus());
         service = new KnowledgeService(knowledgeChunkMapper, knowledgeDocumentMapper, embeddingService,
-                sparseEmbeddingService, vectorSearchService, fileParser, properties, importExecutor);
+                sparseEmbeddingService, vectorSearchService, fileParser, properties, importExecutor,
+                transactionManager);
     }
 
     @Test

@@ -14,6 +14,7 @@
         <result property="planHash" column="plan_hash"/>
         <result property="confirmationId" column="confirmation_id"/>
         <result property="result" column="result"/>
+        <result property="replySaved" column="reply_saved"/>
         <result property="leaseOwner" column="lease_owner"/>
         <result property="leaseUntil" column="lease_until"/>
         <result property="errorCode" column="error_code"/>
@@ -25,15 +26,15 @@
     <insert id="insert" parameterType="com.example.langchain4j.repository.entity.TaskRun">
         INSERT INTO ai_task_run
             (id, conversation_id, user_id, workflow_id, status, current_step, plan_json,
-             plan_hash, confirmation_id)
+             plan_hash, confirmation_id, reply_saved)
         VALUES
             (#{id}, #{conversationId}, #{userId}, #{workflowId}, #{status}, #{currentStep},
-             #{planJson}, #{planHash}, #{confirmationId})
+             #{planJson}, #{planHash}, #{confirmationId}, #{replySaved})
     </insert>
 
     <select id="selectById" resultMap="TaskRunMap">
         SELECT id, conversation_id, user_id, workflow_id, status, current_step, plan_json,
-               plan_hash, confirmation_id, result, lease_owner, lease_until, error_code, error_message,
+               plan_hash, confirmation_id, result, reply_saved, lease_owner, lease_until, error_code, error_message,
                created_at, updated_at
         FROM ai_task_run
         WHERE user_id = #{userId}
@@ -42,7 +43,7 @@
 
     <select id="selectByConfirmationId" resultMap="TaskRunMap">
         SELECT id, conversation_id, user_id, workflow_id, status, current_step, plan_json,
-               plan_hash, confirmation_id, result, lease_owner, lease_until, error_code, error_message,
+               plan_hash, confirmation_id, result, reply_saved, lease_owner, lease_until, error_code, error_message,
                created_at, updated_at
         FROM ai_task_run
         WHERE user_id = #{userId}
@@ -89,6 +90,13 @@
           AND id = #{id}
     </update>
 
+    <update id="markReplySaved">
+        UPDATE ai_task_run
+        SET reply_saved = TRUE, updated_at = now()
+        WHERE user_id = #{userId}
+          AND id = #{id}
+    </update>
+
     <!-- 租约：同一条 run 同一时刻只允许一个实例执行 -->
     <update id="acquireLease">
         UPDATE ai_task_run
@@ -116,11 +124,22 @@
 
     <select id="findLeaseExpired" resultMap="TaskRunMap">
         SELECT id, conversation_id, user_id, workflow_id, status, current_step, plan_json,
-               plan_hash, confirmation_id, result, lease_owner, lease_until, error_code, error_message,
+               plan_hash, confirmation_id, result, reply_saved, lease_owner, lease_until, error_code, error_message,
                created_at, updated_at
         FROM ai_task_run
         WHERE status = 'RUNNING'
           AND (lease_until IS NULL OR lease_until &lt; now())
+        ORDER BY updated_at
+        LIMIT #{limit}
+    </select>
+
+    <select id="findUnreplied" resultMap="TaskRunMap">
+        SELECT id, conversation_id, user_id, workflow_id, status, current_step, plan_json,
+               plan_hash, confirmation_id, result, reply_saved, lease_owner, lease_until, error_code, error_message,
+               created_at, updated_at
+        FROM ai_task_run
+        WHERE reply_saved = FALSE
+          AND status IN ('SUCCEEDED', 'PARTIAL_FAILED', 'FAILED')
         ORDER BY updated_at
         LIMIT #{limit}
     </select>
