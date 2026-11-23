@@ -30,7 +30,7 @@ public class FallbackNode implements NodeAction<WorkflowState> {
         log.warn("[fallback] entering fallback, error={}, intent={}",
                 state.error(), state.intent());
         // 步骤2：返回增量更新：固定降级答案 + 兜底标记 + 保留原始错误信息
-        // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
+        // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兜底代码默认值
         return Map.of(
                 WorkflowState.RESULT,
                 promptTemplateService.resolve("FALLBACK_ANSWER", PromptTemplates.FALLBACK_ANSWER),

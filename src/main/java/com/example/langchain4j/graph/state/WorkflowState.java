@@ -10,13 +10,13 @@ import java.util.Map;
 
 /**
  * 工作流状态：LangGraph4j 图内共享的状态容器。
- * <p>
+ *
  * 更新机制：节点不直接改状态，而是返回 {@code Map<String,Object>} 增量更新 ——
  * 框架把返回值合并进状态后生成新状态对象传给下一个节点（不可变更新），
  * 每个节点看到的是“前序节点完成后”的快照，天然支持 checkpoint 回放与并发安全。
  * 继承框架的 {@link AgentState}，数据存放在其内部 Map 中。
  */
-@SuppressWarnings({"deprecation", "removal"})
+@SuppressWarnings({"removal"})
 public class WorkflowState extends AgentState {
 
     // ---- 状态字段名常量：节点写入 Map 与访问器取值共用同一 key，避免字符串漂移 ----
@@ -127,7 +127,7 @@ public class WorkflowState extends AgentState {
 
     /**
      * 质检状态子对象（VALIDATION 嵌套值）：质检通过标记 + 失败类型 + 失败原因。
-     * <p>
+     *
      * 节点写入时使用 record 形态；checkpoint 反序列化后为 Map 形态，访问器统一防御转换。
      */
     public record Validation(boolean validated, String issue, String reason) {
@@ -145,7 +145,7 @@ public class WorkflowState extends AgentState {
 
     /**
      * 多跳状态子对象（HOP 嵌套值）：已执行补查轮数（不含首轮）+ 下一跳检索查询 + 上下文判定标记。
-     * <p>
+     *
      * 节点写入时使用 record 形态；checkpoint 反序列化后为 Map 形态，访问器统一防御转换。
      */
     public record Hop(int count, String pendingQuery, boolean sufficient) {
@@ -163,7 +163,7 @@ public class WorkflowState extends AgentState {
 
     /**
      * 查询规划子对象：一次结构化调用同时产出意图判断与检索计划。
-     * <p>
+     *
      * requiresFullRetrieval 由复杂度/子查询数推导，不在路由层重复判断；模型不输出该字段，
      * 避免把“是否需要检索”交给模型自由裁量。
      */
@@ -224,7 +224,7 @@ public class WorkflowState extends AgentState {
     /**
      * 旧版平铺字段迁移：升级前的 checkpoint 反序列化后 Map 中含平铺字段（validated/hopCount 等），
      * 重建状态时提升为嵌套子对象并移除旧 key，保证落库与断点续跑都是新结构。
-     * <p>
+     *
      * 在父类拷贝 initData 之前执行（super 参数求值时机），因此迁移结果即内部存储内容；
      * 幂等：无旧字段时原样返回，不做多余拷贝。
      *
@@ -265,7 +265,7 @@ public class WorkflowState extends AgentState {
     /**
      * 每轮重置的跨轮计数字段：EntryNode 在每轮入口调用（与自身更新合并返回），
      * 归零 retryCount/hop 子对象/rootCause，防断点恢复重入时上一轮残留影响本轮。
-     * <p>
+     *
      * hop 子对象整体归零（兼容历史 checkpoint；新链路不再使用多跳判断）。
      * 新增跨轮计数字段时必须同步补充到此处 —— EntryNode 只需引用本方法，无需逐字段修改。
      *

@@ -16,15 +16,16 @@ import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 
 /**
- * 线程池配置：图执行（agentExecutor）、LLM 调用（llmExecutor）、摘要（summaryExecutor）三个隔离池。
- * <p>
+ * 线程池配置：按用途隔离 agentExecutor、llmExecutor、auditExecutor、knowledgeImportExecutor、
+ * toolExecutorPool、taskStepPool 和 summaryExecutor。
+ *
  * 隔离原因：
- * <ul>
- *   <li>agentExecutor 与 HTTP 线程池隔离，图执行慢任务不拖垮 Web 层；</li>
- *   <li>llmExecutor 与 agentExecutor 隔离：图线程会同步等待 LLM 结果（future.get 超时控制），
- *       共用一池时高并发下两者相互等待形成准死锁（详见 llmExecutor Bean 注释）；</li>
- *   <li>summaryExecutor 单线程：摘要任务不阻塞主链路、可丢弃，下轮装配按幂等锚点续跑。</li>
- * </ul>
+ *
+ * - agentExecutor 与 HTTP 线程池隔离，图执行慢任务不拖垮 Web 层；
+ * - llmExecutor 与 agentExecutor 隔离：图线程会同步等待 LLM 结果（带超时控制），
+ *       共用一池时高并发下两者相互等待形成准死锁（详见 llmExecutor Bean 注释）；
+ * - summaryExecutor 单线程：摘要任务不阻塞主链路、可丢弃，下轮装配按幂等锚点续跑。
+ *
  * 共性：有界队列 + 拒绝策略（防内存打爆）、优雅停机（配合 server.shutdown=graceful）、
  * MDC 传递（TaskDecorator 复制 traceId 到工作线程）、容量 Gauge（供告警规则监测线程池饱和）。
  */
@@ -54,8 +55,8 @@ public class AsyncConfig {
 
     /**
      * LLM 调用专用线程池：与图执行线程池隔离。
-     * <p>
-     * 隔离原因：图执行线程会同步等待 LLM 结果（LlmGateway 的 future.get 超时控制），
+     *
+     * 隔离原因：图执行线程会同步等待 LLM 结果（LlmGateway 的调用超时控制），
      * 若 LLM 任务与图执行共用同一池，高并发下图线程占满线程池、LLM 任务在队列排队，
      * 两者相互等待形成准死锁，只能靠超时兜底；独立池后图线程等待不影响 LLM 任务执行。
      * 合理并发数 ≈ LLM 配额(QPS) × 平均响应秒数（利特尔法则），按实际配额调优。
@@ -81,7 +82,7 @@ public class AsyncConfig {
 
     /**
      * 审计异步落库线程池：独立低并发池，避免审计 INSERT 拖慢图节点与工具调用。
-     * <p>审计是可观测性数据，队列满直接丢弃并告警，不阻塞业务主链路。
+     * 审计是可观测性数据，队列满直接丢弃并告警，不阻塞业务主链路。
      */
     @Bean("auditExecutor")
     public ThreadPoolTaskExecutor auditExecutor(AgentProperties properties, MeterRegistry registry) {
@@ -104,7 +105,7 @@ public class AsyncConfig {
 
     /**
      * 知识导入线程池：批量导入逐篇并行执行专用，与图执行/LLM/摘要池隔离。
-     * <p>
+     *
      * 隔离原因：导入任务含切分 + 逐块嵌入（本地 Ollama）+ 批量落库，单篇可耗时数秒到数十秒，
      * 若与图执行共用池会挤占对话链路；独立池后批量导入只受自身队列约束。
      * 拒绝策略：队列满抛异常转业务错误（用户可重试），不静默丢弃。
@@ -208,7 +209,7 @@ public class AsyncConfig {
 
     /**
      * 摘要线程池：段摘要异步生成专用，与图执行线程池隔离。
-     * <p>
+     *
      * 摘要任务不阻塞主链路、可丢弃（失败/满队列时下轮装配会重新触发，靠 covered_message_id 幂等续跑），
      * 因此单线程 + 有界队列即可，拒绝策略为静默丢弃。
      */

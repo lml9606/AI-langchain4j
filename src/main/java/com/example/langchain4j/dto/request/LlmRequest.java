@@ -9,7 +9,7 @@ import java.util.List;
 
 /**
  * LLM 调用请求：统一承载模型、消息、输出预算和日志场景。
- * <p>
+ *
  * 设计目的：替代 LlmGateway 上分散的 generate/generateJsonNode 重载。
  * 新增参数只改本对象，不再增加 Gateway 方法；responseFormat 由调用方法决定，
  * 避免出现“请求声明 JSON、却调了文本方法”的非法状态。

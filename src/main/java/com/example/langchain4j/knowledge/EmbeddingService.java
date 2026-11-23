@@ -24,7 +24,7 @@ public class EmbeddingService {
 
     /**
      * 启动预热：提前触发 Ollama/BGE-M3 模型加载，避免首个知识检索请求承担模型冷启动耗时。
-     * <p>
+     *
      * 预热失败只告警、不阻断应用启动：本地模型服务可能晚于应用启动；正式检索仍会再次尝试，
      * 并在失败时走 VectorSearchService 的单通道降级。
      */

@@ -6,7 +6,7 @@ import java.time.OffsetDateTime;
 
 /**
  * 工具演示数据：读工具查询、写工具修改的对象。
- * <p>按 {@code userId} 隔离，SQL 层强制过滤，不同用户互不可见。
+ * 按 {@code userId} 隔离，SQL 层强制过滤，不同用户互不可见。
  */
 @Data
 public class ToolDemoRecord {

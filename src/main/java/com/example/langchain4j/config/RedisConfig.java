@@ -11,11 +11,11 @@ import org.springframework.context.annotation.Configuration;
 
 /**
  * Redis 配置：统一客户端为 Redisson（不再使用 Lettuce/StringRedisTemplate）+ 启动期连通性探测。
- * <ul>
- *   <li>全局 Codec 固定 StringCodec：限流计数、熔断标记、缓存值均为纯字符串，可读且兼容历史数据；</li>
- *   <li>不可用时只告警不阻断（限流/缓存/熔断/宽松会话锁 fail-open；
- *       确认写链路的严格会话锁 fail-closed）。</li>
- * </ul>
+ *
+ * - 全局 Codec 固定 StringCodec：限流计数、熔断标记、缓存值均为纯字符串，可读且兼容历史数据；
+ * - 不可用时只告警不阻断（限流/缓存/熔断/宽松会话锁 fail-open；
+ *       确认写链路的严格会话锁 fail-closed）。
+ *
  */
 @Slf4j
 @Configuration
@@ -24,7 +24,7 @@ public class RedisConfig {
     /**
      * 覆盖 Redisson 默认的二进制 Codec：业务侧只存字符串（计数/标记/JSON），
      * StringCodec 保证可读，且 Lua 脚本的 KEYS/ARGV 不会被打包成二进制导致 INCR 失败。
-     * <p>
+     *
      * 附带空串密码归一：`spring.data.redis.password` 空串（未配环境变量时的 `${REDIS_PASSWORD:}` 占位符
      * 或 properties 里显式空值）非 null，Redisson 对非 null 密码一律发 AUTH 命令，
      * 本机/生产 Redis 未设 requirepass 时返回 "ERR Client sent AUTH, but no password is set" 导致连接失败；

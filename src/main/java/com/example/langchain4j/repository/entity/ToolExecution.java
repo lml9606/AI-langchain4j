@@ -7,13 +7,13 @@ import java.time.OffsetDateTime;
 /**
  * 工具确认/执行台账：从待确认到执行结束的唯一业务事实源。
  *
- * <p>{@code (userId, executionId)} 唯一，{@code executionId} 就是确认令牌 ID。
+ * {@code (userId, executionId)} 唯一，{@code executionId} 就是确认令牌 ID。
  * 创建确认动作时先写 PENDING；用户确认执行后由工具流转到 RUNNING，最终到
  * SUCCEEDED / FAILED / CANCELLED。业务写入与执行状态更新必须在同一个数据库事务里提交：
- * <ul>
- *   <li>提交成功 → 台账 SUCCEEDED 且业务已变更，重放直接返回结果；</li>
- *   <li>回滚 → 台账 RUNNING 也一起回滚，重试可安全重新执行。</li>
- * </ul>
+ *
+ * - 提交成功 → 台账 SUCCEEDED 且业务已变更，重放直接返回结果；
+ * - 回滚 → 台账 RUNNING 也一起回滚，重试可安全重新执行。
+ *
  */
 @Data
 public class ToolExecution {

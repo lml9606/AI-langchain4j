@@ -40,7 +40,7 @@ public class ConversationService {
     /**
      * 会话存在则复用，否则新建。
      * 会话 ID 同时作为 LangGraph 的 threadId（checkpoint 会话隔离）。
-     * <p>
+     *
      * 用户隔离：传入会话已存在但归属他人时拒绝（403，防水平越权）；
      * 传入不存在的会话 ID 按新会话处理（防御脏参数，不泄露资源存在性）。
      */
@@ -85,7 +85,7 @@ public class ConversationService {
     /**
      * 持久化一条消息（用户/助手），失败向上抛由全局异常处理转 DB_UNAVAILABLE。
      * 返回落库后的消息（含数据库回填的自增 id，供话题段起点锚定）。
-     * <p>
+     *
      * 段归属规则：user 消息落库时暂不带段号（段归属决策在其后，由
      * {@link #updateMessageSegment} 回填）；assistant 消息自动继承同轮 user 的段号
      * （同轮 user 已在锁内回填），resume 恢复轮同理。
@@ -110,7 +110,7 @@ public class ConversationService {
 
     /**
      * 带幂等键的消息写入：唯一键冲突时返回已存在的同键消息。
-     * <p>用于恢复 worker 补发回答。Redis 会话锁 fail-open、多个实例同时补偿时，
+     * 用于恢复 worker 补发回答。Redis 会话锁 fail-open、多个实例同时补偿时，
      * 数据库唯一键仍能保证同一任务最多产生一条回复。
      */
     @Transactional(rollbackFor = Exception.class)
@@ -176,7 +176,7 @@ public class ConversationService {
 
     /**
      * 改写视图：跨话题取最近 limit 条历史（正序，role/content 键值对），排除当前刚保存的用户消息。
-     * <p>
+     *
      * 【只给图外改写器用】（指代消解 + 话题判断），不进生成 LLM。指代判断需要最近的
      * 对话流（可能跨话题），与生成视图（当前话题段内原文）是两条独立路径，互不混用。
      */
@@ -206,7 +206,7 @@ public class ConversationService {
     /**
      * 生成视图：取当前话题段内最近的消息（正序，role/content 键值对，按段号过滤），
      * 按 token 预算从最新往回装配，排除当前刚保存的用户消息。
-     * <p>
+     *
      * 【只给图内生成 LLM 用】（原文回放）。按段号精确过滤：切回旧话题只带该段原文；
      * 新话题首轮历史为空 —— 其他话题的消息一条都不带。
      */

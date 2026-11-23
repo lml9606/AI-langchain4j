@@ -1,7 +1,6 @@
 package com.example.langchain4j.service;
 
 import com.example.langchain4j.audit.AuditEntry;
-import com.example.langchain4j.audit.AuditRecorder;
 import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.repository.entity.GraphExecution;
@@ -12,15 +11,15 @@ import org.springframework.stereotype.Service;
 import java.util.UUID;
 
 /**
- * 图执行审计服务：审计记录落库（可观测性数据，失败仅告警不阻断主流程）。
+ * 图执行审计存储：只负责把 {@link AuditEntry} 同步落库，不负责异步调度和重试。
  *
- * <p>审计范围：图内节点、图外步骤（rewrite/retrieval-plan）、整体图执行（workflow）
- * 与工具调用，共用同一张表按 nodeName 区分。executionId 优先取请求 traceId，
- * 同一次请求的多条审计可以按 executionId 串起来。
+ * 审计范围包括图内节点、图外步骤（rewrite/retrieval-plan）、整体图执行（workflow）和
+ * 工具调用，共用同一张表按 nodeName 区分。executionId 优先取请求 traceId，同一次请求的
+ * 多条审计可以按 executionId 串起来。写库失败只告警，不向调用方抛出。
  */
 @Slf4j
 @Service
-public class AuditService implements AuditRecorder {
+public class AuditService {
 
     private final GraphExecutionMapper graphExecutionMapper;
     private final AgentProperties properties;
@@ -31,7 +30,6 @@ public class AuditService implements AuditRecorder {
     }
 
     /** 统一审计入口：同步落库，异常降级为告警。 */
-    @Override
     public void record(AuditEntry entry) {
         try {
             GraphExecution execution = new GraphExecution();

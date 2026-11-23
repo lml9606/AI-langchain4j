@@ -26,7 +26,7 @@ import java.util.Map;
 
 /**
  * 写操作确认节点：不执行工具，只生成一次性确认令牌和确认话术。
- * <p>
+ *
  * 真正的执行发生在 POST /api/agent/confirm 之后，由确认执行链路携带 approved=true 完成；
  * 这样规划阶段即使被 prompt injection 诱导，也无法直接修改业务数据。
  */
@@ -54,14 +54,14 @@ public class TaskConfirmNode implements NodeAction<WorkflowState> {
         this.argsResolver = argsResolver;
     }
 
-    /** 兼容旧测试/旧 checkpoint：没有任务运行时退化到单写确认。 */
+    /** 轻量装配：只支持无任务运行快照的单写确认，生产链路使用完整构造。 */
     public TaskConfirmNode(ConfirmationService confirmationService,
                            ConfirmationPolicy confirmationPolicy,
                            TaskPlanValidator planValidator) {
         this(confirmationService, confirmationPolicy, planValidator, null, null);
     }
 
-    /** 为写工具创建一次性确认令牌，并返回待确认卡片，不执行实际写操作。 */
+    /** 根据是否存在任务运行快照选择批量确认或单写确认；只创建令牌，不执行工具。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         if (state.taskRunId().isBlank() || taskRunService == null || argsResolver == null) {
@@ -70,7 +70,12 @@ public class TaskConfirmNode implements NodeAction<WorkflowState> {
         return applyBatch(state);
     }
 
-    /** 多步骤确认：把全部写步骤放进一张确认卡片，参数使用解析后的真实值。 */
+    /**
+     * 多步骤确认：读取任务步骤并解析参数引用，把全部写步骤放进一张确认卡片。
+     *
+     * 会校验每个写工具的角色权限和计划契约；任务不存在、没有写步骤或步骤不一致时返回 error。
+     * 副作用是写入 Redis 令牌并把任务推进到 WAITING_CONFIRM，推进失败会撤销刚创建的令牌。
+     */
     private Map<String, Object> applyBatch(WorkflowState state) {
         String runId = state.taskRunId();
         TaskRun run = taskRunService.find(state.userId(), runId).orElse(null);
@@ -188,6 +193,7 @@ public class TaskConfirmNode implements NodeAction<WorkflowState> {
         }
     }
 
+    /** 从步骤快照解析参数 JSON，并解析步骤间引用；解析失败退化为空对象。 */
     private JsonNode resolveArgs(TaskStep step, Map<Integer, TaskStep> byNo) {
         String argsJson = step.getArgsJson();
         JsonNode args;
@@ -201,12 +207,13 @@ public class TaskConfirmNode implements NodeAction<WorkflowState> {
         return argsResolver.resolve(args, byNo);
     }
 
+    /** 读取计划步骤号；缺失时使用解析结果下标作为回退。 */
     private int stepNoOf(Map<String, Object> step, int fallback) {
         Object value = step.get("stepNo");
         return value instanceof Number number ? number.intValue() : fallback;
     }
 
-    /** 旧版单写确认：服务没有任务运行信息时使用。 */
+    /** 无任务运行快照的单写确认路径：校验单个写工具后创建令牌。 */
     private Map<String, Object> applyLegacy(WorkflowState state) {
         Map<String, Object> pending = state.taskPendingAction();
         String toolName = Texts.trimmedTextOr(pending.get("tool"), "");

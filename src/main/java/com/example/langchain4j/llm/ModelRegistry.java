@@ -13,13 +13,13 @@ import java.util.Map;
 
 /**
  * 多模型路由注册表：模型名 → ChatModel 实例。
- * <p>
+ *
  * 由各模型 Config 产出的「模型名 → ChatModel」Map Bean 扁平化汇总而成：
- * <ul>
- *   <li>千问：QwenConfig 包装 dashscope starter 自动装配的 qwenChatModel Bean（单模型 Map）；</li>
- *   <li>DeepSeek：DeepSeekConfig 按 agent.deepseek.model-names 循环装配的多模型 Map；</li>
- *   <li>key 为模型真实名称（qwen-max / deepseek-flash / deepseek-v4-pro），前端传 model 参数按此表路由。</li>
- * </ul>
+ *
+ * - 千问：QwenConfig 包装 dashscope starter 自动装配的 qwenChatModel Bean（单模型 Map）；
+ * - DeepSeek：DeepSeekConfig 按 agent.deepseek.model-names 循环装配的多模型 Map；
+ * - key 为模型真实名称（qwen-max / deepseek-flash / deepseek-v4-pro），前端传 model 参数按此表路由。
+ *
  * 启动期 fail-fast：模型名重复导致路由覆盖、默认模型未注册时直接抛异常，
  * 避免“配置错了运行期才发现”的隐性故障；新增模型只需在对应供应商的配置列表加一个名字。
  */

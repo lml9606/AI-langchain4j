@@ -14,14 +14,11 @@ import java.util.function.Supplier;
 /**
  * Redis 分布式会话锁（Redisson RLock）。
  *
- * <p>用途：同一会话（thread_id）同一时刻只允许一个图执行，防止 checkpoint 并发写竞态。
- * 提供两种模式，按链路风险选择：
- * <ul>
- *   <li><b>宽松模式</b>：chat/resume 使用。显式租约（agent.lock.lease-seconds，默认 300s），
- *       Redis 故障 fail-open；异常路径漏解锁时，锁最迟在租约到期后自愈；</li>
- *   <li><b>严格模式</b>：confirm（写操作确认）使用。Redisson Watchdog 自动续期，
- *       Redis 故障 fail-closed，绝不在无锁状态下执行写操作。</li>
- * </ul>
+ * 同一会话（thread_id）同一时刻只允许一个图执行，防止 checkpoint 并发写竞态。宽松模式
+ * 供 chat/resume 使用，显式租约（agent.lock.lease-seconds，默认 300s），Redis 故障
+ * fail-open，异常路径漏解锁时锁最迟在租约到期后自愈。严格模式供 confirm 确认写操作使用，
+ * Redisson Watchdog 自动续期，Redis 故障 fail-closed，绝不在无锁状态下执行写操作。
+ *
  * 两种模式均可重入，释放前校验 isHeldByCurrentThread，避免误释放他人锁。
  * 宽松模式的租约必须大于最长图执行耗时（execution-timeout-seconds）。
  */
@@ -62,8 +59,13 @@ public class SessionLock {
     }
 
     /**
-     * 严格模式：确认写操作专用。
+     * 在严格会话锁保护下执行任务，供确认写操作专用。
      *
+     * Redis 故障或加锁中断都按 fail-closed 抛出业务异常，不会在无锁状态下执行 action。
+     *
+     * @param lockKey 锁标识（如 conversationId），将拼入 Redis key
+     * @param action  受保护的任务
+     * @return 任务返回值
      */
     public <T> T executeWithLockStrict(String lockKey, Supplier<T> action) {
         RLock lock = redissonClient.getLock(KEY_PREFIX + sanitize(lockKey));
@@ -81,14 +83,11 @@ public class SessionLock {
 
     /**
      * 立即尝试加锁（不等待）：成功返回 true；锁冲突返回 false；Redis 故障 fail-open 返回 true。
-     * <p>
+     *
      * tryLock(0, leaseSeconds, SECONDS) 的两个行为：
-     * <ul>
-     *   <li>waitTime=0：不排队等待，抢不到立即返回 false（避免请求堆积）；</li>
-     *   <li>leaseTime>0：显式租约，到期自动释放，不启用 Watchdog 续期。
-     *       异常路径漏解锁时锁可自愈；代价是超过租约的长任务会被提前解锁，
-     *       因此 leaseSeconds 必须大于 executionTimeoutSeconds。</li>
-     * </ul>
+     * waitTime=0 表示不排队等待，抢不到立即返回 false，避免请求堆积；leaseTime>0 表示
+     * 显式租约，到期自动释放，不启用 Watchdog 续期。异常路径漏解锁时锁可自愈，代价是
+     * 超过租约的长任务会被提前解锁，因此 leaseSeconds 必须大于 executionTimeoutSeconds。
      */
     private boolean tryAcquire(RLock lock) {
         try {
@@ -102,7 +101,8 @@ public class SessionLock {
 
     /**
      * 严格模式加锁：只传 waitTime，leaseTime 交给 Redisson Watchdog 自动续期。
-     * <p>Redis 故障/中断都 fail-closed，确认写操作绝不在无锁状态下执行。
+     *
+     * Redis 故障和中断都 fail-closed，确认写操作绝不在无锁状态下执行。
      */
     private boolean tryAcquireStrict(RLock lock) {
         try {

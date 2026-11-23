@@ -16,13 +16,13 @@ import java.util.List;
 
 /**
  * 段摘要服务（短期记忆第二层）：把滑出窗口的历史异步压缩成段摘要。
- * <p>
+ *
  * 重写式摘要：每次把「已有摘要 + 新增对话」一起交给 LLM 重写为完整摘要（非增量拼接），
  * 天然去重、总长可控，避免拼接式滚雪球。
- * <p>
+ *
  * 幂等设计：covered_message_id 是增量锚点。摘要任务失败或线程池满被丢弃时
  * 不推进锚点，下一轮聊天重新触发即可续跑，不丢消息、不重复覆盖。
- * <p>
+ *
  * 隔离设计：摘要走独立的 summaryExecutor（单线程 + 有界队列），
  * LLM 调用慢也不占用图执行线程池；队列满静默丢弃，降级为“下轮再摘要”。
  */
@@ -53,7 +53,7 @@ public class SummaryService {
 
     /**
      * 段内未被摘要覆盖的消息达到阈值时，提交异步摘要任务。
-     * <p>
+     *
      * 调用时机：会话锁内（每轮 chat 装配完视图后）。只做一次 count 查询 + 任务提交，
      * 不等待摘要执行，锁持有时间不受摘要 LLM 调用影响。
      *
@@ -81,7 +81,7 @@ public class SummaryService {
     /**
      * 异步任务：循环分批压缩，直到段内消息清空或达到批次上限。
      * 每批开始时重查段记录，取最新 covered_message_id，保证与并发触发互不干扰。
-     * <p>
+     *
      * 幂等：任一批失败/输出异常都不推进锚点，直接结束任务，下轮聊天重新触发续跑。
      *
      * @param conversationId 会话 ID
@@ -160,7 +160,7 @@ public class SummaryService {
         }
         String userPrompt = "已有摘要：\n" + (segment.getContent().isBlank() ? "（无）" : segment.getContent())
                 + "\n\n" + sb;
-        // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
+        // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兜底代码默认值
         String summaryModel = properties.getHistory().getSummaryModel();
         if (summaryModel == null || summaryModel.isBlank()) {
             summaryModel = properties.getLlm().getDefaultModel();

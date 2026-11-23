@@ -12,13 +12,13 @@ public interface ToolExecutionMapper {
 
     /**
      * 抢占执行权：唯一键冲突时返回 0（调用方据此判定"已执行过/正在执行"）。
-     * <p>必须与业务写入在同一事务中，才能保证台账与业务数据同生共死。
+     * 必须与业务写入在同一事务中，才能保证台账与业务数据同生共死。
      */
     int insertRunning(ToolExecution execution);
 
     /**
      * 创建待确认动作：写入 PENDING 状态与计划快照。
-     * <p>唯一键冲突返回 0，说明同一确认 ID 已存在。
+     * 唯一键冲突返回 0，说明同一确认 ID 已存在。
      */
     int insertPending(ToolExecution execution);
 

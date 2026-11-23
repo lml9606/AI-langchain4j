@@ -10,7 +10,7 @@ import org.springframework.context.annotation.Configuration;
 /**
  * 审计注解的 Spring AOP 装配：使用 programmatic advisor，不依赖 AspectJ 织入。
  *
- * <p>只匹配标注了 {@link AuditStep} 的方法；其他 Bean 不会被代理。
+ * 只匹配标注了 {@link AuditStep} 的方法；其他 Bean 不会被代理。
  */
 @Configuration(proxyBeanMethods = false)
 public class AuditAopConfig {

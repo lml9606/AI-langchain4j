@@ -16,7 +16,7 @@ import java.util.Set;
 /**
  * 混合检索服务：稠密语义（BGE-M3 + pgvector 余弦）与稀疏词权重（jieba 分词 + hashing → sparsevec 内积）
  * 双通道召回，RRF 融合排序。
- * <p>
+ *
  * 单通道可独立降级：稠密通道嵌入/DB 故障、稀疏通道分词/DB 故障均返回空列表（fail-open），
  * 双通道均空才整体降级为空（上游按无结果处理）。
  */
@@ -45,7 +45,7 @@ public class VectorSearchService {
 
     /**
      * 混合检索相关知识块：稠密 + 稀疏双通道召回后 RRF 融合，返回 topK。
-     * <p>
+     *
      * 用户隔离：当前身份取自 {@link UserContext}（HTTP 线程直查或图执行线程透传）；
      * 无身份上下文（null）时仅可见公共库（user_id IS NULL），安全默认宁缺勿滥。
      *
@@ -222,13 +222,13 @@ public class VectorSearchService {
 
     /**
      * 父子分块装配：检索命中子块后，按 parent_id 取父块整章上下文装配。
-     * <ul>
-     *   <li>新数据（parentId 非空）→ 取父块；父块 title 非空再取同 title 父块组按 id 序拼接
-     *       （长章节被拆成多父块时整组找回）；</li>
-     *   <li>孤儿子块（存量数据 parentId=null）→ 退化为子块原文；</li>
-     *   <li>多个命中指向同一逻辑章节 → 只装配一次（同文档同版本同 title 去重）；</li>
-     *   <li>单组受 parent-context-budget 限额，总数受 max-parents 限额，总长受 context-budget 限额。</li>
-     * </ul>
+     *
+     * - 新数据（parentId 非空）→ 取父块；父块 title 非空再取同 title 父块组按 id 序拼接
+     *       （长章节被拆成多父块时整组找回）；
+     * - 孤儿子块（存量数据 parentId=null）→ 退化为子块原文；
+     * - 多个命中指向同一逻辑章节 → 只装配一次（同文档同版本同 title 去重）；
+     * - 单组受 parent-context-budget 限额，总数受 max-parents 限额，总长受 context-budget 限额。
+     *
      * 父块查询失败降级为子块原文（fail-open，不阻断主流程）。
      */
     public List<KnowledgeChunk> assemble(List<KnowledgeChunk> hits) {

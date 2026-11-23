@@ -27,12 +27,11 @@ import java.util.Map;
 
 /**
  * 主生成节点：按意图选择 prompt，结合检索上下文与多轮历史生成回答。
- * 多轮上下文三条路径：
- * <ul>
- *   <li>指代消解：由服务层 QueryRewriter 在入图前完成，节点使用有效查询（改写句）；</li>
- *   <li>原文细节：当前话题段最近 N 轮原文以消息角色注入 messages，模型可直接引用前文内容；</li>
- *   <li>窗口外要点：当前话题段摘要拼入 system prompt，回忆早期历史。</li>
- * </ul>
+ *
+ * 多轮上下文分三部分：指代消解由服务层 QueryRewriter 在入图前完成，节点使用改写后的
+ * 有效查询；当前话题段最近 N 轮原文以消息角色注入 messages，模型可以直接引用前文；
+ * 窗口外要点由当前话题段摘要拼入 system prompt。
+ *
  * 防御策略：LLM 异常（超时/重试耗尽/熔断）→ 标记 error，由路由转兜底节点，
  * 保证图永远有输出，绝不向上裸抛异常。
  */
@@ -63,7 +62,7 @@ public class GenerateNode implements NodeAction<WorkflowState> {
         // 步骤2：窗口外的历史要点（段摘要）拼入 system prompt，帮助模型回忆早期内容
         String summary = state.summary();
         if (summary != null && !summary.isBlank()) {
-            // 提示词走配置化解析：DB 有覆盖用 DB 版（含字面 % 等非法格式时兑底默认模板），否则兑底代码默认值
+            // 提示词走配置化解析：DB 有覆盖用 DB 版（含字面 % 等非法格式时兜底默认模板），否则兜底代码默认值
             systemPrompt = systemPrompt + promptTemplateService.resolveFormatted(
                     "SUMMARY_BLOCK", PromptTemplates.SUMMARY_BLOCK, summary);
         }

@@ -16,12 +16,11 @@ import java.sql.SQLException;
 
 /**
  * 图与 Checkpoint 装配。
- * <ul>
- *   <li>优先 PostgresSaver（框架自建 lg4jthread / lg4jcheckpoint 两张表，服务重启后可断点恢复）；</li>
- *   <li>Postgres 不可用时按配置降级 MemorySaver（本地无 DB 也能起服务，仅丢失断点恢复能力）；</li>
- *   <li>memoryFallback=false 时 DB 不可用直接启动失败（fail-fast，生产建议）。</li>
- * </ul>
- * <p>
+ *
+ * - 优先 PostgresSaver（框架自建 lg4jthread / lg4jcheckpoint 两张表，服务重启后可断点恢复）；
+ * - Postgres 不可用时按配置降级 MemorySaver（本地无 DB 也能起服务，仅丢失断点恢复能力）；
+ * - memoryFallback=false 时 DB 不可用直接启动失败（fail-fast，生产建议）。
+ *
  * 注意：lg4j 两张表的表名与结构由 langgraph4j-postgres-saver 框架硬编码（每次启动
  * createTables(true) 重跑 DDL），不可改表名、不可合并，业务扩展一律走视图或自有审计表。
  */
@@ -31,12 +30,11 @@ public class GraphConfig {
 
     /**
      * 主图 Checkpoint Saver（对话工作流的节点快照持久化）。
-     * <ul>
-     *   <li>正常：PostgresSaver，快照落 lg4jcheckpoint 表（JSONB），重启后可断点恢复；</li>
-     *   <li>降级：DB 不可用且 checkpoint.memory-fallback=true 时返回 MemorySaver，
-     *       仅丢失持久化与断点恢复能力，服务可用；</li>
-     *   <li>fail-fast：DB 不可用且 memory-fallback=false 时抛出异常阻断启动。</li>
-     * </ul>
+     *
+     * - 正常：PostgresSaver，快照落 lg4jcheckpoint 表（JSONB），重启后可断点恢复；
+     * - 降级：DB 不可用且 checkpoint.memory-fallback=true 时返回 MemorySaver，
+     *       仅丢失持久化与断点恢复能力，服务可用；
+     * - fail-fast：DB 不可用且 memory-fallback=false 时抛出异常阻断启动。
      *
      * @param dataSource      数据源（PostgreSQL，ai_agent 库）
      * @param stateSerializer WorkflowState 序列化器（Jackson 实现，checkpoint JSONB 落库/读取用）

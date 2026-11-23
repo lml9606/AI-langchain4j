@@ -7,13 +7,13 @@ import java.time.OffsetDateTime;
 /**
  * 任务运行实例：一次多步骤业务任务的唯一标识和进度游标。
  *
- * <p>它不是审计表，而是执行事实源：
- * <ul>
- *   <li>{@code currentStep} 记录下一次应该从哪一步继续；</li>
- *   <li>{@code status} 记录任务处于规划、待确认、执行中还是终态；</li>
- *   <li>{@code leaseOwner/leaseUntil} 防止多实例同时执行同一个 run；</li>
- *   <li>{@code confirmationId} 把"用户确认过的批量写操作"和这条 run 绑定。</li>
- * </ul>
+ * 它不是审计表，而是执行事实源：
+ *
+ * - {@code currentStep} 记录下一次应该从哪一步继续；
+ * - {@code status} 记录任务处于规划、待确认、执行中还是终态；
+ * - {@code leaseOwner/leaseUntil} 防止多实例同时执行同一个 run；
+ * - {@code confirmationId} 把"用户确认过的批量写操作"和这条 run 绑定。
+ *
  */
 @Data
 public class TaskRun {

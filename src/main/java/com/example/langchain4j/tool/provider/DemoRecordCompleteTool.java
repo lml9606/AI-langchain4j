@@ -17,12 +17,8 @@ import java.util.Set;
 /**
  * 写工具：把当前用户的一条演示记录标记为完成（需要人工确认 + 幂等键）。
  *
- * <p>生产要点：
- * <ul>
- *   <li>WRITE 工具由执行器强制要求 {@code approved=true} 且幂等键非空；</li>
- *   <li>业务写与执行台账同事务，重复确认不会造成重复修改；</li>
- *   <li>越权记录一律返回"不存在或无权操作"，不泄露存在性。</li>
- * </ul>
+ * WRITE 工具由执行器强制要求 {@code approved=true} 且幂等键非空；业务写与执行台账同事务，
+ * 重复确认不会造成重复修改；越权记录一律返回“不存在或无权操作”，不泄露存在性。
  */
 @Component
 public class DemoRecordCompleteTool implements AgentTool {
@@ -74,7 +70,8 @@ public class DemoRecordCompleteTool implements AgentTool {
 
     /**
      * 定位目标记录：recordId 优先；否则按 title 精确匹配。
-     * <p>标题重名时返回 null 拒绝执行，不猜一个，避免改错数据。
+     *
+     * 标题重名时返回 null 拒绝执行，不猜一个，避免改错数据。
      */
     private Long resolveRecordId(String userId, JsonNode args) {
         JsonNode recordIdNode = args == null ? null : args.get("recordId");

@@ -13,7 +13,7 @@ import java.util.regex.Pattern;
 /**
  * 工具参数校验器：以 ToolDefinition.inputSchema 为唯一契约，在执行前做通用防御。
  *
- * <p>覆盖生产上最常见的约束：对象/数组/标量类型、required、enum、数值边界、
+ * 覆盖生产上最常见的约束：对象、数组、标量类型、required、enum、数值边界、
  * 字符串长度/正则、数组长度、additionalProperties=false、anyOf/oneOf/allOf。
  * 工具自身仍可做业务校验，但模型输出不能绕过这一层。
  */

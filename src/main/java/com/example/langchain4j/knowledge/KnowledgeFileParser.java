@@ -20,12 +20,11 @@ import java.util.Set;
 
 /**
  * 知识导入文件解析器（Apache Tika 实现）：扩展名白名单 + 魔数自动检测，统一提取纯文本。
- * <ul>
- *   <li>第一道防线：扩展名白名单（txt/md/markdown/pdf/docx），其余类型直接拒绝，防止垃圾文件污染知识库；</li>
- *   <li>第二道防线：Tika 按魔数（MIME）自动选择解析器——不信任扩展名，伪造扩展名的文件按真实类型解析；</li>
- *   <li>第三道防线：BodyContentHandler writeLimit 限制抽取文本量，防恶意/超大文档撑爆内存（压缩炸弹等）。</li>
- * </ul>
- * <p>
+ *
+ * - 第一道防线：扩展名白名单（txt/md/markdown/pdf/docx），其余类型直接拒绝，防止垃圾文件污染知识库；
+ * - 第二道防线：Tika 按魔数（MIME）自动选择解析器——不信任扩展名，伪造扩展名的文件按真实类型解析；
+ * - 第三道防线：BodyContentHandler writeLimit 限制抽取文本量，防恶意/超大文档撑爆内存（压缩炸弹等）。
+ *
  * 设计边界：只做"二进制 → 纯文本"，切块 / 嵌入 / 落库仍复用
  */
 @Component

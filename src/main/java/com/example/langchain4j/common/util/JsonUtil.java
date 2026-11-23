@@ -73,7 +73,7 @@ public final class JsonUtil {
     /**
      * 从 LLM 原始输出中提取 JSON 对象片段：截取第一个 '{' 到最后一个 '}'，
      * 防御模型在 JSON 外包裹 ```json 围栏或说明文字。
-     * <p>
+     *
      * 统一约定：提取失败（空输入/无花括号）返回空串而非抛异常，
      * 配合 fromJson 的空输入返回 null，调用方按各自降级路径处理（fail-open）。
      *

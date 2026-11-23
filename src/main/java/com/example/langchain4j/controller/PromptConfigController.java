@@ -20,7 +20,7 @@ import java.util.List;
 
 /**
  * Prompt 管理接入层：查看/保存/回退提示词（保存后热生效，version 递增审计）。
- * <p>
+ *
  * 角色说明：查看对全员开放；覆盖（保存/删除）标注 {@link RequireRole}(ADMIN)，
  * 由 RoleInterceptor 统一校验（普通用户 403）。
  */

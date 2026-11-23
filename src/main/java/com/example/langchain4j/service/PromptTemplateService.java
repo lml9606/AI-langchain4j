@@ -20,14 +20,14 @@ import java.util.stream.Collectors;
 
 /**
  * Prompt 配置服务：DB 覆盖代码默认提示词，保存后热生效（内存缓存，零查询开销）。
- * <p>
+ *
  * 三层语义：
- * <ul>
- *   <li>默认值兑底：key 无 DB 配置时返回代码内 PromptTemplates 常量（系统永远可用）；</li>
- *   <li>热加载：启动全量加载；保存/删除后仅更新对应 key 的缓存；</li>
- *   <li>白名单约束：key 必须是 PromptTemplates 已声明的常量名（反射枚举），
- *       拒绝任意 key 注入（防止提示词表被塞入无关内容混入缓存）。</li>
- * </ul>
+ *
+ * - 默认值兜底：key 无 DB 配置时返回代码内 PromptTemplates 常量（系统永远可用）；
+ * - 热加载：启动全量加载；保存/删除后仅更新对应 key 的缓存；
+ * - 白名单约束：key 必须是 PromptTemplates 已声明的常量名（反射枚举），
+ *       拒绝任意 key 注入（防止提示词表被塞入无关内容混入缓存）。
+ *
  * 版本化：upsert 每次保存 version+1（审计可追溯）；多版本回滚需扩展历史表。
  */
 @Slf4j
@@ -36,7 +36,7 @@ public class PromptTemplateService {
 
     /** 合法 key 白名单（PromptTemplates 中声明的全部字符串常量名，启动时反射枚举） */
     private final Set<String> knownKeys;
-    /** 内存缓存：promptKey → DB 配置（无 DB 覆盖时不含该 key，resolve 走默认值兑底） */
+    /** 内存缓存：promptKey → DB 配置（无 DB 覆盖时不含该 key，resolve 走默认值兜底） */
     private final Map<String, PromptConfig> cache = new ConcurrentHashMap<>();
     private final PromptConfigMapper promptConfigMapper;
 
@@ -67,7 +67,7 @@ public class PromptTemplateService {
     }
 
     /**
-     * 取生效提示词：DB 有覆盖返回 DB 版，否则返回代码默认值（兑底，永不返回空）。
+     * 取生效提示词：DB 有覆盖返回 DB 版，否则返回代码默认值（兜底，永不返回空）。
      *
      * @param key         提示词 key（PromptTemplates 常量名）
      * @param defaultText 代码默认值（调用方传 PromptTemplates.XXX）
@@ -82,11 +82,11 @@ public class PromptTemplateService {
 
     /**
      * 取生效提示词并做参数格式化（对 {@link #resolve} 的模板用法封装）。
-     * <p>
+     *
      * DB 覆盖文本是“格式串”身份：一旦含字面百分号（如“覆盖率达100%”）或占位符与
      * 代码默认模板不一致，{@code String.format} 会抛 IllegalFormatException；
      * 若不加防护，管理员一次误配置就能让生成链路整体报错（配置事故）。
-     * 此处失败时兑底代码默认模板重试 —— 默认模板是代码常量，占位符与参数严格匹配，必成。
+     * 此处失败时兜底代码默认模板重试 —— 默认模板是代码常量，占位符与参数严格匹配，必成。
      *
      * @param key         提示词 key
      * @param defaultText 代码默认模板（含与 args 匹配的 %d/%s 占位符）
@@ -97,7 +97,7 @@ public class PromptTemplateService {
         try {
             return String.format(template, args);
         } catch (Exception e) {
-            // DB 模板格式非法（字面 % / 占位符漂移）：兑底默认模板，防配置把链路改崩
+            // DB 模板格式非法（字面 % / 占位符漂移）：兜底默认模板，防配置把链路改崩
             log.warn("[prompt] format failed, fallback to default template, key={}: {}", key, e.getMessage());
             return String.format(defaultText, args);
         }

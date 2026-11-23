@@ -16,13 +16,13 @@ import java.util.Map;
 /**
  * 查询改写器（图外组件）：基于会话历史，把本轮 query 改写成不依赖历史也能理解的
  * 自包含句子，同时判断本轮输入归属的话题段（与改写合并为一次 LLM 调用）。
- * <p>
+ *
  * 防御策略：
- * <ul>
- *   <li>无历史 → 短路，不调 LLM（改写与话题判断由段解析兜底）；</li>
- *   <li>LLM 失败或输出异常 → 降级返回原句（宁可失忆不可失败）；</li>
- *   <li>输出控制字符清洗 + 长度防御（防模型输出废话解释）。</li>
- * </ul>
+ *
+ * - 无历史 → 短路，不调 LLM（改写与话题判断由段解析兜底）；
+ * - LLM 失败或输出异常 → 降级返回原句（宁可失忆不可失败）；
+ * - 输出控制字符清洗 + 长度防御（防模型输出废话解释）。
+ *
  */
 @Slf4j
 @Service
@@ -65,7 +65,7 @@ public class QueryRewriter {
         }
         try {
             // 步骤3：LLM 话题归属 + 改写一步完成（网关封装：json_object 约束 + 截断感知 + 提取解析，不可用返回 null）
-            // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兑底代码默认值
+            // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兜底代码默认值
             JsonNode node = llmGateway.generateJson(LlmRequest.of(model,
                     promptTemplateService.resolve("REWRITE_SYSTEM", PromptTemplates.REWRITE_SYSTEM),
                     buildUserPrompt(cleaned, history, topics)).scene("rewrite"));

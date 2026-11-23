@@ -18,13 +18,13 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * 认证服务：注册（BCrypt 哈希 + 落库）与登录（哈希比对 + 签发 JWT）。
- * <p>
+ *
  * 安全约定：
- * <ul>
- *   <li>密码只存 BCrypt 哈希（自带盐），明文不出 service；</li>
- *   <li>登录失败不区分“用户不存在/密码错误”（防用户名枚举）；</li>
- *   <li>并发注册同名靠唯一索引兜底（预检查 + DuplicateKeyException 双保险）。</li>
- * </ul>
+ *
+ * - 密码只存 BCrypt 哈希（自带盐），明文不出 service；
+ * - 登录失败不区分“用户不存在/密码错误”（防用户名枚举）；
+ * - 并发注册同名靠唯一索引兜底（预检查 + DuplicateKeyException 双保险）。
+ *
  */
 @Slf4j
 @Service

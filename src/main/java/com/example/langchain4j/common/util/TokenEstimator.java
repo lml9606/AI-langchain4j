@@ -2,7 +2,7 @@ package com.example.langchain4j.common.util;
 
 /**
  * 粗略 token 估算：中文按 1 字符 ≈ 1 token，其余字符按 4 字符 ≈ 1 token。
- * <p>
+ *
  * 用途：生成视图按 token 预算装配历史窗口。生产级精确核算应接入真实 tokenizer
  * （如 langchain4j Tokenizer），本类收敛估算逻辑，替换点唯一。
  */

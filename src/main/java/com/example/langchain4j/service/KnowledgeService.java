@@ -79,7 +79,7 @@ public class KnowledgeService {
     /** 块类型：父块（整章上下文，不嵌入）/ 子块（嵌入供检索） */
     private static final String TYPE_PARENT = "PARENT";
     private static final String TYPE_CHILD = "CHILD";
-    /** 子块 content 标题前缀分隔符（方案 A：父标题拼进子块，解决父标题检索不到问题） */
+    /** 子块正文前的标题路径分隔符：把父标题拼进子块，保证父标题也能被检索命中 */
     private static final String TITLE_SEPARATOR = "｜";
     /** 父块标题路径分隔符：保留从章节到小节的层级，供检索与上下文装配使用 */
     private static final String TITLE_PATH_SEPARATOR = " > ";
@@ -152,7 +152,7 @@ public class KnowledgeService {
     /**
      * 导入长文档并发布为一个新版本。
      *
-     * <p>发布模型：写块阶段不改 active_version，新版本对检索完全不可见；写完后只更新文档主表一行指针完成切换。
+     * 发布模型：写块阶段不改 active_version，新版本对检索完全不可见；写完后只更新文档主表一行指针完成切换。
      * 因此导入失败不会出现"查到半成品"，切换成本也与文档块数无关。
      *
      * @param documentId 逻辑文档 ID；空则生成 UUID（新文档）
@@ -302,7 +302,7 @@ public class KnowledgeService {
 
     /**
      * 文件上传导入：逐个文件“解析 → 父子分块落库”，单文件失败不中断整批（与 batchImport 同语义）。
-     * <p>
+     *
      * 与 batchImport 的差异：文件在 HTTP 线程内同步解析（PDF/Word 解析为 CPU 密集但单文件几秒内完成），
      * 文件名写入 metadata.source 便于溯源，块归属当前登录用户（私有库）。
      *
@@ -315,7 +315,7 @@ public class KnowledgeService {
 
     /**
      * 文件上传导入（可指定逻辑文档与版本）。
-     * <p>
+     *
      * 多文件请求不能共用同一个 documentId；单文件可传 documentId/version 实现同文档版本更新。
      */
     public KnowledgeFileImportResponse uploadFiles(List<MultipartFile> files, String documentId, Integer version) {
@@ -672,7 +672,7 @@ public class KnowledgeService {
     /**
      * 子块语义切分：先按空行 / Markdown 标题拆成语义单元，代码块作为一个整体保留；
      * 单元只在预算内合并，单个单元超预算时才递归回退到句子 / 硬切。
-     * <p>
+     *
      * 字符上限与 token 估算上限同时生效。token 使用 {@link TokenEstimator} 的保守估算，
      * 目的是防止长英文、代码块或中文密排文本把嵌入输入撑爆；它不是模型 tokenizer 的精确替代。
      */
@@ -1005,7 +1005,7 @@ public class KnowledgeService {
 
     /**
      * 解析版本：基于"当前发布版本"与"库中最大块版本"取较大者作为基准再 +1。
-     * <p>基准同时看两边：active_version 决定对外可见版本，最大块版本用于跳过失败导入残留的草稿号，
+     * 基准同时看两边：active_version 决定对外可见版本，最大块版本用于跳过失败导入残留的草稿号，
      * 避免同一版本号被两次导入复用。
      */
     private int resolveVersion(KnowledgeDocument document, String userId, Integer version) {
@@ -1120,16 +1120,16 @@ public class KnowledgeService {
 
     /**
      * 父子分块第一层：按文档结构自适应选择父块层级（整段上下文，不嵌入），不写死 H3。
-     * <ul>
-     *   <li>逐层统计小节长度，优先选择中位数落在目标区间、且超长比例可接受的层级；</li>
-     *   <li>选中层是父块边界；更深层标题内容并入当前父块，不再单独成块；</li>
-     *   <li>更浅层标题只提供标题路径；若其自有导语，导语仍单独保留，避免丢内容；</li>
-     *   <li>父块 title 保存从顶级章节到父块边界的完整路径；</li>
-     *   <li>唯一的一级标题视为文档标题，不进入子标题路径；其自有导语仍保留为前言父块；</li>
-     *   <li>没有可识别标题的文档按长度窗口切分；只有标题、没有正文的叶节点仍保留，避免丢内容；</li>
-     *   <li>围栏代码块中的 # 注释不当作标题；</li>
-     *   <li>父块超预算 → 复用 {@link #splitSemantic} 按软标题/段落/句子续切，续块保持同一 title。</li>
-     * </ul>
+     *
+     * - 逐层统计小节长度，优先选择中位数落在目标区间、且超长比例可接受的层级；
+     * - 选中层是父块边界；更深层标题内容并入当前父块，不再单独成块；
+     * - 更浅层标题只提供标题路径；若其自有导语，导语仍单独保留，避免丢内容；
+     * - 父块 title 保存从顶级章节到父块边界的完整路径；
+     * - 唯一的一级标题视为文档标题，不进入子标题路径；其自有导语仍保留为前言父块；
+     * - 没有可识别标题的文档按长度窗口切分；只有标题、没有正文的叶节点仍保留，避免丢内容；
+     * - 围栏代码块中的 # 注释不当作标题；
+     * - 父块超预算 → 复用 {@link #splitSemantic} 按软标题/段落/句子续切，续块保持同一 title。
+     *
      */
     List<ParentSection> splitParents(String content, int parentSize) {
         return splitParents(content, parentSize, DEFAULT_PARENT_TARGET_MIN,
@@ -1281,18 +1281,18 @@ public class KnowledgeService {
 
     /**
      * 自适应选择父块层级：只决定“按哪一级标题切”，不在这里实际切块。
-     * <p>
-     * 按 H2 -&gt; H3 -&gt; H4 ... 从浅到深逐层统计整篇文档：
-     * <ol>
-     *   <li>每个标题的长度 = 从标题开始到下一个同级/更浅标题之前的整段字符数，
-     *       因此包含它下面的全部子标题和正文；</li>
-     *   <li>同一层少于 2 个标题时样本不足，跳过该层；</li>
-     *   <li>中位数落在 targetMin ~ targetMax，且长度超过 parentSize 的标题占比不超过 25%，
-     *       该层才合格；</li>
-     *   <li>返回最浅的合格层，保留尽可能多的父块上下文；</li>
-     *   <li>所有层都不合格时，返回中位数离目标区间最近的一层；若所有层都样本不足，
-     *       退回最深层。</li>
-     * </ol>
+     *
+     * 按 H2 -> H3 -> H4 ... 从浅到深逐层统计整篇文档：
+     *
+     * - 每个标题的长度 = 从标题开始到下一个同级/更浅标题之前的整段字符数，
+     *       因此包含它下面的全部子标题和正文；
+     * - 同一层少于 2 个标题时样本不足，跳过该层；
+     * - 中位数落在 targetMin ~ targetMax，且长度超过 parentSize 的标题占比不超过 25%，
+     *       该层才合格；
+     * - 返回最浅的合格层，保留尽可能多的父块上下文；
+     * - 所有层都不合格时，返回中位数离目标区间最近的一层；若所有层都样本不足，
+     *       退回最深层。
+     *
      * 目标区间只影响选层，不是父块硬约束；超长父块随后由 splitSemantic 继续切分。
      */
     private int chooseParentLevel(String content, List<Heading> headings,
@@ -1366,7 +1366,7 @@ public class KnowledgeService {
 
     /**
      * 计算当前标题父块的结束位置。
-     * <p>
+     *
      * 比选中层更浅的标题只提供路径，取自己的直接正文，遇到下一标题即结束；
      * 选中层是父块边界，必须一直扩展到下一个同级或更浅标题，不能在其子标题处提前结束。
      * 例如 parentLevel=3 时，H3 会一直包含到下一个 H3/H2/H1，其下 H4/H5 都属于该 H3 父块。

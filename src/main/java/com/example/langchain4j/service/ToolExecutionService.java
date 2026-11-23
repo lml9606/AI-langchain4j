@@ -15,12 +15,10 @@ import java.util.List;
 /**
  * 工具执行台账服务：写工具幂等闸门与结果查询。
  *
- * <p>核心约束：台账写入必须与业务写入处在同一个数据库事务里（{@link Propagation#MANDATORY}）。
- * 这样只有两种可能：
- * <ul>
- *   <li>业务成功 + 台账 SUCCEEDED 一起提交；</li>
- *   <li>业务失败，台账 RUNNING 一起回滚，重试可以安全重跑。</li>
- * </ul>
+ * 核心约束：台账写入必须与业务写入处在同一个数据库事务里（{@link Propagation#MANDATORY}）。
+ * 这样只有两种可能：业务成功与台账 SUCCEEDED 一起提交；业务失败时台账 RUNNING 一起回滚，
+ * 重试可以安全重跑。
+ *
  * 不存在"台账说成功、业务没改"或"业务改了、台账没记"的中间态。
  */
 @Slf4j
@@ -53,7 +51,7 @@ public class ToolExecutionService {
     /**
      * 创建待确认动作台账：用户看到确认卡片时，数据库里已经有 PENDING 记录。
      *
-     * <p>调用顺序必须是 Redis trySet 成功后；若这里返回 false，调用方要撤销 Redis key，
+     * 调用顺序必须是 Redis trySet 成功后；若这里返回 false，调用方要撤销 Redis key，
      * 避免出现"有确认令牌、没有数据库记录"。
      *
      * @return true=写入成功；false=同一确认 ID 已存在
@@ -71,7 +69,7 @@ public class ToolExecutionService {
     /**
      * 批量创建待确认台账：一个确认令牌对应多个写步骤时使用。
      *
-     * <p>任一条写入失败就抛异常，让整个事务回滚，避免出现"部分写步骤有台账、
+     * 任一条写入失败就抛异常，让整个事务回滚，避免出现"部分写步骤有台账、
      * 部分没有"的半成品确认卡片。调用方收到异常后负责撤销 Redis 令牌。
      */
     @Transactional
@@ -91,7 +89,8 @@ public class ToolExecutionService {
 
     /**
      * 幂等闸门：抢占执行权、命中重放或判定冲突。
-     * <p>必须在业务事务内调用，返回值决定调用方是继续执行还是直接返回上次结果。
+     *
+     * 必须在业务事务内调用，返回值决定调用方是继续执行还是直接返回上次结果。
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public BeginResult begin(ToolExecution execution) {
@@ -157,7 +156,8 @@ public class ToolExecutionService {
 
     /**
      * 新用户消息放弃旧确认：按会话取消仍处于 PENDING 的台账。
-     * <p>即使用户确认令牌已过期或 Redis 丢失，数据库里也不会留下悬空的待确认记录。
+     *
+     * 即使用户确认令牌已过期或 Redis 丢失，数据库里也不会留下悬空的待确认记录。
      *
      * @return 实际取消的记录数
      */

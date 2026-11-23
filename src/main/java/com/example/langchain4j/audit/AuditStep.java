@@ -11,7 +11,7 @@ import java.lang.annotation.Target;
  * 耗时、入参摘要、返回值摘要和异常。会话 ID 自动从参数名
  * conversationId/threadId 或 WorkflowState 中读取。
  *
- * <p>注意：Spring AOP 只拦截经过代理的 public 方法调用；同类内部 this 调用、
+ * 注意：Spring AOP 只拦截经过代理的 public 方法调用；同类内部 this 调用、
  * private 方法不会触发。需要结构化业务字段时，让返回值实现
  * {@link AuditPayloadProvider}，不要依赖 toString。
  */

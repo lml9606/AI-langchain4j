@@ -7,8 +7,8 @@ import org.springframework.stereotype.Component;
 
 /**
  * 回答预算解析器：把意图、查询复杂度和回答模式映射为统一预算。
- * <p>
- * 优先级：deep &gt; 代码/闲聊 &gt; knowledge_qa simple/compound。
+ *
+ * 优先级：deep、代码/闲聊、knowledge_qa simple/compound。
  * 复杂度来自 IntentPlanNode 的同一次规划调用，不在生成节点重复做规则判断。
  */
 @Component

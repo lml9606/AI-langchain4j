@@ -32,21 +32,17 @@ import java.util.concurrent.TimeUnit;
 /**
  * 写操作确认令牌：短期授权，保存服务端计划与归属。
  *
- * <p>同一确认的执行互斥由编排层的严格会话锁负责（Watchdog + Redis 故障 fail-closed），
+ * 同一确认的执行互斥由编排层的严格会话锁负责（Watchdog + Redis 故障 fail-closed），
  * 本类负责令牌的创建、读取与删除，并维护"一个会话最多一个待确认动作"的约束：
  * 每个会话只有一个 {@code agent:confirm:{conversationId}} key，值本身就是当前待确认动作，
  * 创建新动作直接 trySet，已存在则拒绝，确认/取消后删除该 key。
  *
- * <p>令牌只是"用户同意过"的短期凭证，不是执行结果的事实源。创建令牌的同时会向
+ * 令牌只是"用户同意过"的短期凭证，不是执行结果的事实源。创建令牌的同时会向
  * {@code ai_tool_execution} 写入 PENDING 台账（含计划快照）；用户确认后由工具执行继续
  * 流转状态。令牌被删、过期、Redis 重启都不会丢失这条业务记录。
  *
- * <p>故障策略：
- * <ul>
- *   <li>创建失败 → 抛 503，绝不下发无法执行的令牌；</li>
- *   <li>读取失败 → 抛 503，不能伪装成"令牌不存在"；</li>
- *   <li>令牌不存在/归属不符/过期 → 统一按"不存在"处理，不泄露他人令牌。</li>
- * </ul>
+ * 故障策略：创建失败抛 503，绝不下发无法执行的令牌；读取失败抛 503，不能伪装成
+ * "令牌不存在"；令牌不存在、归属不符或过期统一按"不存在"处理，不泄露他人令牌。
  */
 @Slf4j
 @Service
@@ -68,7 +64,8 @@ public class ConfirmationService {
 
     /**
      * 创建待确认动作：先写 Redis 单会话 key，再写 PENDING 台账。
-     * <p>台账写失败会撤销 Redis key，保证不会下发"有令牌、无记录"的确认卡片。
+     *
+     * 台账写失败会撤销 Redis key，保证不会下发"有令牌、无记录"的确认卡片。
      *
      * @return 含 confirmationId 与过期时间的待确认动作
      * @throws BizException Redis 不可用时抛出（fail-closed，不下发无法执行的令牌）
@@ -81,7 +78,7 @@ public class ConfirmationService {
                                 List<Map<String, Object>> plan,
                                 String summary,
                                 String risk) {
-        // 兼容旧版单写确认：沿用 confirmationId 作为幂等键，不追加 stepNo。
+        // 无任务快照的单写确认：沿用 confirmationId 作为幂等键，不追加 stepNo。
         return create(userId, conversationId, model, "", plan, summary, risk,
                 List.of(new PendingWriteStep(0, tool, argsFromPlan(plan, tool))));
     }
@@ -89,10 +86,10 @@ public class ConfirmationService {
     /**
      * 批量确认：一个令牌覆盖本轮全部写步骤。
      *
-     * <p>每个写步骤对应一条 PENDING 台账，幂等键为 {@code runId:stepNo}；
+     * 每个写步骤对应一条 PENDING 台账，幂等键为 {@code runId:stepNo}；
      * 用户确认后 TaskRunExecutor 按步骤顺序执行，不会重复写。
      *
-     * @param runId 任务运行 ID；空字符串表示旧版单写链路
+     * @param runId 任务运行 ID；空字符串表示没有任务快照的单写链路
      * @param steps 待确认写步骤（stepNo 必须是计划中的真实步骤号）
      */
     @AuditStep("confirm-create")
@@ -166,7 +163,7 @@ public class ConfirmationService {
 
     /**
      * 幂等键必须跨"重新确认"保持稳定：
-     * 旧版单写用 confirmationId；多步骤用 runId:stepNo，重试换令牌也不会重复写。
+     * 无任务快照的单写用 confirmationId；多步骤用 runId:stepNo，重试换令牌也不会重复写。
      */
     private String executionId(PendingAction action, PendingWriteStep step) {
         if (action.runId() == null || action.runId().isBlank()) {
@@ -214,7 +211,8 @@ public class ConfirmationService {
 
     /**
      * 新消息取消旧确认前读取令牌：只读、不删除。
-     * <p>Redis 读失败返回空，不阻断数据库取消；真正的删除在数据库事务提交后执行。
+     *
+     * Redis 读失败返回空，不阻断数据库取消；真正的删除在数据库事务提交后执行。
      */
     public Optional<PendingAction> findPendingForCancellation(String conversationId,
                                                               String userId) {
@@ -243,7 +241,8 @@ public class ConfirmationService {
 
     /**
      * 数据库取消提交后精准删除旧令牌。
-     * <p>先比对 confirmationId 与 userId，避免误删期间新创建的令牌；Redis 删除失败只告警，
+     *
+     * 先比对 confirmationId 与 userId，避免误删期间新创建的令牌；Redis 删除失败只告警，
      * 数据库已是 CANCELLED，确认链路会拒绝执行，令牌由 TTL 兜底过期。
      */
     public void deletePendingIfMatches(String conversationId, String userId,
@@ -279,7 +278,8 @@ public class ConfirmationService {
 
     /**
      * 只读取并校验令牌，不抢占、不删除。
-     * <p>供编排层在进入会话锁前做归属校验；Redis 故障抛 503，而不是伪装成令牌不存在。
+     *
+     * 供编排层在严格会话锁内做归属校验；Redis 故障抛 503，而不是伪装成令牌不存在。
      */
     public Optional<PendingAction> preview(String conversationId, String confirmationId,
                                            String userId) {
@@ -288,7 +288,8 @@ public class ConfirmationService {
 
     /**
      * 完成确认：删除会话当前令牌（成功执行或用户取消后调用）。
-     * <p>只有会话 key 仍指向该令牌时才删除，避免误删后续新操作。
+     *
+     * 只有会话 key 仍指向该令牌时才删除，避免误删后续新操作。
      */
     public void finish(String conversationId, String confirmationId) {
         if (conversationId == null || conversationId.isBlank()

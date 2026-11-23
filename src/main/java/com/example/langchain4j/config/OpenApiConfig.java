@@ -10,12 +10,12 @@ import org.springframework.context.annotation.Configuration;
 
 /**
  * OpenAPI 文档配置（springdoc-openapi + Swagger UI）。
- * <p>
+ *
  * 访问路径：/swagger-ui.html（交互式调试页）与 /v3/api-docs（OpenAPI JSON）。
  * 认证说明：除 /api/auth/** 与 /actuator/** 外，全部接口需 JWT——先调
  * /api/auth/register 注册、/api/auth/login 登录拿到 token，点 UI 右上角
  * Authorize 填入（无需 Bearer 前缀，UI 自动拼接）即可调试其余接口。
- * <p>
+ *
  * 路径白名单说明：JwtAuthFilter 只拦 /api/**，/swagger-ui/** 与 /v3/api-docs/**
  * 不以 /api/ 开头，天然放行，无需改过滤器。
  */

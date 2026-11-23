@@ -11,7 +11,7 @@ import java.util.Map;
 /**
  * 提供给扩展规则的只读上下文。
  *
- * <p>扩展规则可以看到阶段、工作流、完整计划、工具定义和待确认动作，但规则本身只负责返回
+ * 扩展规则可以看到阶段、工作流、完整计划、工具定义和待确认动作，但规则本身只负责返回
  * “是否拒绝”，不能修改计划。真正的计划变更必须回到规划节点重新生成并重新走内置安全校验。
  */
 public record TaskPlanContext(TaskPlanPhase phase,
@@ -31,7 +31,7 @@ public record TaskPlanContext(TaskPlanPhase phase,
     /**
      * 深拷贝计划中的 Map/List，并全部包成不可修改视图。
      *
-     * <p>扩展规则拿到的是快照而不是状态里的原对象，即使规则内部尝试修改也不会影响真正执行的计划；
+     * 扩展规则拿到的是快照而不是状态里的原对象，即使规则内部尝试修改也不会影响真正执行的计划；
      * 误修改会直接得到 UnsupportedOperationException，由校验器 fail-closed。
      */
     private static List<Map<String, Object>> snapshotPlan(List<Map<String, Object>> plan) {

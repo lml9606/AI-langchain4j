@@ -23,17 +23,16 @@ import java.util.Map;
 /**
  * 任务崩溃恢复 worker。
  *
- * <p>场景：用户确认后进程在写步骤执行途中崩溃，数据库里 run 仍是 RUNNING，
+ * 场景：用户确认后进程在写步骤执行途中崩溃，数据库里 run 仍是 RUNNING，
  * 但对应的会话请求已经结束。租约到期后由本 worker 接管，从 currentStep 继续执行。
  *
- * <p>幂等保证：
- * <ul>
- *   <li>租约保证同一时刻只有一个实例推进同一条 run；</li>
- *   <li>已 SUCCEEDED 的步骤直接跳过；</li>
- *   <li>写步骤使用 {@code runId:stepNo}，重复调用只会重放台账结果。</li>
- * </ul>
+ * 幂等保证：
  *
- * <p>恢复完成后会补偿会话助手消息；reply_saved 保证同一终态最多补发一次。
+ * - 租约保证同一时刻只有一个实例推进同一条 run；
+ * - 已 SUCCEEDED 的步骤直接跳过；
+ * - 写步骤使用 {@code runId:stepNo}，重复调用只会重放台账结果。
+ *
+ * 恢复完成后会补偿会话助手消息；reply_saved 保证同一终态最多补发一次。
  */
 @Slf4j
 @Component
@@ -87,7 +86,7 @@ public class TaskRunRecoveryWorker {
 
     /**
      * 把任务终态补偿成会话助手消息。
-     * <p>幂等：run.reply_saved 是最终标记；如果会话最后一条已经是助手消息，直接标记完成；
+     * 幂等：run.reply_saved 是最终标记；如果会话最后一条已经是助手消息，直接标记完成；
      * 如果用户已经开启新话题（最后一条不是本任务的“确认执行”用户消息），不把旧任务答案插进新轮次。
      */
     private void saveRecoveryReply(TaskRunExecutor.TaskRunResult result) {

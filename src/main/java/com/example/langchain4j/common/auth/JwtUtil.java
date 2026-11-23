@@ -16,10 +16,10 @@ import java.util.Optional;
 
 /**
  * JWT 签发与校验（HS256 对称签名）。
- * <p>
+ *
  * Token 载荷只放 userId（subject）与 role（claim），不放任何敏感信息（JWT 可被解码，只是不可篡改）。
  * 校验失败（签名不符/过期/格式错误/缺少 role）统一返回 empty，由过滤器转 401。
- * <p>
+ *
  * 权衡说明：角色签在 Token 里，角色变更需重新登录才生效（最长 expireHours）；
  * 企业级若要求即时撤销管理员，可改为每次请求查 ai_user 或在网关层做角色下发。
  */

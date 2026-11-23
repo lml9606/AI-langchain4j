@@ -13,9 +13,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * 认证接入层：注册与登录（JWT 签发）。
- * <p>
- * 路径在 JwtAuthFilter 白名单内（无需 Token）；后续请求携带返回的
- * Authorization: Bearer &lt;token&gt; 头访问业务接口。
+ *
+ * 路径在 JwtAuthFilter 白名单内（无需 Token）；后续请求携带登录返回的
+ * Authorization 请求头（Bearer 令牌）访问业务接口。
  */
 @RestController
 @RequestMapping("/api/auth")
@@ -29,7 +29,7 @@ public class AuthController {
 
     /**
      * 注册：创建用户并直接签发 Token（注册即登录）。
-     * <p>
+     *
      * 特殊条件：用户名已存在时返回业务错误码（防枚举，与不存在账号登录错误同文案）。
      *
      * @param request 注册请求（用户名全局唯一；密码以 BCrypt 哈希落库，明文不存储）

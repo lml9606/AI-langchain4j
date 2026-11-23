@@ -9,14 +9,11 @@ import org.springframework.stereotype.Service;
 
 /**
  * LLM 统一门面：负责文本/JSON 输出分流与结构化解析，具体调用/重试/限流/熔断交给 {@link LlmInvoker}。
- * <p>
- * 职责边界：
- * <ul>
- *   <li>LlmGateway：业务调用方看到的稳定 API，只保留 generate / generateJson 两个入口；</li>
- *   <li>LlmRequest：承载模型、消息、输出预算和日志场景，替代分散的方法重载；</li>
- *   <li>LlmInvoker：一次逻辑调用的重试、超时、模型级限流和线程隔离；</li>
- *   <li>LlmCircuitBreaker：按模型维护熔断状态，避免一个模型故障拖垮全部模型。</li>
- * </ul>
+ *
+ * LlmGateway 是业务调用方看到的稳定 API，只保留 generate 和 generateJson 两个入口；
+ * LlmRequest 承载模型、消息、输出预算和日志场景，替代分散的方法重载；LlmInvoker 负责
+ * 一次逻辑调用的重试、超时、模型级限流和线程隔离；LlmCircuitBreaker 按模型维护熔断状态，
+ * 避免一个模型故障拖垮全部模型。
  */
 @Slf4j
 @Service

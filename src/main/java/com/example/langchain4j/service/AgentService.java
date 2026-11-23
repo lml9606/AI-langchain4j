@@ -1,6 +1,7 @@
 package com.example.langchain4j.service;
 
 import com.example.langchain4j.audit.AuditEntry;
+import com.example.langchain4j.audit.AuditRecorder;
 import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.common.concurrent.BoundedCall;
 import com.example.langchain4j.common.constant.ChatOptions;
@@ -49,15 +50,12 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Supplier;
 
 /**
- * Agent 编排服务：限流 → 会话 → 锁 → 图执行 → 审计 → 响应组装。
- * <p>
- * 防御设计：
- * <ul>
- *   <li>限流（429）与会话锁（409）前置拒绝，保护下游；</li>
- *   <li>图执行整体超时，超时即中止：取消后台任务并返回降级应答，一问一答照常闭环；</li>
- *   <li>图内异常全部在节点层消化（fallback 节点保证有输出），此处只兜 graph 框架级异常；</li>
- *   <li>审计落库失败不阻断主流程（可观测性降级而非可用性降级）。</li>
- * </ul>
+ * Agent 编排服务：限流、会话、会话锁、图执行、审计和响应组装。
+ *
+ * 限流（429）与会话锁（409）在进入下游前拒绝；对话图有整体超时，超时后取消后台任务并
+ * 返回降级应答；确认写链路超时则返回“执行中”，由任务台账和恢复 worker 继续收口。图内
+ * 异常由节点层消化，这里只兜住 graph 框架级异常。审计落库失败不阻断主流程，因为审计是
+ * 可观测性旁路，不是业务事实源。
  */
 @Slf4j
 @Service
@@ -70,7 +68,7 @@ public class AgentService {
     private final ConversationService conversationService;
     private final QueryRewriter queryRewriter;
     private final SegmentService segmentService;
-    private final AuditService auditService;
+    private final AuditRecorder auditRecorder;
     private final SummaryService summaryService;
     private final ModelRegistry modelRegistry;
     private final TicketService ticketService;
@@ -90,7 +88,7 @@ public class AgentService {
                         TaskConfirmService taskConfirmService,
                         RateLimiter rateLimiter, SessionLock sessionLock,
                         ConversationService conversationService, QueryRewriter queryRewriter,
-                        SegmentService segmentService, AuditService auditService,
+                        SegmentService segmentService, AuditRecorder auditRecorder,
                         SummaryService summaryService, ModelRegistry modelRegistry,
                         TicketService ticketService, ThreadPoolTaskExecutor agentExecutor,
                         AgentProperties properties, AgentMetrics metrics,
@@ -106,7 +104,7 @@ public class AgentService {
         this.conversationService = conversationService;
         this.queryRewriter = queryRewriter;
         this.segmentService = segmentService;
-        this.auditService = auditService;
+        this.auditRecorder = auditRecorder;
         this.summaryService = summaryService;
         this.modelRegistry = modelRegistry;
         this.ticketService = ticketService;
@@ -121,11 +119,13 @@ public class AgentService {
     }
 
     /**
-     * 同步对话：invoke 全图，返回最终结果。
-     * <p>
-     * 关键设计：conversationId 同时作为 LangGraph 的 threadId ——
-     * checkpoint 按 threadId 隔离存储，因此“一个会话 = 一条 checkpoint 历史”，
-     * 会话续聊/断点恢复时直接用会话 ID 找回对应的图执行状态。
+     * 同步对话：在会话锁内完成用户消息落库、上下文装配、图执行和助手消息落库。
+     *
+     * conversationId 同时作为 LangGraph 的 threadId，checkpoint 按 threadId 隔离存储，
+     * 因此一个会话对应一条 checkpoint 历史，续聊或断点恢复时可以直接找回对应状态。
+     * 限流、输入清洗、模型解析和会话初始化在锁外完成；图执行异常和整体超时由后续调用统一处理。
+     *
+     * 返回本轮最终响应；输入非法、限流、会话锁冲突或执行失败时抛出对应的业务异常。
      */
     public ChatResponse chat(ChatRequest request) {
         long start = System.currentTimeMillis();
@@ -192,17 +192,14 @@ public class AgentService {
     /**
      * 确认写操作：令牌只做短期授权，执行状态由数据库台账兜底。
      *
-     * <p>完整生命周期：
-     * <ol>
-     *   <li>{@code preview} 只读校验令牌，不消耗；</li>
-     *   <li>会话归属校验；</li>
-     *   <li>严格会话锁内再次校验令牌：使用 Watchdog 自动续期，Redis 故障 fail-closed；</li>
-     *   <li>确认后直接推进任务：写工具在同一数据库事务里写业务数据 + 执行台账；</li>
-     *   <li>成功 {@code finish} 删除令牌；失败保留令牌供重试。</li>
-     * </ol>
+     * 入口先做限流和会话归属校验，然后在严格会话锁内只读取一次令牌。读取时使用
+     * Watchdog 自动续期的会话锁，Redis 故障按 fail-closed 处理，避免确认动作脱离锁执行。
+     * 锁定后先检查任务台账：正在执行返回执行中，已成功或已取消按幂等重放返回既有结果，
+     * 令牌不存在时也先查执行台账；只有台账允许时才进入确认执行或取消。
      *
-     * <p>令牌不存在时不再直接 404：先查执行台账，已成功则按幂等重放返回上次结果，
-     * 正在执行则返回 409，保证"响应丢了再点一次"不会重复写。
+     * 用户同意后，写工具会和执行台账在同一个数据库事务内完成；成功删除令牌，失败或
+     * 没有台账时保留令牌，允许用户用同一个 confirmationId 重试。重复点击由令牌和
+     * 台账幂等键共同拦截，不会重复写业务数据。
      */
     public ChatResponse confirm(ConfirmRequest request) {
         long start = System.currentTimeMillis();
@@ -216,7 +213,7 @@ public class AgentService {
         }
         conversationService.requireOwnership(conversationId, userId);
 
-        // 严格会话锁内只读取一次令牌：归属校验通过后再进入锁，避免双重 preview。
+        // 令牌读取放在严格会话锁内且只读一次：锁外只做会话归属校验，避免并发确认读到不同快照。
         return sessionLock.executeWithLockStrict(conversationId, () -> {
             Optional<ConfirmationService.PendingAction> current =
                     confirmationService.preview(conversationId, request.getConfirmationId(),
@@ -336,7 +333,7 @@ public class AgentService {
                             + "reason={}", action.conversationId(), idTail(action.confirmationId()),
                     e.getMessage());
         }
-        auditService.record(AuditEntry.text(action.conversationId(), "tool-confirm",
+        auditRecorder.record(AuditEntry.text(action.conversationId(), "tool-confirm",
                 GraphExecution.STATUS_SUCCESS, idTail(action.confirmationId()), "REJECTED", null,
                 System.currentTimeMillis() - start, null));
         confirmationService.finish(action.conversationId(), action.confirmationId());
@@ -356,7 +353,7 @@ public class AgentService {
     /**
      * 执行路径：按已确认计划推进任务，并以数据库台账判定成败。
      *
-     * <p>成功（台账 SUCCEEDED）删除令牌；失败或没有台账时保留令牌，
+     * 成功（台账 SUCCEEDED）删除令牌；失败或没有台账时保留令牌，
      * 用户可以用同一个 confirmationId 重试。重复执行由台账唯一键拦截。
      */
     private ChatResponse executeConfirmed(ConfirmationService.PendingAction action, String userId,
@@ -367,7 +364,7 @@ public class AgentService {
             conversationService.saveMessage(action.conversationId(), Message.ROLE_USER,
                     confirmQuery, action.model(), null);
             WorkflowState state = invokeTaskConfirm(action, userId, confirmQuery, start);
-            // 多步骤任务以 ai_task_run 为事实源；旧版单写继续用 ai_tool_execution。
+            // 多步骤任务以 ai_task_run 为事实源；无任务快照的单写分支继续用 ai_tool_execution。
             run = action.runId().isBlank() ? null
                     : taskRunService.find(userId, action.runId()).orElse(null);
             ToolExecution execution = action.runId().isBlank()
@@ -424,7 +421,7 @@ public class AgentService {
                         idTail(action.confirmationId()));
                 throw e;
             }
-            auditService.record(AuditEntry.text(action.conversationId(), "tool-confirm",
+            auditRecorder.record(AuditEntry.text(action.conversationId(), "tool-confirm",
                     GraphExecution.STATUS_FAILED, idTail(action.confirmationId()), "APPROVED",
                     Throwables.rootMessage(e), System.currentTimeMillis() - start, null));
             // 保留令牌：业务失败可重试，重复执行由 ai_tool_execution 唯一键拦截
@@ -453,7 +450,7 @@ public class AgentService {
                 : execution != null && execution.getStatus() == ToolExecution.Status.SUCCEEDED;
         boolean failed = !succeeded;
         String error = failed ? (run != null ? failureReason(run) : failureReason(execution)) : null;
-        auditService.record(AuditEntry.text(action.conversationId(), "tool-confirm",
+        auditRecorder.record(AuditEntry.text(action.conversationId(), "tool-confirm",
                 failed ? GraphExecution.STATUS_FAILED : GraphExecution.STATUS_SUCCESS,
                 idTail(action.confirmationId()), "APPROVED", error,
                 System.currentTimeMillis() - start, null));
@@ -608,8 +605,8 @@ public class AgentService {
     }
 
     /**
-     * 确认执行入口：不再进入独立确认图，直接按已确认计划推进任务。
-     * <p>
+     * 确认执行入口：直接按已确认计划推进任务，不重新意图识别或任务规划。
+     *
      * 执行事实以 ai_task_run / ai_task_step 为准；TaskConfirmService 只顺序调用
      * 执行、回答、收尾三个节点，保留审计和整体超时边界。
      */
@@ -622,18 +619,15 @@ public class AgentService {
 
     /**
      * 断点恢复：从最近 checkpoint 继续执行（无可恢复任务时返回 empty）。
-     * <p>
+     *
      * 机制说明：LangGraph 的 checkpoint 是按“超级步骤”在节点执行边界落盘的
      * （每执行完一个节点保存一次完整状态）。invoke(GraphInput.resume()) 会加载
      * 该 threadId 最近一次 checkpoint，从上次中断的节点之后继续跑，而不是重头执行。
-     * <p>
-     * 与 chat 一致的闭环约束：
-     * <ul>
-     *   <li>会话锁内执行：防止恢复与新请求并发写 checkpoint/消息；</li>
-     *   <li>仅当最后一轮未闭环（最新消息是 user，如进程中断）时才恢复；
-     *       超时降级轮已落库 assistant，属于已闭环，不会二次恢复产生双份回答；</li>
-     *   <li>恢复出的结果同样在锁内写回 assistant，保证短期记忆闭环。</li>
-     * </ul>
+     *
+     * 与 chat 一样在会话锁内执行，防止恢复与新请求并发写 checkpoint 和消息。
+     * 仅当最后一轮未闭环（最新消息是 user，例如进程中断）时才恢复；超时降级轮已经
+     * 落库 assistant，属于已闭环，不会二次恢复产生双份回答。恢复出的结果同样在锁内
+     * 写回 assistant，保证短期记忆闭环。
      */
     public Optional<WorkflowState> resume(String conversationId) {
         RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
@@ -673,7 +667,7 @@ public class AgentService {
 
     /**
      * 查询 checkpoint 快照（不存在或 saver 故障返回 empty）。
-     * <p>
+     *
      * StateSnapshot 是 LangGraph 对“某线程当前执行位置”的只读视图：
      * 包含最新状态数据（state()）、下一个待执行节点（next()）等元信息，
      * 可用于排查“图跑到哪一步了”。
@@ -793,15 +787,15 @@ public class AgentService {
         return "";
     }
 
+    /** 把对象安全转成字符串键 Map；类型不符返回空 Map。 */
     @SuppressWarnings("unchecked")
-    /** 把对象安全转成字符串键 Map；类型不符返回空 Map。 */ private Map<String, Object> mapOf(
-            Object value) {
+    private Map<String, Object> mapOf(Object value) {
         return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
     }
 
     /**
      * 入口输入规整：剔除控制字符 + 去首尾空白，清洗后为空抛 400。
-     * <p>
+     *
      * 与 Controller @Valid 的分工：@Valid 拦空串与超长（4000），这里堵
      * “全是控制字符”的漏网输入，并保证存库/改写/入图全链路使用同一份清洗后的 query。
      * QueryRewriter 与 EntryNode 内的清洗保留为兜底（幂等，再洗一遍无害）。
@@ -820,16 +814,13 @@ public class AgentService {
     /**
      * 锁内准备并执行图（同步路径）：保存用户消息 → 双视图装配 → 改写/话题归属 → 图执行。
      *
-     * <p>调用约束：必须已在 {@code sessionLock.executeWithLock(...)} 内调用。<br>
+     * 调用约束：必须已在 {@code sessionLock.executeWithLock(...)} 内调用。
      * 会话锁覆盖“用户消息落库 → 图执行 → 助手消息落库”整轮闭环，保证同一会话
      * 不会并发进入，也不会出现上一轮回答尚未落库、下一轮就读历史的乱序问题。
      *
-     * <p>职责边界：
-     * <ul>
-     *   <li>不处理限流、输入清洗、模型解析、会话创建——这些已在 chat() 入口完成；</li>
-     *   <li>不负责助手消息落库、指标上报、转人工建单，由调用方拿到结果后处理；</li>
-     *       其他异常转成业务错误码抛出。</li>
-     * </ul>
+     * 职责边界：不处理限流、输入清洗、模型解析和会话创建，这些已经在 chat() 入口完成；
+     * 不负责助手消息落库、指标上报和转人工建单，由调用方拿到结果后处理。图执行异常
+     * 转成业务错误码抛出。
      *
      * @param conversationId 会话 ID（同时作为 LangGraph threadId 与 checkpoint 隔离维度）
      * @param userId         当前用户 ID（入图后按用户隔离知识库与工具数据）
@@ -850,10 +841,9 @@ public class AgentService {
 
     /**
      * 每轮锁内准备（同步/流式共用），装配两条独立的历史视图：
-     * <ul>
-     *   <li>改写视图（跨话题最近 N 条）→ 【只给改写器】：指代消解 + 话题判断；</li>
-     *   <li>生成视图（当前话题段内原文）→ 【只给生成 LLM】：原文回放，其他话题不带。</li>
-     * </ul>
+     *
+     * 改写视图取跨话题最近 N 条，只给改写器，用于指代消解和话题判断；生成视图取
+     * 当前话题段内原文，只给生成 LLM，其他话题不带，避免把无关上下文混入回答。
      *
      * @param conversationId 会话 ID（threadId）
      * @param query          原始用户输入（落库与改写输入）
@@ -894,7 +884,7 @@ public class AgentService {
         rewriteOutput.put("topic", rewrite.topic());
         rewriteOutput.put("newTopic", rewrite.newTopic());
         rewriteOutput.put("segmentId", segment.getSegmentId());
-        auditService.record(AuditEntry.of(conversationId, "rewrite",
+        auditRecorder.record(AuditEntry.of(conversationId, "rewrite",
                 GraphExecution.STATUS_SUCCESS, rewriteInput, rewriteOutput, null, rewriteCostMs,
                 null));
         // 步骤6：生成视图（当前话题段内原文，只给生成 LLM；token 预算装配，排除当前消息）
@@ -937,10 +927,10 @@ public class AgentService {
 
     /**
      * 图执行（同步路径）：提交专用线程池 + 整体超时中止 + 异常转换为业务错误码。
-     * <p>
-     * 超时策略：future.cancel(true) 尽力中断工作线程，本轮改返回降级应答
-     * （user + assistant 照常落库），一问一答闭环；cancel 返回 false 说明任务恰在
-     * 超时点完成，直接取回结果，不浪费本轮执行。
+     *
+     * 超时策略：Future 超时后调用 cancel(true) 尽力中断工作线程，并直接返回降级应答，
+     * 不再等待或接收可能稍后完成的返回值；user 和 assistant 仍照常落库，保证一问一答闭环。
+     * 取消是否成功只用于观测，不能说明工作线程一定已经停止。
      *
      * @param conversationId 会话 ID（threadId，checkpoint 隔离维度）
      * @param userId         当前用户 ID（入图注入）
@@ -949,6 +939,8 @@ public class AgentService {
      * @param history        生成视图（当前话题段内原文，role/content 键值对）
      * @param summary        当前话题段摘要（可为空）
      * @param model          本轮模型名（已解析）
+     * @param answerMode     回答模式（已归一）
+     * @param visibility     检索可见范围（已归一）
      * @return 图执行最终状态；超时返回降级 WorkflowState（fallback=true）
      */
     private WorkflowState invokeGraph(String conversationId, String userId, String query,
@@ -968,9 +960,10 @@ public class AgentService {
 
     /**
      * 统一的图执行入口：提交专用线程池 + 整体超时 + 超时取消 + 结果/异常审计。
-     * <p>
+     *
      * 只执行一次，不做 catch 后重跑：写工具、模型调用都可能产生副作用，
-     * 盲目重跑会重复执行工具或重复计费。超时取消失败说明任务刚好完成，再取回结果即可。
+     * 盲目重跑会重复执行工具或重复计费。超时后统一按 TIMEOUT 处理，不会在等待返回后
+     * 再接收结果；需要跨超时恢复的业务由任务台账和恢复 worker 负责。
      */
     private WorkflowState executeGraphWithTimeout(CompiledGraph<WorkflowState> graph,
                                                   Map<String, Object> inputs, RunnableConfig config,
@@ -987,7 +980,8 @@ public class AgentService {
 
     /**
      * 确认执行有界执行：写链路同样必须有整体超时。
-     * <p>超时不能伪装成业务失败：写步骤可能已经提交，任务台账会保留 RUNNING，
+     *
+     * 超时不能伪装成业务失败：写步骤可能已经提交，任务台账会保留 RUNNING，
      * 由恢复 worker 完成并补偿会话回复。调用方收到“执行中”后应查询任务状态。
      */
     private WorkflowState executeConfirmWithTimeout(Supplier<WorkflowState> task,
@@ -1015,7 +1009,7 @@ public class AgentService {
             throw new BizException(ErrorCode.TOO_MANY_REQUESTS, "系统繁忙，请稍后重试");
         }
         long costMs = System.currentTimeMillis() - start;
-        auditService.record(AuditEntry.text(conversationId, "tool-confirm",
+        auditRecorder.record(AuditEntry.text(conversationId, "tool-confirm",
                 GraphExecution.STATUS_FAILED, idTail(conversationId), "TIMEOUT",
                 "确认执行超时，任务可能仍在后台执行", costMs, null));
         metrics.recordGraphDuration(costMs);
@@ -1070,7 +1064,7 @@ public class AgentService {
 
         // TIMEOUT：已请求取消，但不保证工作线程立即停止；返回降级应答保证一问一答闭环。
         long costMs = System.currentTimeMillis() - start;
-        auditService.record(AuditEntry.text(conversationId, "workflow",
+        auditRecorder.record(AuditEntry.text(conversationId, "workflow",
                 GraphExecution.STATUS_FAILED, query, null, "执行超时已中止", costMs, null));
         metrics.recordGraphDuration(costMs);
         log.warn("[agent] execution timeout after {}s, thread={}, task cancelled, return fallback answer",
@@ -1085,12 +1079,12 @@ public class AgentService {
                                         long start) {
         long costMs = System.currentTimeMillis() - start;
         if (state == null) {
-            auditService.record(AuditEntry.text(conversationId, "workflow",
+            auditRecorder.record(AuditEntry.text(conversationId, "workflow",
                     GraphExecution.STATUS_FAILED, query, null, "图执行未返回状态", costMs, null));
             throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行未返回结果");
         }
         metrics.recordGraphDuration(costMs);
-        auditService.record(AuditEntry.text(conversationId, "workflow",
+        auditRecorder.record(AuditEntry.text(conversationId, "workflow",
                 GraphExecution.STATUS_SUCCESS, query, state.result(), null, costMs,
                 state.rootCause()));
         return state;
@@ -1101,7 +1095,7 @@ public class AgentService {
      */
     private BizException graphFailure(Throwable cause, String conversationId, String query,
                                       long start) {
-        auditService.record(AuditEntry.text(conversationId, "workflow",
+        auditRecorder.record(AuditEntry.text(conversationId, "workflow",
                 GraphExecution.STATUS_FAILED, query, null, Throwables.rootMessage(cause),
                 System.currentTimeMillis() - start, null));
         if (cause instanceof BizException biz) {
@@ -1147,7 +1141,7 @@ public class AgentService {
         output.put("confidence", evidence.confidence());
         output.put("sufficient", evidence.sufficient());
         output.put("rootCause", state.rootCause());
-        auditService.record(AuditEntry.of(conversationId, "retrieval-plan",
+        auditRecorder.record(AuditEntry.of(conversationId, "retrieval-plan",
                 GraphExecution.STATUS_SUCCESS, input, output, null, null, null));
     }
 

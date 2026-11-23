@@ -12,13 +12,13 @@ import javax.sql.DataSource;
 
 /**
  * 业务表 DDL 初始化：后台线程容错执行 schema.sql。
- * <p>
+ *
  * 不使用 spring.sql.init（其连接失败会阻断启动）；本初始化器：
- * <ul>
- *   <li>后台执行，不阻塞启动流程；</li>
- *   <li>PG 不可达时仅告警（DDL 幂等，可在 DB 恢复后重启补建）；</li>
- *   <li>checkpoint 两表（lg4jthread / lg4jcheckpoint）由 PostgresSaver 自行建表，与此解耦。</li>
- * </ul>
+ *
+ * - 后台执行，不阻塞启动流程；
+ * - PG 不可达时仅告警（DDL 幂等，可在 DB 恢复后重启补建）；
+ * - checkpoint 两表（lg4jthread / lg4jcheckpoint）由 PostgresSaver 自行建表，与此解耦。
+ *
  */
 @Slf4j
 @Configuration

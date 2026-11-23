@@ -10,7 +10,7 @@ public final class PromptTemplates {
 
     /**
      * 意图与检索规划：一次调用完成意图分类 + 主查询/子查询/复杂度/风险规划。
-     * <p>
+     *
      * 不要求模型输出 confidence：置信度必须来自检索证据与质检，不能由规划模型自报。
      * %d 由 IntentPlanNode 用配置值 maxSubQueries 填充，避免提示词与代码上限漂移。
      */

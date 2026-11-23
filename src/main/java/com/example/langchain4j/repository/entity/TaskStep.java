@@ -7,7 +7,7 @@ import java.time.OffsetDateTime;
 /**
  * 任务步骤：一次工具调用的持久化状态。
  *
- * <p>每步单独记录状态和结果，目的是让任务可以从失败步骤继续，而不是整轮重跑。
+ * 每步单独记录状态和结果，目的是让任务可以从失败步骤继续，而不是整轮重跑。
  * 写步骤的 {@code idempotencyKey = runId + ':' + stepNo}，
  * 与 {@code ai_tool_execution} 的幂等键严格对应。
  */

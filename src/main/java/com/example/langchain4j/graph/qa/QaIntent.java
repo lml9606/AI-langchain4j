@@ -4,8 +4,8 @@ import java.util.Set;
 
 /**
  * 知识问答意图常量与白名单。
- * <p>
- * 从旧 IntentNode 中抽出：意图是跨节点共享的领域枚举，不应该依附在某个已删除的节点上。
+ *
+ * 意图是跨节点共享的领域常量，未知值统一降级为简单对话，避免误检索或误调工具。
  */
 public final class QaIntent {
 

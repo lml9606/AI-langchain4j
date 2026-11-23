@@ -11,18 +11,20 @@ import java.util.Map;
 
 /**
  * Agent 业务指标：集中定义与埋点，暴露到 /actuator/prometheus。
- * <p>
+ *
  * 指标清单（Prometheus 输出名，点号自动转下划线）：
- * <ul>
- *   <li>agent_requests_total —— 对话请求总数；</li>
- *   <li>agent_graph_duration_seconds —— 图执行整体耗时；</li>
- *   <li>agent_fallback_total —— 兜底节点触发次数（异常路径健康度）；</li>
- *   <li>agent_rate_limited_total —— 限流拒绝次数；</li>
- *   <li>llm_calls_total{model,outcome} —— LLM 调用次数（按模型、成功/失败）；</li>
- *   <li>llm_call_duration_seconds{model} —— LLM 单次调用耗时（含重试）；</li>
- *   <li>llm_truncated_total{model} —— LLM 输出被 maxOutputTokens 截断次数（截断感知，不再静默降级）；</li>
- *   <li>llm_circuit_open —— 熔断器状态（1=打开，0=关闭）。</li>
- * </ul>
+ *
+ * - agent_requests_total —— 对话请求总数；
+ * - agent_graph_duration_seconds —— 图执行整体耗时；
+ * - agent_fallback_total —— 兜底节点触发次数（异常路径健康度）；
+ * - agent_rate_limited_total —— 限流拒绝次数；
+ * - llm_calls_total{model,outcome} —— LLM 调用次数（按模型、成功/失败）；
+ * - llm_call_duration_seconds{model} —— LLM 单次调用耗时（含重试）；
+ * - llm_truncated_total{model} —— LLM 输出被 maxOutputTokens 截断次数（截断感知，不再静默降级）；
+ * - llm_circuit_open{model} —— 熔断器状态（1=打开，0=关闭）；
+ * - tool_calls_total{tool,outcome} —— 工具调用次数；
+ * - tool_call_duration_seconds{tool} —— 工具单次调用耗时。
+ *
  * 线程池指标（队列深度/活跃线程）在 AsyncConfig 注册，此处不重复。
  */
 @Component

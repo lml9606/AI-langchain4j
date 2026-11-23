@@ -6,14 +6,14 @@ import java.time.OffsetDateTime;
 
 /**
  * 会话段摘要：会话内一个话题段（segment）的完整摘要（重写式，见 SummaryService）。
- * <p>
+ *
  * 生命周期：
- * <ol>
- *   <li>话题切换时创建段记录（start_message_id = 当前消息 id，content 为空）；</li>
- *   <li>段内滑出窗口的消息达到阈值后，异步把「已有摘要 + 新增对话」重写为完整摘要
- *       覆盖 content（非增量拼接），covered_message_id 记录已覆盖到哪条消息（增量锚点）；</li>
- *   <li>用户切回旧话题时，按段注入对应摘要 + 该段窗口，其他段不注入。</li>
- * </ol>
+ *
+ * - 话题切换时创建段记录（start_message_id = 当前消息 id，content 为空）；
+ * - 段内滑出窗口的消息达到阈值后，异步把「已有摘要 + 新增对话」重写为完整摘要
+ *       覆盖 content（非增量拼接），covered_message_id 记录已覆盖到哪条消息（增量锚点）；
+ * - 用户切回旧话题时，按段注入对应摘要 + 该段窗口，其他段不注入。
+ *
  */
 @Data
 public class ConversationSummary {

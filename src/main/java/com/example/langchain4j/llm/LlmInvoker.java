@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * LLM 单次逻辑调用执行器：模型路由 → 熔断检查 → 模型级限流 → 超时调用 → 重试 → 熔断计数。
- * <p>
+ *
  * 限流维度是“模型”而不是“用户”：入口限流保护服务，模型级限流保护上游配额，
  * 两者职责不同，不能互相替代。
  */
@@ -108,7 +108,7 @@ public class LlmInvoker {
     /**
      * 单次模型调用：所有请求统一设置输出上限，避免某些调用绕过全局 token 防护。
      *
-     * <p>超时、取消和异常归一复用 {@link BoundedCall}；这里只负责把通用结果翻译成
+     * 超时、取消和异常归一复用 {@link BoundedCall}；这里只负责把通用结果翻译成
      * 模型调用语义，不再重复实现 FutureTask/get/cancel 模板。
      */
     private LlmResult invokeOnce(String modelName, List<ChatMessage> messages,

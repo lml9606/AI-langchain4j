@@ -2,17 +2,17 @@ package com.example.langchain4j.common.constant;
 
 /**
  * 对话请求的公共选项常量与归一化。
- * <p>
+ *
  * answerMode：
- * <ul>
- *   <li>auto：标准问答链路，检索范围、回答预算和质检强度由图内证据决定；</li>
- *   <li>deep：调用方明确要求深度处理，放宽检索候选并提高质检强度。</li>
- * </ul>
+ *
+ * - auto：标准问答链路，检索范围、回答预算和质检强度由图内证据决定；
+ * - deep：调用方明确要求深度处理，放宽检索候选并提高质检强度。
+ *
  * visibility：
- * <ul>
- *   <li>all：公共知识库 + 当前用户知识库；</li>
- *   <li>private：仅当前用户知识库。</li>
- * </ul>
+ *
+ * - all：公共知识库 + 当前用户知识库；
+ * - private：仅当前用户知识库。
+ *
  */
 public final class ChatOptions {
 

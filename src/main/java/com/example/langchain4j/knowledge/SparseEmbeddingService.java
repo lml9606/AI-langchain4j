@@ -16,10 +16,10 @@ import java.util.Set;
 /**
  * 稀疏向量服务：jieba 分词 → log-TF 词权重 → hashing trick 映射到固定维度 → L2 归一化，
  * 输出 pgvector sparsevec 文本格式（{idx:weight,...}/DIM，索引 1-based）。
- * <p>
+ *
  * 与稠密通道（BGE-M3 语义向量）互补：本通道负责"词精确命中"（专有名词/型号/缩写），
  * 稠密通道负责语义泛化，两路 RRF 融合。
- * <p>
+ *
  * 不使用 BGE-M3 原生 sparse 输出：Ollama /api/embed 只返回稠密向量，sparse 需要额外推理服务
  * （FlagEmbedding/TEI）；"分词 + 统计权重"是同一形态（维度=词、值=权重）的轻量落地。
  * 未引入 IDF 全局统计：需维护 term 文档频次表（双写+并发更新），当前知识库规模下 log-TF 足够区分。

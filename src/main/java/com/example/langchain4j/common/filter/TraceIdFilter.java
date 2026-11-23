@@ -15,13 +15,13 @@ import java.io.IOException;
 
 /**
  * TraceId 过滤器：为每个 HTTP 请求生成/透传 traceId，并打一行请求访问日志。
- * <ul>
- *   <li>上游已带 X-Trace-Id 则透传（跨服务串联），否则新生成；</li>
- *   <li>写入 SLF4J MDC，配合 logback pattern 中的 %X{traceId} 输出到每条日志；</li>
- *   <li>响应头回写 X-Trace-Id，客户端报障时可凭此定位日志；</li>
- *   <li>请求结束打访问日志（方法/路径/状态/耗时），仅限 /api/ 前缀，探针与静态资源不产生噪音；</li>
- *   <li>请求结束清理 MDC，防止线程池复用导致 traceId 串号。</li>
- * </ul>
+ *
+ * - 上游已带 X-Trace-Id 则透传（跨服务串联），否则新生成；
+ * - 写入 SLF4J MDC，配合 logback pattern 中的 %X{traceId} 输出到每条日志；
+ * - 响应头回写 X-Trace-Id，客户端报障时可凭此定位日志；
+ * - 请求结束打访问日志（方法/路径/状态/耗时），仅限 /api/ 前缀，探针与静态资源不产生噪音；
+ * - 请求结束清理 MDC，防止线程池复用导致 traceId 串号。
+ *
  * 注意：MDC 是线程本地变量，图执行线程池中的日志由
  * {@code AsyncConfig} 的 TaskDecorator 负责传递 MDC 上下文。
  */

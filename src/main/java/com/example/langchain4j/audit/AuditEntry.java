@@ -9,7 +9,7 @@ import java.util.LinkedHashMap;
 /**
  * 一次审计记录：执行事实的统一载体，与存储实现解耦。
  *
- * <p>executionId 优先取当前请求 traceId，保证同一次请求的节点、工具、改写、
+ * executionId 优先取当前请求 traceId，保证同一次请求的节点、工具、改写、
  * 整体执行记录可以串成一条链路；没有 MDC 时退化为随机 ID。
  */
 public record AuditEntry(String executionId,

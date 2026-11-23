@@ -27,11 +27,10 @@ import java.util.Set;
 /**
  * 任务执行节点：只负责按计划顺序调用工具并收集轨迹。
  *
- * <p>权限、参数 Schema、写契约由 {@link ToolExecutor} 在真正执行前最终校验；
- * 计划契约在规划和确认阶段已经校验过，这里不再重复展开整个工作流。
- * <p>
- * 观察语义最小化：某一步失败不抛异常，继续执行后续步骤；工具结果为空也保留轨迹，
- * 由回答节点统一说明“未查询到/查询失败”，避免半途中断导致用户拿不到任何反馈。
+ * 权限、参数 Schema 和写契约由 {@link ToolExecutor} 在真正执行前最终校验；计划契约在规划
+ * 和确认阶段已经校验过，这里不再重复展开整个工作流。工具失败不会以裸异常形式抛给图，
+ * 而是写入轨迹或任务状态，由回答节点解释。任务台账路径按任务规则停止并把任务标记失败；
+ * 内存路径对非致命失败继续后续步骤，权限、限流、超时、参数错误等致命错误提前停止。
  */
 @Slf4j
 @Component
@@ -64,7 +63,7 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
         this.taskRunExecutor = taskRunExecutor;
     }
 
-    /** 兼容旧测试/旧 checkpoint：没有任务运行时走内存计划执行。 */
+    /** 轻量装配：只使用 ToolExecutor 执行内存计划，不启用任务台账；生产链路使用完整构造。 */
     public TaskExecuteNode(ToolExecutor toolExecutor, AgentProperties properties) {
         this.toolExecutor = toolExecutor;
         this.properties = properties;
@@ -72,7 +71,12 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
         this.taskRunExecutor = null;
     }
 
-    /** 按计划顺序调用工具，收集调用轨迹与证据；致命错误时提前停止。 */
+    /**
+     * 按计划推进工具调用，返回轨迹、证据、任务状态或错误信息。
+     *
+     * 有任务台账时创建或恢复 TaskRun 并交给 TaskRunExecutor 推进；没有任务台账时走内存
+     * 计划执行。节点不会因为单个工具业务失败直接抛异常，而是把结果写入轨迹，由回答节点解释。
+     */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
         if (taskRunService != null && taskRunExecutor != null) {
@@ -82,8 +86,10 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
     }
 
     /**
-     * 多步骤执行：先确保任务已持久化，再由 TaskRunExecutor 推进。
-     * <p>未确认时只执行只读步骤，遇到写步骤会停下，交给确认节点。
+     * 任务台账路径：确保 TaskRun 存在后按步骤表推进。
+     *
+     * 未确认时只执行只读步骤，遇到写步骤停下并保留任务状态，交给确认节点。副作用是创建
+     * 任务、更新步骤状态；另一个实例持有执行租约时返回 busy 错误，不继续生成半成品回答。
      */
     private Map<String, Object> applyWithRun(WorkflowState state) {
         String runId = state.taskRunId();
@@ -137,7 +143,12 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
                 .orElse("");
     }
 
-    /** 旧版内存计划执行：没有任务表时的兼容路径。 */
+    /**
+     * 无任务台账时的内存执行路径：按计划顺序同步调用工具，不持久化步骤状态。
+     *
+     * 每一步都追加 trace，成功结果抽取 evidence；空计划或契约级致命错误返回 error。
+     * 普通工具失败保留轨迹继续执行，回答节点根据轨迹给出可解释答复。
+     */
     private Map<String, Object> applyInMemory(WorkflowState state) {
         ToolContext context = new ToolContext(state.userId(), state.conversationId(),
                 state.taskApproved(), state.taskIdempotencyKey());

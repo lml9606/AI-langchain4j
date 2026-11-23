@@ -21,7 +21,7 @@ import java.util.Map;
 
 /**
  * 敏感词管理接入层：词表增删/启停（管理端操作，改后热更新输出审核缓存）。
- * <p>
+ *
  * 角色说明：词表为运营资产，整类标注 {@link RequireRole}(ADMIN)，
  * 由 RoleInterceptor 统一校验（普通用户 403）。
  */

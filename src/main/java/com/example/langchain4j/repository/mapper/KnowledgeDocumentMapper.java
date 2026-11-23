@@ -21,7 +21,7 @@ public interface KnowledgeDocumentMapper {
 
     /**
      * 抢占导入权：把 READY/FAILED 置为 IMPORTING。
-     * <p>超过 staleMinutes 仍为 IMPORTING 视为进程异常退出，允许新任务接管，避免永久卡死。
+     * 超过 staleMinutes 仍为 IMPORTING 视为进程异常退出，允许新任务接管，避免永久卡死。
      *
      * @return 影响行数；0 表示已有导入在进行
      */

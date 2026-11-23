@@ -3,8 +3,8 @@ package com.example.langchain4j.tool.runtime;
 import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.audit.AuditEntry;
+import com.example.langchain4j.audit.AuditRecorder;
 import com.example.langchain4j.repository.entity.GraphExecution;
-import com.example.langchain4j.service.AuditService;
 import com.example.langchain4j.tool.api.ToolContext;
 import com.example.langchain4j.tool.api.ToolResult;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -13,17 +13,17 @@ import lombok.extern.slf4j.Slf4j;
 /**
  * 工具执行记录器：指标、审计、日志统一收口。
  *
- * <p>记录失败不能影响工具结果：指标异常被吞掉，审计内部也会降级为告警。
+ * 记录器自身不把指标异常抛给业务；审计实现必须遵守接口约定，自行吞掉或降级异常。
  * 单独抽出后，确认链路或其他执行入口可以复用同一套记录口径。
  */
 @Slf4j
 public final class ToolExecutionRecorder {
 
-    private final AuditService auditService;
+    private final AuditRecorder auditRecorder;
     private final AgentMetrics metrics;
 
-    public ToolExecutionRecorder(AuditService auditService, AgentMetrics metrics) {
-        this.auditService = auditService;
+    public ToolExecutionRecorder(AuditRecorder auditRecorder, AgentMetrics metrics) {
+        this.auditRecorder = auditRecorder;
         this.metrics = metrics;
     }
 
@@ -42,7 +42,7 @@ public final class ToolExecutionRecorder {
         }
         String conversationId = context.conversationId().isBlank()
                 ? "tool-debug" : context.conversationId();
-        auditService.record(AuditEntry.text(conversationId, "tool:" + toolName,
+        auditRecorder.record(AuditEntry.text(conversationId, "tool:" + toolName,
                 result.success() ? GraphExecution.STATUS_SUCCESS : GraphExecution.STATUS_FAILED,
                 JsonUtil.toJson(args), JsonUtil.toJson(result.summary()),
                 result.success() ? null : result.errorCode() + ":" + result.errorMessage(), cost,

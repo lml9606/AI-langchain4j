@@ -11,8 +11,8 @@ import java.util.concurrent.RejectedExecutionException;
 /**
  * 异步审计记录器：业务线程只提交任务，数据库写入在隔离线程池执行。
  *
- * <p>审计不是业务事实源，队列满时丢弃并告警，保证对话主链路不被审计拖慢。
- * executionId（traceId）在创建 AuditEntry 时已固定，异步后仍可串联链路。
+ * 审计不是业务事实源，队列满时丢弃并告警，保证对话主链路不被审计拖慢。
+ * executionId（traceId）在创建 AuditEntry 时已经固定，异步后仍可串联同一次请求的审计链路。
  */
 @Slf4j
 @Component("asyncAuditRecorder")
@@ -27,6 +27,7 @@ public class AsyncAuditRecorder implements AuditRecorder {
         this.executor = executor;
     }
 
+    /** 提交一条异步写入；线程池拒绝时丢弃审计并告警，不阻塞业务。 */
     @Override
     public void record(AuditEntry entry) {
         try {

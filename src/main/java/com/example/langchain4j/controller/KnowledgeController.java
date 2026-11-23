@@ -58,11 +58,11 @@ public class KnowledgeController {
 
     /**
      * 文件上传导入：multipart 上传 PDF/Word/Markdown/txt，服务端解析文本后走父子分块落库。
-     * <p>
+     *
      * 特殊条件：单文件失败不中断整批（逐文件结果供重试失败项）；块归属当前登录用户（私有库）；
      * 单文件大小上限见 spring.servlet.multipart.max-file-size 配置。
-     * <p>
-     * 文档说明：OpenAPI 将参数覆写描述为单文件 binary（Knife4j 4.4.0 不渲染 array&lt;binary&gt;
+     *
+     * 文档说明：OpenAPI 将参数覆写描述为单文件 binary（Knife4j 4.4.0 不渲染 array 形式
      * 表单参数，原生推断的 List 会导致调试页无文件选择框）；实际接口支持同名 files 参数重复传多个文件。
      *
      * @param files 上传文件列表（支持多选；单次数量上限同 agent.knowledge.batch-max-documents）
@@ -81,7 +81,7 @@ public class KnowledgeController {
 
     /**
      * 更新知识块：内容变更后重嵌向量。
-     * <p>
+     *
      * 特殊条件：仅限本人私有块，公共库块 403。
      *
      * @param id      知识块 id
@@ -97,7 +97,7 @@ public class KnowledgeController {
 
     /**
      * 删除知识块。
-     * <p>
+     *
      * 特殊条件：仅限本人私有块，公共库块 403。
      *
      * @param id 知识块 id

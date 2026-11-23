@@ -3,7 +3,7 @@ package com.example.langchain4j.common.util;
 /**
  * 轻量文本处理：安全取值、trim 回退和截断。
  *
- * <p>这些逻辑在响应组装、任务确认和任务回答节点中重复出现；集中后行为一致，
+ * 这些逻辑在响应组装、任务确认和任务回答节点中重复出现；集中后行为一致，
  * 避免某处 trim、某处不 trim 导致展示结果不一致。
  */
 public final class Texts {

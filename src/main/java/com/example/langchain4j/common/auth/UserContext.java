@@ -5,14 +5,14 @@ import com.example.langchain4j.common.exception.ErrorCode;
 
 /**
  * 当前登录用户上下文（ThreadLocal）。
- * <p>
+ *
  * 生命周期：
- * <ul>
- *   <li>HTTP 线程：{@code JwtAuthFilter} 解析 Token 后写入，请求结束清理；</li>
- *   <li>异步线程：{@code AsyncConfig} 的 TaskDecorator 随任务透传（图执行线程池内的检索
- *       按当前用户做知识库隔离）；</li>
- *   <li>无上下文场景（定时任务等）：{@link #get()} 返回 null，调用方按“匿名仅见公共数据”降级。</li>
- * </ul>
+ *
+ * - HTTP 线程：{@code JwtAuthFilter} 解析 Token 后写入，请求结束清理；
+ * - 异步线程：{@code AsyncConfig} 的 TaskDecorator 随任务透传（图执行线程池内的检索
+ *       按当前用户做知识库隔离）；
+ * - 无上下文场景（定时任务等）：{@link #get()} 返回 null，调用方按“匿名仅见公共数据”降级。
+ *
  */
 public final class UserContext {
 

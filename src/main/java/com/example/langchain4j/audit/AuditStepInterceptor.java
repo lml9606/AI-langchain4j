@@ -8,7 +8,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
 import org.springframework.aop.support.AopUtils;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Method;
@@ -18,7 +17,7 @@ import java.util.Map;
 /**
  * {@link AuditStep} 方法拦截器：公开业务步骤的统一审计入口。
  *
- * <p>审计失败只告警，不影响业务；方法异常在记录后原样抛出。
+ * 审计失败只告警，不影响业务；方法异常在记录后原样抛出。
  */
 @Slf4j
 @Component
@@ -27,7 +26,7 @@ public class AuditStepInterceptor implements MethodInterceptor {
     private final AuditRecorder auditRecorder;
     private final AgentProperties properties;
 
-    public AuditStepInterceptor(@Qualifier("asyncAuditRecorder") AuditRecorder auditRecorder,
+    public AuditStepInterceptor(AuditRecorder auditRecorder,
                                 AgentProperties properties) {
         this.auditRecorder = auditRecorder;
         this.properties = properties;

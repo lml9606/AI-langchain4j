@@ -23,13 +23,13 @@ import java.util.Optional;
 
 /**
  * JWT 认证过滤器：Bearer Token 校验 + 身份上下文写入。
- * <p>
+ *
  * 策略（默认拒绝原则）：
- * <ul>
- *   <li>白名单放行：/api/auth/**（注册/登录）、/actuator/**（探针与 Prometheus 采集无凭证）；</li>
- *   <li>其余 /api/** 必须携带合法 Authorization: Bearer &lt;token&gt;，否则 401 直接响应（不进 Controller）；</li>
- *   <li>非 /api 资源（静态页等）不拦截，保持现有行为。</li>
- * </ul>
+ *
+ * - 白名单放行：/api/auth/**（注册/登录）、/actuator/**（探针与 Prometheus 采集无凭证）；
+ * - 其余 /api/** 必须携带合法 Authorization 请求头（Bearer 令牌），否则 401 直接响应（不进 Controller）；
+ * - 非 /api 资源（静态页等）不拦截，保持现有行为。
+ *
  * 过滤器内直接写 JSON 401（异常在过滤器链内不会被 {@code GlobalExceptionHandler} 捕获）。
  * 身份（userId + role）写入 {@link UserContext}，请求结束清理，防止 Tomcat 线程复用导致身份串号；
  * 角色授权由 {@link com.example.langchain4j.common.auth.RoleInterceptor} 在校验后逐接口收紧。

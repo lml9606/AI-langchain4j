@@ -14,7 +14,6 @@ import com.example.langchain4j.repository.entity.TaskRun;
 import com.example.langchain4j.tool.runtime.ConfirmationService;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
@@ -23,9 +22,9 @@ import java.util.Map;
 /**
  * 确认后执行编排：按已确认计划推进任务，再生成回答并收尾。
  *
- * <p>不重新走意图识别和任务规划，避免“用户确认 A、系统执行 B”。
- * 执行事实仍以 {@code ai_task_run} / {@code ai_task_step} 为准；
- * 这里只负责按顺序调用执行、回答、收尾三个节点，不再构建 LangGraph 子图。
+ * 不重新走意图识别和任务规划，避免“用户确认 A、系统执行 B”。执行事实以
+ * ai_task_run / ai_task_step 为准；这里只按顺序调用执行、回答、收尾三个节点，
+ * 不构建 LangGraph 子图。节点抛出的运行时异常继续向上抛出，非运行时异常统一包装。
  */
 @Slf4j
 @Service
@@ -45,7 +44,7 @@ public class TaskConfirmService {
                               TaskAnswerNode taskAnswerNode,
                               FinalizeNode finalizeNode,
                               AgentProperties properties,
-                              @Qualifier("asyncAuditRecorder") AuditRecorder auditRecorder) {
+                              AuditRecorder auditRecorder) {
         this.taskExecuteNode = taskExecuteNode;
         this.taskAnswerNode = taskAnswerNode;
         this.finalizeNode = finalizeNode;
@@ -54,12 +53,10 @@ public class TaskConfirmService {
     }
 
     /**
-     * 执行一条已确认动作。
+     * 执行一条已确认动作；输入是令牌中的完整计划、当前用户和确认轮问题。
      *
-     * @param action   Redis 令牌中的完整已确认计划
-     * @param userId   当前用户（任务表与工具执行的数据隔离维度）
-     * @param query    确认轮的用户问题（仅用于审计和回答上下文）
-     * @return 执行、回答、收尾后的最终状态
+     * 依次推进任务执行、回答生成和最终收尾，返回合并后的最终状态。节点异常会先写失败审计
+     * 再抛出；审计写入失败只告警，不改变业务异常和主流程。
      */
     public WorkflowState execute(ConfirmationService.PendingAction action,
                                  String userId, String query) {

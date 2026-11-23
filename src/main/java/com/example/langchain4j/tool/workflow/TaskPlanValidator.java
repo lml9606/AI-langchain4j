@@ -16,15 +16,12 @@ import java.util.Map;
 /**
  * 任务计划校验器：把规划、确认、执行三个阶段共用的安全校验收口到一处。
  *
- * <p>负责四类内置规则：
- * <ol>
- *   <li>固定工作流契约：步骤数量、工具名、顺序不能增删换乱序；</li>
- *   <li>每个工具的参数必须符合启动期固化的 JSON Schema；</li>
- *   <li>一次任务允许零到多个写操作，写操作上限由 agent.task.max-writes-per-task 控制；</li>
- *   <li>确认阶段 pending 中的每个写步骤都必须能在计划里按 stepNo 找到，工具和参数完全一致。</li>
- * </ol>
+ * 负责四类内置规则：固定工作流契约要求步骤数量、工具名和顺序不能增删换乱序；每个工具
+ * 的参数必须符合启动期固化的 JSON Schema；一次任务允许零到多个写操作，上限由
+ * agent.task.max-writes-per-task 控制；确认阶段 pending 中的每个写步骤都必须能在计划里
+ * 按 stepNo 找到，工具和参数完全一致。
  *
- * <p>业务扩展通过 {@link TaskPlanRule} 追加拒绝条件，内置规则不会被扩展规则绕过。
+ * 业务扩展通过 {@link TaskPlanRule} 追加拒绝条件，内置规则不会被扩展规则绕过。
  */
 @Component
 public class TaskPlanValidator {
@@ -40,7 +37,7 @@ public class TaskPlanValidator {
     /**
      * 解析模型输出的 steps，并校验固定工作流契约和参数 Schema。
      *
-     * <p>该入口只负责把原始 JSON 转成内部计划结构；写操作数量和 pending 一致性由
+     * 该入口只负责把原始 JSON 转成内部计划结构；写操作数量和 pending 一致性由
      * {@link #validate(TaskPlanPhase, TaskWorkflow, List, Map, Map)} 统一处理。
      */
     public ParseResult parseSteps(JsonNode stepsNode, TaskWorkflow workflow,
@@ -104,7 +101,7 @@ public class TaskPlanValidator {
     /**
      * 复核一份已经结构化的计划，并执行可插拔业务规则。
      *
-     * <p>调用顺序固定为：工作流契约 → 参数 Schema → 写操作数量 → 确认阶段 pending 一致性 →
+     * 调用顺序固定为：工作流契约、参数 Schema、写操作数量、确认阶段 pending 一致性、
      * 扩展规则。任一步失败立即返回，后续规则不会执行。
      */
     public PlanValidationResult validate(TaskPlanPhase phase,
@@ -181,7 +178,8 @@ public class TaskPlanValidator {
 
     /**
      * 确认阶段入口：节点只传计划和待确认动作，由校验器自己解析 workflow 和工具定义。
-     * <p>避免确认节点重复展开工作流目录，也保证确认阶段与规划阶段使用同一套契约来源。
+     *
+     * 避免确认节点重复展开工作流目录，也保证确认阶段与规划阶段使用同一套契约来源。
      */
     public PlanValidationResult validateConfirm(List<Map<String, Object>> plan,
                                                 Map<String, Object> pendingAction) {
@@ -246,7 +244,7 @@ public class TaskPlanValidator {
             }
             return ValidationResult.ok();
         }
-        // 兼容旧版单写确认卡片：只有 tool/args 两个字段
+        // 无任务快照的单写确认卡片：只有 tool/args 两个字段
         if (writeSteps.size() != 1) {
             return ValidationResult.invalid("PENDING_COUNT_MISMATCH",
                     "待确认动作只有单个工具，与多步骤计划不一致");

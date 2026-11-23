@@ -63,7 +63,7 @@ public class AgentProperties {
     /** 多轮上下文（短期记忆）配置 */
     private History history = new History();
 
-    /** 工具运行时配置（只读/写工具白名单、超时、确认与执行线程池） */
+    /** 工具运行时配置（全局写开关、超时、限流、人工确认与执行线程池） */
     private Tool tool = new Tool();
 
     /** 单次图执行整体超时（秒）；超时即中止本轮：取消后台任务并返回降级应答，一问一答照常闭环，用户可直接重发 */
@@ -397,7 +397,7 @@ public class AgentProperties {
     /**
      * 工具运行时全局配置。
      *
-     * <p>工具自身的能力、写风险、超时和限流在 ToolDefinition 中声明；这里只保留
+     * 工具自身的能力、写风险、超时和限流在 ToolDefinition 中声明；这里只保留
      * 全局应急开关与默认预算，避免同一策略分散在配置文件和数据库两处。
      */
     @Data

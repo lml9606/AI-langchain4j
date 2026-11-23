@@ -13,10 +13,10 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 轻量缓存封装（Redisson RBucket + JSON，全局 StringCodec 存纯字符串）。
- * <ul>
- *   <li>所有操作 fail-open：Redis 故障时读返回空、写静默降级，不阻断主流程；</li>
- *   <li>反序列化失败视为缓存未命中（回源重建），避免脏缓存污染业务。</li>
- * </ul>
+ *
+ * - 所有操作 fail-open：Redis 故障时读返回空、写静默降级，不阻断主流程；
+ * - 反序列化失败视为缓存未命中（回源重建），避免脏缓存污染业务。
+ *
  */
 @Slf4j
 @Component

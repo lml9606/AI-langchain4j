@@ -7,7 +7,7 @@ import java.util.stream.Collectors;
 /**
  * 工具说明书：名称、描述、参数 Schema、副作用、超时与策略。
  *
- * <p>工具的定义和策略以本对象为唯一事实源，不再在 application.properties 和
+ * 工具的定义和策略以本对象为唯一事实源，不再在 application.properties 和
  * 数据库里重复维护工具白名单/写权限。配置只保留全局应急开关和默认运行预算。
  */
 public record ToolDefinition(String name,
@@ -35,7 +35,7 @@ public record ToolDefinition(String name,
     /**
      * 工具策略：是否启用、单工具限流覆盖值、允许角色。
      *
-     * <p>maxCallsPerMinute=0 表示使用全局默认值；allowedRoles 为空表示所有已认证角色可用。
+     * maxCallsPerMinute=0 表示使用全局默认值；allowedRoles 为空表示不做角色限制。
      */
     public record ToolPolicy(boolean enabled, int maxCallsPerMinute, Set<String> allowedRoles) {
 

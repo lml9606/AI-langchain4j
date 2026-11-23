@@ -11,7 +11,7 @@ import java.util.List;
 /**
  * 工具演示业务服务：读工具的查询源 + 写工具的幂等业务写。
  *
- * <p>写路径只负责业务写入；幂等台账由 {@code WriteExecutionTemplate} 统一包裹：
+ * 写路径只负责业务写入；幂等台账由 {@code WriteExecutionTemplate} 统一包裹：
  * 业务服务不再依赖 confirmationId，也不直接操作执行台账。
  */
 @Slf4j
@@ -73,7 +73,7 @@ public class DemoRecordService {
     /**
      * 写工具：把记录标记为完成。
      *
-     * <p>幂等重放在 {@code WriteExecutionTemplate} 完成；本方法只保证业务状态幂等：
+     * 幂等重放在 {@code WriteExecutionTemplate} 完成；本方法只保证业务状态幂等：
      * 记录已经是 DONE 时不再重复修改。
      */
     @Transactional(rollbackFor = Exception.class)

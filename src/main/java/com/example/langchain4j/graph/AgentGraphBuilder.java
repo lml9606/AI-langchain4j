@@ -30,7 +30,6 @@ import org.bsc.langgraph4j.action.NodeAction;
 import org.bsc.langgraph4j.checkpoint.BaseCheckpointSaver;
 import org.bsc.langgraph4j.serializer.StateSerializer;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -42,28 +41,26 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
 
 /**
  * 图装配器：节点注册 + 边连接 + 条件路由 + 编译。
- * <p>
+ *
  * 节点职责：
- * <ul>
- *   <li>{@code entry}：输入清洗、会话状态重置、空输入兜底；</li>
- *   <li>{@code intent_plan}：一次结构化调用完成意图分类 + 主查询/子查询规划；</li>
- *   <li>{@code retrieval_probe}：轻量探针检索，判断是否需要升级完整检索；</li>
- *   <li>{@code retrieval_full}：按计划多查询召回，或质检 grounding 失败后的纠错重查；</li>
- *   <li>{@code generate}：按意图/复杂度/证据组装 prompt 并生成回答；</li>
- *   <li>{@code validate}：规则、证据、LLM 三层质检，决定通过/重生成/重查/兜底；</li>
- *   <li>{@code fallback}：异常或重试耗尽时的确定性降级回答；</li>
- *   <li>{@code handoff}：知识库确实无证据时转人工并标记根因；</li>
- *   <li>{@code task_plan / task_confirm / task_execute / task_answer}：工具任务分支；</li>
- *   <li>{@code finalize}：统一收尾，把结果、完成标记、待确认动作写回最终状态。</li>
- * </ul>
- * <p>
+ * entry 负责输入清洗、会话状态重置和空输入兜底。
+ * intent_plan 一次结构化调用完成意图分类以及主查询、子查询规划。
+ * retrieval_probe 轻量探针检索，判断是否需要升级完整检索。
+ * retrieval_full 按计划多查询召回，或质检 grounding 失败后的纠错重查。
+ * generate 按意图、复杂度和证据组装 prompt 并生成回答。
+ * validate 执行规则、证据和 LLM 三层质检，决定通过、重生成、重查或兜底。
+ * fallback 在异常或重试耗尽时给出确定性降级回答。
+ * handoff 在知识库确实无证据时转人工并标记根因。
+ * task_plan、task_confirm、task_execute、task_answer 组成工具任务分支。
+ * finalize 统一收尾，把结果、完成标记和待确认动作写回最终状态。
+ *
  * 证据优先主链路：
- * <pre>
+ *
  * START → entry → intent_plan → retrieval_probe → evidence_route
  *                                   ├─ 证据充分/计划简单 → generate → validate → finalize
  *                                   └─ 证据不足/复杂问题 → retrieval_full → generate/handoff
  * validate 失败：grounding → retrieval_full 重查；格式问题 → generate 重生成；超限 → fallback
- * </pre>
+ *
  * 条件边通过 {@link Router} 返回稳定的 route key，再映射到目标节点；
  * 图内不写业务判断，所有分流条件集中在 Router，便于单测覆盖。
  */
@@ -119,7 +116,7 @@ public class AgentGraphBuilder {
                              TaskAnswerNode taskAnswerNode,
                              FinalizeNode finalizeNode,
                              AgentProperties properties,
-                             @Qualifier("asyncAuditRecorder") AuditRecorder auditRecorder) {
+                             AuditRecorder auditRecorder) {
         this.stateSerializer = stateSerializer;
         this.router = router;
         this.entryNode = entryNode;
@@ -141,7 +138,7 @@ public class AgentGraphBuilder {
 
     /**
      * 编译主图。
-     * <p>
+     *
      * checkpointSaver 按 threadId（= conversationId）保存每个节点执行后的完整状态，
      * 用于断点恢复与执行位置排查；recursionLimit 见 {@link #recursionLimit()}。
      */
@@ -234,20 +231,32 @@ public class AgentGraphBuilder {
     }
 
     /**
-     * 给节点统一包一层审计：节点内部不再关心节点名、耗时、异常与结果摘要。
+     * 将业务节点包装成带节点级审计的异步节点。
      *
-     * <p>审计失败只告警，不影响节点返回；节点自身抛出的异常仍原样上抛，
-     * 保持原有路由和 fallback 行为不变。
+     * 构图阶段只创建包装器，不执行节点。图每次进入该节点时，包装器先抓取输入摘要，
+     * 再调用真实业务节点，然后根据输出中的 error 字段或异常生成审计记录，交给审计器
+     * 异步落库，最后把业务节点的原始返回值交回图。
+     *
+     * 节点正常返回且 error 为空时记成功；error 非空时记失败，但仍原样返回输出，由后续
+     * Router 决定是否走 fallback。节点抛出异常时先记失败审计再原样抛出，不改变图原有的
+     * 路由和异常语义。审计实现自身失败只告警，不影响节点返回。
+     *
+     * @param nodeName 图节点名，同时作为 {@code ai_graph_execution.node_name}
+     * @param node 真实业务节点
+     * @return 带节点级审计的异步节点动作
      */
     AsyncNodeAction<WorkflowState> audited(String nodeName,
                                            NodeAction<WorkflowState> node) {
+        // 构图期只创建包装器，此时不执行任何节点逻辑。
         return node_async(state -> {
             long start = System.currentTimeMillis();
             int maxLength = Math.max(1, properties.getLimits().getAuditNodeValueMaxLength());
+            // 输入摘要在节点执行前抓取，避免节点修改 state 后丢失原始输入。
             Map<String, Object> input = AuditPayloads.nodeInput(state, maxLength);
             try {
                 Map<String, Object> output = node.apply(state);
                 String error = text(output == null ? null : output.get(WorkflowState.ERROR));
+                // ERROR 非空表示业务失败，但节点返回值仍交给 Router 决定后续路由。
                 safeRecord(AuditEntry.of(state.conversationId(), nodeName,
                         error.isBlank() ? GraphExecution.STATUS_SUCCESS : GraphExecution.STATUS_FAILED,
                         input, AuditPayloads.output(output, maxLength),
@@ -256,6 +265,7 @@ public class AgentGraphBuilder {
                         rootCause(output, state)));
                 return output;
             } catch (Exception e) {
+                // 先记录失败事实，再原样抛出，保持图原有的异常处理行为。
                 safeRecord(AuditEntry.of(state.conversationId(), nodeName,
                         GraphExecution.STATUS_FAILED, input, Map.of(),
                         e.getMessage(), System.currentTimeMillis() - start, state.rootCause()));
@@ -270,7 +280,7 @@ public class AgentGraphBuilder {
         return current.isBlank() ? state.rootCause() : current;
     }
 
-    /** 审计实现异常不能反向破坏图执行。 */
+    /** 审计是旁路：记录实现异常时只告警，不能反向破坏图执行。 */
     private void safeRecord(AuditEntry entry) {
         try {
             auditRecorder.record(entry);

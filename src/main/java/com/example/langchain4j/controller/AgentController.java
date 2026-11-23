@@ -72,7 +72,7 @@ public class AgentController {
 
     /**
      * 断点恢复：从该会话最近 checkpoint 继续执行（POST 便于扩展恢复参数）。
-     * <p>
+     *
      * 特殊条件：会话无待恢复任务（最后一轮已闭环或无可用 checkpoint）时返回 404 业务码。
      *
      * @param request 恢复请求（conversationId 即图 threadId；归属校验：404 不存在 / 403 他人会话）

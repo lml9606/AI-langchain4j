@@ -29,16 +29,12 @@ import java.util.concurrent.CompletableFuture;
 /**
  * 任务执行器：按步骤表推进一条 {@link TaskRun}。
  *
- * <p>核心规则：
- * <ol>
- *   <li>已成功步骤直接跳过，失败重试从失败步骤继续；</li>
- *   <li>未确认时只执行只读步骤，遇到写步骤立即停下，等待确认；</li>
- *   <li>写步骤必须 approved=true，并使用 {@code runId:stepNo} 作为幂等键；</li>
- *   <li>同一阶段内标记 parallel 的只读步骤可以并行，写步骤永远串行；</li>
- *   <li>某步失败即停止，后续步骤标记 SKIPPED，任务状态 FAILED。</li>
- * </ol>
+ * 已成功步骤直接跳过，失败重试从失败步骤继续；未确认时只执行只读步骤，遇到写步骤立即
+ * 停下等待确认。写步骤必须 approved=true，并使用 runId:stepNo 作为幂等键；同一阶段内标记
+ * parallel 的只读步骤可以并行，写步骤永远串行；某步失败即停止，后续步骤标记 SKIPPED，
+ * 任务状态 FAILED。
  *
- * <p>执行租约保证多实例下同一条任务只有一个执行者；进程崩溃后租约过期，
+ * 执行租约保证多实例下同一条任务只有一个执行者；进程崩溃后租约过期，
  * 恢复 worker 可以接管并从 currentStep 继续。
  */
 @Slf4j
@@ -70,7 +66,7 @@ public class TaskRunExecutor {
         this.stepPool = stepPool;
     }
 
-    /** 测试/降级构造：没有线程池时全部串行执行。 */
+    /** 串行装配：不注入步骤线程池，同阶段只读步骤按顺序执行；生产链路使用完整构造。 */
     public TaskRunExecutor(TaskRunService runService,
                            ToolExecutor toolExecutor,
                            TaskArgsResolver argsResolver,
@@ -82,9 +78,14 @@ public class TaskRunExecutor {
     /**
      * 推进一条任务。
      *
+     * 返回任务当前快照；任务不存在时抛 IllegalArgumentException，执行异常会先把任务标记
+     * FAILED 再向上抛出。写步骤的幂等、业务事务和租约释放分别由 ToolExecutor、台账服务
+     * 和 finally 处理。
+     *
      * @param userId  任务归属（数据隔离）
      * @param runId   任务 ID
      * @param approved 是否已获得用户确认；false 时遇到写步骤会停下
+     * @return 本次推进后的任务状态与步骤快照
      */
     public TaskRunResult execute(String userId, String runId, boolean approved) {
         TaskRun run = runService.find(userId, runId)

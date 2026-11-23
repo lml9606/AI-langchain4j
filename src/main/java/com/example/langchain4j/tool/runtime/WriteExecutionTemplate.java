@@ -20,13 +20,8 @@ import java.util.concurrent.Callable;
 /**
  * 写工具执行模板：幂等台账与业务写入共用一个事务。
  *
- * <p>业务工具只关心“怎么改业务数据”，不关心 confirmationId、PENDING/RUNNING、
- * 重放或冲突。所有写工具统一走这里：
- * <pre>
- * begin（RUNNING）
- *   -> business.get()（业务写）
- *   -> succeed / fail
- * </pre>
+ * 业务工具只关心“怎么改业务数据”，不关心 confirmationId、PENDING/RUNNING、重放或冲突。
+ * 所有写工具统一走这里：先 begin 抢到 RUNNING 执行权，再调用业务写入，最后 succeed 或 fail。
  * 业务抛异常时事务整体回滚，台账不会留下“成功但业务没改”的假象。
  */
 @Slf4j

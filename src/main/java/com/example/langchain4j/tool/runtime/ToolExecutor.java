@@ -7,7 +7,7 @@ import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.common.util.Throwables;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.guard.RateLimiter;
-import com.example.langchain4j.service.AuditService;
+import com.example.langchain4j.audit.AuditRecorder;
 import com.example.langchain4j.tool.api.ToolContext;
 import com.example.langchain4j.tool.api.ToolDefinition;
 import com.example.langchain4j.tool.api.ToolResult;
@@ -21,12 +21,12 @@ import org.springframework.stereotype.Service;
 import java.util.concurrent.Callable;
 
 /**
- * 工具执行器：权限、写契约、参数、限流、隔离线程池、超时、审计统一收口。
+ * 工具执行器：权限、写契约、参数、限流、隔离线程池、超时和审计统一收口。
  *
- * <p>任何异常都转成结构化 ToolResult，不向图抛裸异常。工具定义是策略事实源，
+ * 任何异常都转成结构化 ToolResult，不向图抛裸异常。工具定义是策略事实源，
  * 执行器只负责在执行前再次做防御性校验，不能信任模型生成的计划。
  *
- * <p>这里刻意保留“重复校验”：规划节点和确认节点都可以被绕过，而真正产生副作用的是
+ * 这里刻意保留重复校验：规划节点和确认节点都可能被绕过，而真正产生副作用的是
  * 本类，所以权限、写开关、幂等键和参数 Schema 必须在最终执行前再验一次。
  * 规划、确认、执行三处共享的是 {@link ToolAccessPolicy} 和 {@link ToolInputValidator}
  * 的判定语义，不是把校验从图里删掉。
@@ -45,7 +45,7 @@ public class ToolExecutor {
 
     public ToolExecutor(ToolRegistry registry,
                         ToolAccessPolicy accessPolicy,
-                        AuditService auditService,
+                        AuditRecorder auditRecorder,
                         AgentMetrics metrics,
                         @Qualifier("toolExecutorPool") ThreadPoolTaskExecutor executor,
                         AgentProperties properties,
@@ -57,26 +57,20 @@ public class ToolExecutor {
         this.properties = properties;
         this.rateLimiter = rateLimiter;
         this.writeExecutionTemplate = writeExecutionTemplate;
-        this.recorder = new ToolExecutionRecorder(auditService, metrics);
+        this.recorder = new ToolExecutionRecorder(auditRecorder, metrics);
     }
 
     /**
-     * 执行一次工具调用。
+     * 执行一次工具调用，返回结构化结果；所有失败分支都通过 Outcome 翻译成 ToolResult。
      *
-     * <p>顺序是安全语义的一部分，不能调整：
-     * <ol>
-     *   <li>解析：只使用启动期固化的 RegisteredTool，避免执行期策略漂移；</li>
-     *   <li>权限：规划、确认节点可能被绕过，真正执行前必须再校验一次；</li>
-     *   <li>写契约：写工具必须已确认且带幂等键，保证重试不会重复落库；</li>
-     *   <li>参数：以 ToolDefinition.inputSchema 为唯一契约做防御性校验；</li>
-     *   <li>限流：按用户 + 工具维度计数，保护下游资源；</li>
-     *   <li>执行：隔离线程池 + 超时取消；</li>
-     *   <li>记录：无论成功失败都写指标、审计和日志。</li>
-     * </ol>
+     * 固定顺序是安全语义：解析注册项、权限门禁、写契约、参数 Schema、限流、隔离线程池执行、
+     * 记录指标和审计。顺序不能调整，否则模型生成的计划可能绕过最终校验。写工具缺少确认或
+     * 幂等键时直接拒绝；线程池满、超时和工具异常都会转成对应的 ToolErrorCode。
      *
      * @param context  用户、会话、确认状态和幂等键
      * @param toolName 工具名
      * @param args     模型生成的参数；null 会被归一为空对象
+     * @return 工具结果；成功与失败都以 ToolResult 返回，不向调用方抛裸异常
      */
     public ToolResult invoke(ToolContext context, String toolName, JsonNode args) {
         long start = System.currentTimeMillis();
@@ -139,7 +133,7 @@ public class ToolExecutor {
     /**
      * 写工具契约校验：返回 null 表示通过，返回 ToolResult 表示拒绝。
      *
-     * <p>幂等键不是可选优化：图超时、用户重复点击、网络重试都会再次进入执行器，
+     * 幂等键不是可选优化：图超时、用户重复点击、网络重试都会再次进入执行器，
      * 没有幂等键就无法保证写操作只落库一次。
      */
     private ToolResult checkWriteContract(ToolContext context, ToolDefinition definition,
@@ -161,7 +155,7 @@ public class ToolExecutor {
     /**
      * 工具级限流：用户 + 工具维度，单工具配置优先于全局默认值。
      *
-     * <p>限流维度是“调用尝试次数”，不是“成功执行次数”；队列满或超时也会消耗额度，
+     * 限流维度是“调用尝试次数”，不是“成功执行次数”；队列满或超时也会消耗额度，
      * 这是有意的，避免异常流量绕过配额。
      */
     private boolean allowCall(ToolContext context, ToolDefinition definition, String toolName) {

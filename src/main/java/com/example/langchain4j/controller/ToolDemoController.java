@@ -15,7 +15,7 @@ import java.util.List;
 
 /**
  * 工具演示数据接口：用于播种与核对工具读/写结果。
- * <p>仅供本地演示与联调；生产环境可删除或加管理员权限。
+ * 仅供本地演示与联调；生产环境可删除或加管理员权限。
  */
 @RestController
 @RequestMapping("/api/tool-demo")

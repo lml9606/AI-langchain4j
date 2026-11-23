@@ -8,7 +8,7 @@ import java.util.List;
 
 /**
  * 批量知识导入请求：一次提交多篇文档，逐篇父子分块落库（父块整章不嵌入 + 子块嵌入）。
- * <p>
+ *
  * 单篇失败不中断整批（服务层逐条 try-catch，返回逐条结果供重试失败项）。
  * 文档数上限由服务层按 agent.knowledge.batch-max-documents 配置再校验（此处 @Size 仅作第一道防线）。
  */

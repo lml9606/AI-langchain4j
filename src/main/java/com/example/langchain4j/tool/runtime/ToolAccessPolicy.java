@@ -9,7 +9,7 @@ import org.springframework.stereotype.Component;
 /**
  * 工具访问策略：在规划入口、执行节点和最终执行器之间复用同一套权限语义。
  *
- * <p>返回 {@code PERMISSION_REQUIRED} 表示“能力存在但当前用户无权使用”，
+ * 返回 {@code PERMISSION_REQUIRED} 表示“能力存在但当前用户无权使用”，
  * 不会把一个无权限工具静默过滤后再让模型从剩余工具中随意选择。
  */
 @Component
@@ -26,7 +26,7 @@ public class ToolAccessPolicy {
     /**
      * 按工具名校验：内部先查注册表，再走统一的定义校验。
      *
-     * <p>适用于只有工具名、没有定义对象的场景（例如执行计划里的步骤）。
+     * 适用于只有工具名、没有定义对象的场景，例如执行计划里的步骤。
      */
     public Decision check(String toolName, String role) {
         return check(toolRegistry.definition(toolName).orElse(null), toolName, role);

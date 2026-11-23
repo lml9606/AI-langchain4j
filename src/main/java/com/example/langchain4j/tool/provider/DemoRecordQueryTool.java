@@ -20,12 +20,8 @@ import java.util.Set;
 /**
  * 只读工具：查询当前用户的演示记录。
  *
- * <p>生产要点：
- * <ul>
- *   <li>userId 来自执行上下文，不接受模型传入，SQL 层强制隔离；</li>
- *   <li>参数做白名单校验与上限裁剪，避免模型传入任意 status/超大 limit；</li>
- *   <li>无数据时明确返回"没有查询到"，不伪造结果。</li>
- * </ul>
+ * userId 来自执行上下文，不接受模型传入，SQL 层强制隔离；参数做白名单校验与上限裁剪，
+ * 避免模型传入任意 status 或超大 limit；无数据时明确返回“没有查询到”，不伪造结果。
  */
 @Component
 public class DemoRecordQueryTool implements AgentTool {

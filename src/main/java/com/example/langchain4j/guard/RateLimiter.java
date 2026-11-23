@@ -14,11 +14,10 @@ import java.util.List;
 
 /**
  * 固定窗口限流器（Redisson RScript 原子计数实现）。
- * <ul>
- *   <li>INCR + 首次 EXPIRE 通过 Lua 脚本保证原子性，避免窗口边界竞态；</li>
- *   <li>Redis 故障时 fail-open（放行），可用性优先，可配置关闭；</li>
- *   <li>维度由调用方决定（userId / IP），本类只负责计数与判定。</li>
- * </ul>
+ *
+ * INCR 和首次 EXPIRE 通过 Lua 脚本保证原子性，避免窗口边界竞态；Redis 故障时默认
+ * fail-open 放行，可用性优先，可配置关闭；维度由调用方决定（userId、IP、工具维度等），
+ * 本类只负责计数与判定。
  */
 @Slf4j
 @Component

@@ -18,10 +18,10 @@ import java.util.regex.Pattern;
 /**
  * 工具注册表：启动期自动发现 AgentTool，校验定义并构建模型可见的工具目录。
  *
- * <p>单一事实源：工具的名称、Schema、副作用、超时、限流和角色都由
+ * 单一事实源：工具的名称、Schema、副作用、超时、限流和角色都由
  * {@link ToolDefinition} 声明；配置文件不再维护工具白名单，数据库只存执行事实。
  *
- * <p>规划阶段不再从注册表按相关度猜工具：业务任务通过 {@code TaskWorkflow}
+ * 规划阶段不再从注册表按相关度猜工具：业务任务通过 {@code TaskWorkflow}
  * 精确声明工具集合，注册表只负责定义校验与执行期查找。
  */
 @Component

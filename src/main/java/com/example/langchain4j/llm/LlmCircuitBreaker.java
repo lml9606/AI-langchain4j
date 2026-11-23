@@ -12,7 +12,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 按模型隔离的 Redis 熔断器。
- * <p>
+ *
  * 每个模型独立失败计数和打开标记：A 模型故障不会让 B 模型一起熔断，
  * 模型 B 成功也不会清掉 A 的失败计数。Redis 故障时 fail-open。
  */
@@ -80,7 +80,7 @@ public class LlmCircuitBreaker {
 
     /**
      * 固定窗口失败计数：INCR + TTL 在 Redis 内原子执行。
-     * <p>历史版本遗留的无 TTL 计数 key 会在下一次失败时自动补过期，避免永久累积。
+     * 历史版本遗留的无 TTL 计数 key 会在下一次失败时自动补过期，避免永久累积。
      */
     private long incrementFailureWindow(String modelName) {
         int windowSeconds = Math.max(1,
