@@ -5,6 +5,7 @@ import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.qa.nodes.ValidateNode;
 import com.example.langchain4j.graph.state.WorkflowState;
+import com.example.langchain4j.repository.entity.TaskRun;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.EdgeAction;
 import org.springframework.stereotype.Component;
@@ -39,6 +40,8 @@ public class Router {
     public static final String TO_TASK_EXECUTE = "to_task_execute";
     /** 计划包含写工具 → 确认节点 */
     public static final String TO_TASK_CONFIRM = "to_task_confirm";
+    /** 任务步骤执行完（或只读任务）→ 任务回答节点 */
+    public static final String TO_TASK_ANSWER = "to_task_answer";
 
     private final AgentProperties properties;
 
@@ -108,7 +111,7 @@ public class Router {
         };
     }
 
-    /** 任务规划后：缺参追问 → 直接收尾；规划失败 → 兜底；含写工具 → 确认；只读计划 → 执行工具。 */
+    /** 任务规划后：缺参追问 → 直接收尾；规划失败 → 兜底；否则先执行只读步骤。 */
     public EdgeAction<WorkflowState> afterTaskPlan() {
         return state -> {
             if (state.taskClarify()) {
@@ -117,10 +120,27 @@ public class Router {
             if (state.error() != null && !state.error().isBlank()) {
                 return route("task-plan", state, TO_FALLBACK);
             }
-            if (state.taskConfirmationRequired()) {
-                return route("task-plan", state, TO_TASK_CONFIRM);
-            }
             return route("task-plan", state, TO_TASK_EXECUTE);
+        };
+    }
+
+    /**
+     * 任务执行后：只读步骤执行完且还有写步骤 → 确认；否则直接回答。
+     * 未确认时 TaskRunExecutor 会停在第一个写步骤，不会产生业务副作用。
+     */
+    public EdgeAction<WorkflowState> afterTaskExecute() {
+        return state -> {
+            if (state.error() != null && !state.error().isBlank()) {
+                // 租约冲突：任务仍由另一个实例执行，返回明确的进行中提示，不能走兜底转人工
+                if (TaskRun.Status.RUNNING.name().equals(state.taskRunStatus())) {
+                    return route("task-execute", state, TO_TASK_ANSWER);
+                }
+                return route("task-execute", state, TO_FALLBACK);
+            }
+            if (state.taskConfirmationRequired() && !state.taskApproved()) {
+                return route("task-execute", state, TO_TASK_CONFIRM);
+            }
+            return route("task-execute", state, TO_TASK_ANSWER);
         };
     }
 

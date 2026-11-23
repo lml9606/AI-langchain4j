@@ -25,12 +25,15 @@
 | POST | `/api/agent/chat` | 同步对话（invoke 全图） | `{conversationId?, query, model?, history?}` |
 | POST | `/api/agent/chat/stream` | 流式对话（SSE） | 同 chat |
 | POST | `/api/agent/confirm` | 确认/取消写操作（同一会话只允许一个待确认动作） | `{conversationId, confirmationId, approved}` |
+| GET | `/api/agent/task/{runId}` | 查询多步骤任务进度与每步结果 | 路径参数 runId |
 | POST | `/api/agent/resume` | 断点恢复（从最近 checkpoint 继续） | `{conversationId, query?}` |
 | GET | `/api/agent/state/{threadId}` | 查询 checkpoint 执行状态 | 路径参数 threadId |
 | GET | `/api/agent/conversation/{id}/messages` | 会话历史（默认 50 条，上限 200） | `?limit=50` |
 
 安全：会话归属校验（403 防水平越权）；身份以 Token 为准（服务端从 Authorization 头解析，请求体不携带用户 ID）。
-`confirm` 的 `approved=true` 表示执行、`false` 表示取消；响应 `data.business.success/errorCode/errorMessage` 表示业务动作结果。确认卡片生成时 `ai_tool_execution=PENDING`，确认后为 `RUNNING`，最终为 `SUCCEEDED/FAILED/CANCELLED`；Redis 仅保存带 TTL 的待确认计划。
+`confirm` 的 `approved=true` 表示执行、`false` 表示取消；响应 `data.business.success/errorCode/errorMessage` 表示业务动作结果，`data.taskRunId/taskStatus` 表示多步骤任务的执行状态。确认卡片生成时 `ai_tool_execution=PENDING`，确认后为 `RUNNING`，最终为 `SUCCEEDED/FAILED/CANCELLED`；Redis 仅保存带 TTL 的待确认计划，`ai_task_run` / `ai_task_step` 保存任务与步骤执行事实。
+
+多步骤任务的确认卡片包含 `runId` 和 `steps[]`；批量写使用 `runId:stepNo` 作为幂等键。任务进度接口返回 `status/currentStep/steps[]`，可用于确认超时后的结果核对。
 
 ## 3. 知识库 `/api/knowledge`
 

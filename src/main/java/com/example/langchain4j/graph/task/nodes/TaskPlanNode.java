@@ -110,18 +110,27 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
 
             // 步骤3：只把该工作流的精确工具集合交给模型填参，不展示其他工作流工具。
             List<ToolDefinition> tools = workflowRegistry.definitions(workflow);
-            Map<String, String> stageByTool = stageByTool(workflow);
             Map<String, ToolDefinition> definitions = new LinkedHashMap<>();
             List<Map<String, Object>> catalog = new ArrayList<>();
             for (ToolDefinition definition : tools) {
                 definitions.put(definition.name(), definition);
-                Map<String, Object> item = new LinkedHashMap<>();
-                item.put("stage", stageByTool.get(definition.name()));
-                item.put("name", definition.name());
-                item.put("description", definition.description());
-                item.put("inputSchema", definition.inputSchema());
-                item.put("sideEffect", definition.sideEffect().name());
-                catalog.add(item);
+            }
+            // 按工作流位置而不是工具名建立目录：同一个工具可以出现在多个阶段，
+            // 用 Map<toolName, stage> 会让所有重复步骤都显示成最后一个阶段。
+            for (TaskWorkflow.Stage stage : workflow.stages()) {
+                for (String toolName : stage.tools()) {
+                    ToolDefinition definition = definitions.get(toolName);
+                    if (definition == null) {
+                        continue;
+                    }
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("stage", stage.id());
+                    item.put("name", definition.name());
+                    item.put("description", definition.description());
+                    item.put("inputSchema", definition.inputSchema());
+                    item.put("sideEffect", definition.sideEffect().name());
+                    catalog.add(item);
+                }
             }
 
             String systemPrompt = promptTemplateService.resolveFormatted("TASK_PLAN_SYSTEM",
@@ -169,13 +178,14 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
 
             // 步骤5：统一解析固定工具序列和参数 Schema；解析失败直接 fail-closed。
             TaskPlanValidator.ParseResult parsed = planValidator.parseSteps(
-                    node.get("steps"), workflow, definitions, stageByTool);
+                    node.get("steps"), workflow, definitions, null);
             if (!parsed.valid()) {
                 log.warn("[task-plan] invalid steps, workflow={}, reason={}",
                         workflow.id(), parsed.message());
                 return error(parsed.message());
             }
             List<Map<String, Object>> plan = parsed.plan();
+            applyStageIds(plan, workflow);
 
             // 步骤6：统一复核写操作数量、pending 一致性和可插拔业务规则。
             TaskPlanValidator.PlanValidationResult planValidation = planValidator.validate(
@@ -184,6 +194,12 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
                 log.warn("[task-plan] plan rejected, workflow={}, reason={}",
                         workflow.id(), planValidation.message());
                 return error(planValidation.message());
+            }
+            int maxWrites = Math.max(1, properties.getTask().getMaxWritesPerTask());
+            if (planValidation.writeSteps().size() > maxWrites) {
+                log.warn("[task-plan] too many writes, workflow={}, writes={}, max={}",
+                        workflow.id(), planValidation.writeSteps().size(), maxWrites);
+                return error("一次任务最多允许 " + maxWrites + " 个写操作，请拆分后重试");
             }
             Map<String, Object> writeStep = planValidation.writeStep();
             Map<String, Object> pendingAction = Map.of();
@@ -200,8 +216,9 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
             updates.put(WorkflowState.TASK_CONFIRMATION_REQUIRED, confirmationRequired);
             updates.put(WorkflowState.TASK_CLARIFY, false);
             updates.put(WorkflowState.ERROR, "");
-            log.info("[task-plan] done, workflow={}, steps={}, writeConfirmation={}, entities={}",
-                    workflow.id(), plan.size(), confirmationRequired, entities.keySet());
+            log.info("[task-plan] done, workflow={}, steps={}, writes={}, entities={}",
+                    workflow.id(), plan.size(), planValidation.writeSteps().size(),
+                    entities.keySet());
             return updates;
         } catch (BizException e) {
             log.warn("[task-plan] llm failed: {}", e.getMessage());
@@ -231,14 +248,17 @@ public class TaskPlanNode implements NodeAction<WorkflowState> {
         return catalog;
     }
 
-    private Map<String, String> stageByTool(TaskWorkflow workflow) {
-        Map<String, String> result = new LinkedHashMap<>();
+    /** 按工作流声明顺序回填 stage：同一工具可以在多个阶段出现，不能靠工具名反查。 */
+    private void applyStageIds(List<Map<String, Object>> plan, TaskWorkflow workflow) {
+        int index = 0;
         for (TaskWorkflow.Stage stage : workflow.stages()) {
-            for (String tool : stage.tools()) {
-                result.put(tool, stage.id());
+            for (String ignored : stage.tools()) {
+                if (index < plan.size()) {
+                    plan.get(index).put("stage", stage.id());
+                }
+                index++;
             }
         }
-        return result;
     }
 
     private List<String> parseMissing(JsonNode missingNode) {

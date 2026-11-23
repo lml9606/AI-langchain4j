@@ -28,13 +28,15 @@ public class ToolExecution {
     }
 
     private Long id;
-    /** 幂等键（当前实现 = confirmationId） */
+    /** 幂等键（旧版单写 = confirmationId；多步骤 = runId:stepNo） */
     private String executionId;
     private String userId;
     private String conversationId;
     private String tool;
     /** 参数指纹：同一幂等键换了参数直接拒绝，防止令牌被错误复用 */
     private String argsHash;
+    /** 本次执行的工具参数；PENDING 阶段为待确认参数，RUNNING 时覆盖为实际执行参数 */
+    private String argsJson;
     /** 待确认计划快照；创建确认动作时写入 */
     private String planJson;
     /** 确认卡片摘要 */
@@ -45,6 +47,12 @@ public class ToolExecution {
     private OffsetDateTime expiresAt;
     /** 当前执行状态；MyBatis 使用 EnumTypeHandler 按枚举名读写。 */
     private Status status;
+    /** 已接管执行次数（含 PENDING 首跑、FAILED 重试和僵尸 RUNNING 接管） */
+    private Integer attemptCount;
+    /** 最近一次进入 RUNNING 的时间 */
+    private OffsetDateTime startedAt;
+    /** 最近一次进入终态（SUCCEEDED / FAILED / CANCELLED）的时间 */
+    private OffsetDateTime finishedAt;
     /** 成功结果（重放时原样返回） */
     private String result;
     private String errorCode;

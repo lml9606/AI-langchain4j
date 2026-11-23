@@ -60,13 +60,15 @@ class ConfirmationServiceTest {
         lenient().doReturn(conversationBucket).when(redissonClient).getBucket(anyString());
         lenient().when(conversationBucket.trySet(anyString(), anyLong(), eq(TimeUnit.SECONDS)))
                 .thenReturn(true);
-        lenient().when(toolExecutionService.recordPending(any(ToolExecution.class)))
-                .thenReturn(true);
+        lenient().doNothing().when(toolExecutionService).recordPendingBatch(any());
     }
 
     private ConfirmationService.PendingAction action(String userId) {
         return new ConfirmationService.PendingAction(
-                "cfm_1", userId, "c1", "model-x", "complete_demo_record",
+                "cfm_1", userId, "c1", "model-x", "",
+                "complete_demo_record",
+                List.of(new ConfirmationService.PendingWriteStep(
+                        0, "complete_demo_record", Map.of("recordId", 1))),
                 List.of(Map.of("tool", "complete_demo_record", "args", Map.of("recordId", 1))),
                 "即将执行：完成演示记录。", "WRITE",
                 System.currentTimeMillis() + 60_000);
@@ -82,6 +84,7 @@ class ConfirmationServiceTest {
 
         assertThat(created.confirmationId()).startsWith("cfm_");
         assertThat(created.expiresAt()).isGreaterThan(System.currentTimeMillis());
+        assertThat(created.auditPayload()).containsEntry("tool", "complete_demo_record");
 
         ArgumentCaptor<String> jsonCaptor = ArgumentCaptor.forClass(String.class);
         verify(conversationBucket).trySet(jsonCaptor.capture(), eq(120L), eq(TimeUnit.SECONDS));
@@ -92,17 +95,42 @@ class ConfirmationServiceTest {
         assertThat(stored.conversationId()).isEqualTo("c1");
         assertThat(stored.plan()).hasSize(1);
 
-        ArgumentCaptor<ToolExecution> executionCaptor = ArgumentCaptor.forClass(ToolExecution.class);
-        verify(toolExecutionService).recordPending(executionCaptor.capture());
-        ToolExecution execution = executionCaptor.getValue();
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<ToolExecution>> executionCaptor = ArgumentCaptor.forClass(List.class);
+        verify(toolExecutionService).recordPendingBatch(executionCaptor.capture());
+        ToolExecution execution = executionCaptor.getValue().get(0);
         assertThat(execution.getExecutionId()).isEqualTo(created.confirmationId());
         assertThat(execution.getUserId()).isEqualTo("demo");
         assertThat(execution.getConversationId()).isEqualTo("c1");
         assertThat(execution.getTool()).isEqualTo("complete_demo_record");
+        assertThat(execution.getArgsJson()).contains("recordId");
         assertThat(execution.getPlanJson()).contains("recordId");
         assertThat(execution.getSummary()).isEqualTo("即将执行：完成演示记录。");
         assertThat(execution.getRisk()).isEqualTo("WRITE");
         assertThat(execution.getExpiresAt()).isNotNull();
+    }
+
+    @Test
+    @DisplayName("批量确认 -> 每个写步骤一条 PENDING，幂等键追加 stepNo")
+    void createBatchWritesPendingPerStep() {
+        List<ConfirmationService.PendingWriteStep> steps = List.of(
+                new ConfirmationService.PendingWriteStep(1, "write_a", Map.of("id", 1)),
+                new ConfirmationService.PendingWriteStep(2, "write_b", Map.of("id", 2)));
+
+        ConfirmationService.PendingAction created = service.create(
+                "demo", "c1", "model-x", "run_1",
+                List.of(Map.of("tool", "write_a"), Map.of("tool", "write_b")),
+                "即将执行 2 个写操作。", "WRITE", steps);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<ToolExecution>> captor = ArgumentCaptor.forClass(List.class);
+        verify(toolExecutionService).recordPendingBatch(captor.capture());
+        List<ToolExecution> executions = captor.getValue();
+        assertThat(executions).hasSize(2);
+        assertThat(executions.get(0).getExecutionId()).isEqualTo("run_1:1");
+        assertThat(executions.get(1).getExecutionId()).isEqualTo("run_1:2");
+        assertThat(created.runId()).isEqualTo("run_1");
+        assertThat(created.steps()).hasSize(2);
     }
 
     @Test
@@ -129,7 +157,7 @@ class ConfirmationServiceTest {
                 .isInstanceOf(BizException.class)
                 .extracting(e -> ((BizException) e).getCode())
                 .isEqualTo(ErrorCode.CONFIRMATION_PENDING.getCode());
-        verify(toolExecutionService, never()).recordPending(any(ToolExecution.class));
+        verify(toolExecutionService, never()).recordPendingBatch(any());
     }
 
     @Test
@@ -241,25 +269,22 @@ class ConfirmationServiceTest {
     }
 
     @Test
-    @DisplayName("台账写入失败 → 撤销 Redis key，不下发无记录的确认卡片")
-    void createRollsBackConversationKeyWhenPendingRecordRejected() {
-        when(toolExecutionService.recordPending(any(ToolExecution.class))).thenReturn(false);
-
-        assertThatThrownBy(() -> service.create(
-                "demo", "c1", "model-x", "complete_demo_record", List.of(),
-                "即将执行：完成演示记录。", "WRITE"))
-                .isInstanceOf(BizException.class)
-                .extracting(e -> ((BizException) e).getCode())
-                .isEqualTo(ErrorCode.INTERNAL_ERROR.getCode());
-
-        verify(conversationBucket).delete();
+    @DisplayName("同一 run 重新确认 → 已有台账不阻塞新令牌")
+    void reconfirmExistingPendingDoesNotBlock() {
+        assertThatCode(() -> service.create(
+                "demo", "c1", "model-x", "run_1",
+                List.of(Map.of("tool", "complete_demo_record")),
+                "即将执行：完成演示记录。", "WRITE",
+                List.of(new ConfirmationService.PendingWriteStep(
+                        1, "complete_demo_record", Map.of("recordId", 1)))))
+                .doesNotThrowAnyException();
     }
 
     @Test
     @DisplayName("台账写入异常 → 撤销 Redis key，抛出数据库不可用")
     void createRollsBackConversationKeyWhenPendingRecordFails() {
-        when(toolExecutionService.recordPending(any(ToolExecution.class)))
-                .thenThrow(new RuntimeException("db down"));
+        doThrow(new RuntimeException("db down"))
+                .when(toolExecutionService).recordPendingBatch(any());
 
         assertThatThrownBy(() -> service.create(
                 "demo", "c1", "model-x", "complete_demo_record", List.of(),

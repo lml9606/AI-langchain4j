@@ -15,6 +15,8 @@ import com.example.langchain4j.guard.SessionLock;
 import com.example.langchain4j.llm.ModelRegistry;
 import com.example.langchain4j.repository.entity.ConversationSummary;
 import com.example.langchain4j.repository.entity.Message;
+import com.example.langchain4j.repository.entity.TaskRun;
+import com.example.langchain4j.repository.entity.TaskStep;
 import com.example.langchain4j.repository.entity.ToolExecution;
 import com.example.langchain4j.service.model.RewriteResult;
 import com.example.langchain4j.tool.runtime.ConfirmationService;
@@ -93,6 +95,8 @@ class AgentServiceConfirmTest {
     private ConfirmationService confirmationService;
     @Mock
     private ToolExecutionService toolExecutionService;
+    @Mock
+    private TaskRunService taskRunService;
 
     private AgentService service;
 
@@ -101,7 +105,7 @@ class AgentServiceConfirmTest {
         service = new AgentService(agentGraph, taskConfirmGraph, rateLimiter, sessionLock,
                 conversationService, queryRewriter, segmentService, auditService, summaryService,
                 modelRegistry, ticketService, agentExecutor, properties, metrics,
-                promptTemplateService, confirmationService, toolExecutionService);
+                promptTemplateService, confirmationService, toolExecutionService, taskRunService);
         passThroughExecutor();
         passThroughLock();
         UserContext.set("demo", "USER");
@@ -140,8 +144,27 @@ class AgentServiceConfirmTest {
                 "args", Map.of("entityId", "B1001", "reason", "不想要了"),
                 "purpose", "修改业务数据"));
         return new ConfirmationService.PendingAction(
-                "cfm_1", "demo", "c1", "model-x", "write_tool", plan,
+                "cfm_1", "demo", "c1", "model-x", "",
+                "write_tool",
+                List.of(new ConfirmationService.PendingWriteStep(
+                        0, "write_tool", Map.of("entityId", "B1001", "reason", "不想要了"))),
+                plan,
                 "即将执行：修改业务数据。", "WRITE",
+                System.currentTimeMillis() + 60_000);
+    }
+
+    private ConfirmationService.PendingAction batchAction() {
+        List<ConfirmationService.PendingWriteStep> writes = List.of(
+                new ConfirmationService.PendingWriteStep(2, "write_tool", Map.of("recordId", 1)),
+                new ConfirmationService.PendingWriteStep(3, "write_tool", Map.of("recordId", 2)));
+        List<Map<String, Object>> plan = List.of(
+                Map.of("stepNo", 0, "tool", "read_tool", "args", Map.of()),
+                Map.of("stepNo", 1, "tool", "read_tool", "args", Map.of()),
+                Map.of("stepNo", 2, "tool", "write_tool", "args", Map.of("recordId", 1)),
+                Map.of("stepNo", 3, "tool", "write_tool", "args", Map.of("recordId", 2)));
+        return new ConfirmationService.PendingAction(
+                "cfm_1", "demo", "c1", "model-x", "run_1", "MULTI_WRITE", writes,
+                plan, "即将执行 2 个写操作", "WRITE",
                 System.currentTimeMillis() + 60_000);
     }
 
@@ -405,6 +428,7 @@ class AgentServiceConfirmTest {
 
         assertThat(response.getResult()).isEqualTo("这是新意图的回答");
         verify(confirmationService).cancelPending("c1", "demo", "USER_NEW_MESSAGE");
+        verify(taskRunService).cancelByConversation("demo", "c1");
         verify(agentGraph).invoke(anyMap(), any(RunnableConfig.class));
     }
 
@@ -418,6 +442,98 @@ class AgentServiceConfirmTest {
                 .isInstanceOf(BizException.class);
 
         verify(confirmationService).finish("c1", "cfm_1");
+        verifyNoInteractions(taskConfirmGraph);
+    }
+
+    @Test
+    @DisplayName("批量任务取消 -> run 和每个写步骤台账都取消")
+    void rejectBatchCancelsRunAndStepLedgers() {
+        when(confirmationService.preview("c1", "cfm_1", "demo"))
+                .thenReturn(Optional.of(batchAction()));
+        when(taskRunService.cancel("demo", "run_1")).thenReturn(true);
+
+        ChatResponse response = service.confirm(request(false));
+
+        assertThat(response.getResult()).contains("已取消");
+        assertThat(response.getTaskRunId()).isEqualTo("run_1");
+        assertThat(response.getTaskStatus()).isEqualTo(TaskRun.Status.CANCELLED.name());
+        verify(taskRunService).cancel("demo", "run_1");
+        verify(toolExecutionService).markCancelled("demo", "run_1:2");
+        verify(toolExecutionService).markCancelled("demo", "run_1:3");
+        verify(toolExecutionService, never()).markCancelled("demo", "cfm_1");
+        verifyNoInteractions(taskConfirmGraph);
+    }
+
+    @Test
+    @DisplayName("任务进度查询 -> 返回 run 状态和每步结果")
+    void taskStatusReturnsRunAndSteps() {
+        TaskRun run = new TaskRun();
+        run.setId("run_1");
+        run.setConversationId("c1");
+        run.setWorkflowId("wf");
+        run.setStatus(TaskRun.Status.FAILED);
+        run.setCurrentStep(2);
+        run.setErrorCode("BIZ_ERROR");
+        run.setErrorMessage("业务拒绝");
+        TaskStep step = new TaskStep();
+        step.setStepNo(1);
+        step.setStageId("complete");
+        step.setToolName("write_tool");
+        step.setSideEffect("WRITE");
+        step.setStatus(TaskStep.Status.FAILED);
+        step.setErrorCode("BIZ_ERROR");
+        step.setErrorMessage("业务拒绝");
+        step.setArgsJson("{\"recordId\":7}");
+        step.setCostMs(12L);
+        step.setAttempts(1);
+        when(taskRunService.find("demo", "run_1")).thenReturn(Optional.of(run));
+        when(taskRunService.steps("run_1")).thenReturn(List.of(step));
+
+        var dto = service.taskStatus("run_1");
+
+        assertThat(dto.status()).isEqualTo(TaskRun.Status.FAILED.name());
+        assertThat(dto.currentStep()).isEqualTo(2);
+        assertThat(dto.steps()).hasSize(1);
+        assertThat(dto.steps().get(0).args()).containsEntry("recordId", 7);
+        assertThat(dto.steps().get(0).errorCode()).isEqualTo("BIZ_ERROR");
+    }
+
+    @Test
+    @DisplayName("确认计划指纹不一致 -> 拒绝执行并删除令牌")
+    void planHashMismatchBlocksConfirm() {
+        when(confirmationService.preview("c1", "cfm_1", "demo"))
+                .thenReturn(Optional.of(batchAction()));
+        TaskRun run = new TaskRun();
+        run.setId("run_1");
+        run.setStatus(TaskRun.Status.WAITING_CONFIRM);
+        run.setPlanHash("expected");
+        when(taskRunService.find("demo", "run_1")).thenReturn(Optional.of(run));
+        when(taskRunService.planHash(anyString())).thenReturn("tampered");
+
+        assertThatThrownBy(() -> service.confirm(request(true)))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.AGENT_EXECUTION_FAILED.getCode());
+
+        verify(confirmationService).finish("c1", "cfm_1");
+        verifyNoInteractions(taskConfirmGraph);
+    }
+
+    @Test
+    @DisplayName("任务执行中 -> 取消/重复确认返回执行中，不进入确认图")
+    void runningTaskBlocksConfirmAndReject() {
+        when(confirmationService.preview("c1", "cfm_1", "demo"))
+                .thenReturn(Optional.of(batchAction()));
+        TaskRun run = new TaskRun();
+        run.setId("run_1");
+        run.setStatus(TaskRun.Status.RUNNING);
+        when(taskRunService.find("demo", "run_1")).thenReturn(Optional.of(run));
+
+        assertThatThrownBy(() -> service.confirm(request(false)))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.CONFIRMATION_IN_PROGRESS.getCode());
+
         verifyNoInteractions(taskConfirmGraph);
     }
 }

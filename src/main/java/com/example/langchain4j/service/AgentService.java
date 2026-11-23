@@ -1,5 +1,6 @@
 package com.example.langchain4j.service;
 
+import com.example.langchain4j.audit.AuditEntry;
 import com.example.langchain4j.common.auth.UserContext;
 import com.example.langchain4j.common.concurrent.BoundedCall;
 import com.example.langchain4j.common.constant.ChatOptions;
@@ -8,11 +9,13 @@ import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.common.util.Texts;
 import com.example.langchain4j.common.util.Throwables;
+import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.request.ChatRequest;
 import com.example.langchain4j.dto.request.ConfirmRequest;
 import com.example.langchain4j.dto.response.BusinessResult;
 import com.example.langchain4j.dto.response.ChatResponse;
+import com.example.langchain4j.dto.response.TaskRunDto;
 import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.guard.RateLimiter;
@@ -22,6 +25,8 @@ import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.repository.entity.ConversationSummary;
 import com.example.langchain4j.repository.entity.GraphExecution;
 import com.example.langchain4j.repository.entity.Message;
+import com.example.langchain4j.repository.entity.TaskRun;
+import com.example.langchain4j.repository.entity.TaskStep;
 import com.example.langchain4j.repository.entity.ToolExecution;
 import com.example.langchain4j.service.model.RewriteResult;
 import com.example.langchain4j.tool.runtime.ConfirmationService;
@@ -35,6 +40,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -73,6 +79,7 @@ public class AgentService {
     private final PromptTemplateService promptTemplateService;
     private final ConfirmationService confirmationService;
     private final ToolExecutionService toolExecutionService;
+    private final TaskRunService taskRunService;
 
     /**
      * 注入图执行、会话、限流、审计、模型与确认等编排依赖。
@@ -87,7 +94,8 @@ public class AgentService {
                         AgentProperties properties, AgentMetrics metrics,
                         PromptTemplateService promptTemplateService,
                         ConfirmationService confirmationService,
-                        ToolExecutionService toolExecutionService) {
+                        ToolExecutionService toolExecutionService,
+                        TaskRunService taskRunService) {
         this.agentGraph = agentGraph;
         this.taskConfirmGraph = taskConfirmGraph;
         this.rateLimiter = rateLimiter;
@@ -105,6 +113,7 @@ public class AgentService {
         this.promptTemplateService = promptTemplateService;
         this.confirmationService = confirmationService;
         this.toolExecutionService = toolExecutionService;
+        this.taskRunService = taskRunService;
     }
 
     /**
@@ -140,6 +149,14 @@ public class AgentService {
         WorkflowState state = sessionLock.executeWithLock(conversationId, () -> {
             // 新用户消息视为放弃旧确认：先取消旧令牌/台账，再按新意图执行。
             confirmationService.cancelPending(conversationId, userId, "USER_NEW_MESSAGE");
+            try {
+                // 旧确认令牌删除后，任务表也必须同步取消；否则 ai_task_run 会一直停在
+                // WAITING_CONFIRM，任务进度接口和恢复 worker 都会看到一条永远不结束的任务。
+                taskRunService.cancelByConversation(userId, conversationId);
+            } catch (RuntimeException e) {
+                log.warn("[agent] cancel stale task runs failed, conversation={}, reason={}",
+                        conversationId, e.getMessage());
+            }
             WorkflowState result =
                     prepareAndInvoke(conversationId, userId, query, model, answerMode, visibility);
             // 助手消息持久化（结果已生成，落库失败降级不阻断响应）；
@@ -171,6 +188,8 @@ public class AgentService {
                 state.rootCause(), citations(state), confidence(state), confidenceReason(state),
                 toolTrace(state), state.taskClarify());
         response.setPendingAction(pendingAction(state));
+        response.setTaskRunId(state.taskRunId());
+        response.setTaskStatus(state.taskRunStatus());
         return response;
     }
 
@@ -211,11 +230,36 @@ public class AgentService {
             }
             ConfirmationService.PendingAction action = current.get();
             // 自动取消后 Redis 令牌可能尚未删除（例如删除失败/Redis 恢复后旧值仍在）：
-            // 台账已 CANCELLED 时不能再执行确认图，直接按幂等重放返回取消结果。
-            ToolExecution currentExecution =
-                    toolExecutionService.find(userId, action.confirmationId()).orElse(null);
-            if (currentExecution != null
-                    && currentExecution.getStatus() == ToolExecution.Status.CANCELLED) {
+            // 任务或台账已 CANCELLED 时不能再执行确认图，直接按幂等重放返回取消结果。
+            TaskRun currentRun = action.runId().isBlank() ? null
+                    : taskRunService.find(userId, action.runId()).orElse(null);
+            ToolExecution currentExecution = action.runId().isBlank()
+                    ? toolExecutionService.find(userId, action.confirmationId()).orElse(null) : null;
+            if (currentRun != null && currentRun.getPlanHash() != null
+                    && !currentRun.getPlanHash().isBlank()
+                    && !currentRun.getPlanHash().equals(
+                    taskRunService.planHash(JsonUtil.toJson(action.plan())))) {
+                // 令牌里的计划与生成确认卡片时的计划指纹不一致：可能是 Redis 被篡改，
+                // 也可能是一次性令牌被错误复用。直接失败，不执行任何写步骤。
+                confirmationService.finish(action.conversationId(), action.confirmationId());
+                log.warn("[agent] confirm plan hash mismatch, conversation={}, runTail={}",
+                        conversationId, idTail(action.runId()));
+                throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED,
+                        "确认计划校验失败，请重新发起操作");
+            }
+            if (currentRun != null && currentRun.getStatus() == TaskRun.Status.RUNNING) {
+                // 另一个实例可能正在执行写步骤（例如恢复 worker），此时取消或重复确认
+                // 都不能声称“没有修改数据”；统一返回执行中，让客户端查询任务状态。
+                throw new BizException(ErrorCode.CONFIRMATION_IN_PROGRESS);
+            }
+            if (currentRun != null && currentRun.getStatus() == TaskRun.Status.SUCCEEDED) {
+                // 执行已完成但令牌尚未删除（极小窗口）：按幂等重放返回结果，不重复执行。
+                confirmationService.finish(action.conversationId(), action.confirmationId());
+                return replayFinished(conversationId, request.getConfirmationId(), userId, start);
+            }
+            if ((currentRun != null && currentRun.getStatus() == TaskRun.Status.CANCELLED)
+                    || (currentExecution != null
+                    && currentExecution.getStatus() == ToolExecution.Status.CANCELLED)) {
                 log.info("[agent] confirm blocked by cancelled ledger, conversation={}, "
                                 + "confirmationTail={}", conversationId,
                         idTail(action.confirmationId()));
@@ -231,6 +275,39 @@ public class AgentService {
     }
 
     /**
+     * 查询多步骤任务进度：run 当前状态 + 每步结果。
+     * 数据按 userId 隔离，不返回他人的任务。
+     */
+    public TaskRunDto taskStatus(String runId) {
+        String userId = UserContext.require();
+        TaskRun run = taskRunService.find(userId, runId)
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "任务不存在"));
+        List<TaskRunDto.Step> steps = taskRunService.steps(runId).stream()
+                .map(this::stepView)
+                .toList();
+        return new TaskRunDto(run.getId(), run.getConversationId(), run.getWorkflowId(),
+                run.getStatus().name(), run.getCurrentStep(), run.getConfirmationId(),
+                run.getErrorCode(), run.getErrorMessage(), run.getResult(), steps);
+    }
+
+    private TaskRunDto.Step stepView(TaskStep step) {
+        Map<String, Object> args = Map.of();
+        if (step.getArgsJson() != null && !step.getArgsJson().isBlank()) {
+            try {
+                args = JsonUtil.fromJson(step.getArgsJson(),
+                        new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {
+                        });
+            } catch (RuntimeException ignored) {
+                args = Map.of();
+            }
+        }
+        return new TaskRunDto.Step(step.getStepNo(), step.getStageId(), step.getToolName(),
+                step.getSideEffect(), args == null ? Map.of() : args, step.getStatus().name(),
+                step.getResultSummary(), step.getErrorCode(), step.getErrorMessage(),
+                step.getCostMs() == null ? 0L : step.getCostMs(), step.getAttempts());
+    }
+
+    /**
      * 取消路径：只记录取消消息，不触碰业务数据；完成后删除令牌
      */
     private ChatResponse rejectConfirmed(ConfirmationService.PendingAction action, long start) {
@@ -239,23 +316,45 @@ public class AgentService {
                 "取消确认：" + action.summary(), action.model(), null);
         conversationService.saveMessage(action.conversationId(), Message.ROLE_ASSISTANT, answer,
                 action.model(), null);
+        boolean taskCancelled = false;
         try {
-            toolExecutionService.markCancelled(action.userId(), action.confirmationId());
+            if (action.runId().isBlank()) {
+                toolExecutionService.markCancelled(action.userId(), action.confirmationId());
+            } else {
+                // 批量确认的台账 executionId = runId:stepNo，不能用 confirmationId 取消；
+                // 先取消 run，再逐个取消写步骤台账，避免留下悬空的 PENDING 记录。
+                taskCancelled = taskRunService.cancel(action.userId(), action.runId());
+                for (ConfirmationService.PendingWriteStep step : action.steps()) {
+                    try {
+                        toolExecutionService.markCancelled(action.userId(),
+                                action.runId() + ":" + step.stepNo());
+                    } catch (RuntimeException e) {
+                        log.warn("[agent] cancel step ledger failed, runTail={}, step={}, reason={}",
+                                idTail(action.runId()), step.stepNo(), e.getMessage());
+                    }
+                }
+            }
         } catch (RuntimeException e) {
             // 台账是审计事实源，但 Redis 令牌已足以完成取消；这里降级告警，不阻断用户取消。
             log.warn("[agent] cancel ledger update failed, conversation={}, confirmationTail={}, "
                             + "reason={}", action.conversationId(), idTail(action.confirmationId()),
                     e.getMessage());
         }
-        auditService.audit(action.conversationId(), "tool-confirm", GraphExecution.STATUS_SUCCESS,
-                idTail(action.confirmationId()), "REJECTED", null,
-                System.currentTimeMillis() - start);
+        auditService.record(AuditEntry.text(action.conversationId(), "tool-confirm",
+                GraphExecution.STATUS_SUCCESS, idTail(action.confirmationId()), "REJECTED", null,
+                System.currentTimeMillis() - start, null));
         confirmationService.finish(action.conversationId(), action.confirmationId());
         log.info("[agent] confirm rejected, conversation={}, confirmationTail={}, costMs={}",
                 action.conversationId(), idTail(action.confirmationId()),
                 System.currentTimeMillis() - start);
-        return ChatResponse.of(action.conversationId(), answer, false, null,
+        ChatResponse response = ChatResponse.of(action.conversationId(), answer, false, null,
                 System.currentTimeMillis() - start, true, "");
+        if (!action.runId().isBlank()) {
+            response.setTaskRunId(action.runId());
+            response.setTaskStatus(taskCancelled ? TaskRun.Status.CANCELLED.name()
+                    : TaskRun.Status.RUNNING.name());
+        }
+        return response;
     }
 
     /**
@@ -271,10 +370,18 @@ public class AgentService {
             conversationService.saveMessage(action.conversationId(), Message.ROLE_USER,
                     confirmQuery, action.model(), null);
             WorkflowState state = invokeTaskConfirmGraph(action, userId, confirmQuery);
-            ToolExecution execution =
-                    toolExecutionService.find(userId, action.confirmationId()).orElse(null);
-            boolean succeeded = execution != null &&
-                    execution.getStatus() == ToolExecution.Status.SUCCEEDED;
+            // 多步骤任务以 ai_task_run 为事实源；旧版单写继续用 ai_tool_execution。
+            TaskRun run = action.runId().isBlank() ? null
+                    : taskRunService.find(userId, action.runId()).orElse(null);
+            ToolExecution execution = action.runId().isBlank()
+                    ? toolExecutionService.find(userId, action.confirmationId()).orElse(null) : null;
+            if (run != null && state.result() != null && !state.result().isBlank()) {
+                taskRunService.saveResult(userId, run.getId(), state.result());
+                run.setResult(state.result());
+            }
+            boolean succeeded = run != null
+                    ? run.getStatus() == TaskRun.Status.SUCCEEDED
+                    : execution != null && execution.getStatus() == ToolExecution.Status.SUCCEEDED;
             // 成败以台账为准：工具失败但图正常返回时，不能把令牌当成已消费
             if (succeeded) {
                 // 令牌先完成：即使后续消息落库失败，客户端用同一 ID 重试也只会拿到台账里的同一结果
@@ -288,7 +395,7 @@ public class AgentService {
                 log.warn("[agent] confirm answer save failed, conversation={}, reason={}",
                         action.conversationId(), e.getMessage());
             }
-            auditConfirmOutcome(action, execution, start);
+            auditConfirmOutcome(action, run, execution, start);
             if (state.fallback()) {
                 metrics.recordFallback();
             }
@@ -303,12 +410,12 @@ public class AgentService {
                             state.tokenUsage(), System.currentTimeMillis() - start, state.done(),
                             state.rootCause(), citations(state), confidence(state),
                             confidenceReason(state), toolTrace(state), state.taskClarify());
-            response.setBusiness(businessResult(execution));
+            response.setBusiness(run != null ? businessResult(run) : businessResult(execution));
             return response;
         } catch (RuntimeException e) {
-            auditService.audit(action.conversationId(), "tool-confirm",
+            auditService.record(AuditEntry.text(action.conversationId(), "tool-confirm",
                     GraphExecution.STATUS_FAILED, idTail(action.confirmationId()), "APPROVED",
-                    Throwables.rootMessage(e), System.currentTimeMillis() - start);
+                    Throwables.rootMessage(e), System.currentTimeMillis() - start, null));
             // 保留令牌：业务失败可重试，重复执行由 ai_tool_execution 唯一键拦截
             try {
                 conversationService.saveMessage(action.conversationId(), Message.ROLE_ASSISTANT,
@@ -324,15 +431,16 @@ public class AgentService {
      * 审计以执行台账为准：工具失败时不能把"用户点了同意"记成成功
      */
     private void auditConfirmOutcome(ConfirmationService.PendingAction action,
-                                     ToolExecution execution, long start) {
-        boolean succeeded =
-                execution != null && execution.getStatus() == ToolExecution.Status.SUCCEEDED;
+                                     TaskRun run, ToolExecution execution, long start) {
+        boolean succeeded = run != null
+                ? run.getStatus() == TaskRun.Status.SUCCEEDED
+                : execution != null && execution.getStatus() == ToolExecution.Status.SUCCEEDED;
         boolean failed = !succeeded;
-        String error = failed ? failureReason(execution) : null;
-        auditService.audit(action.conversationId(), "tool-confirm",
+        String error = failed ? (run != null ? failureReason(run) : failureReason(execution)) : null;
+        auditService.record(AuditEntry.text(action.conversationId(), "tool-confirm",
                 failed ? GraphExecution.STATUS_FAILED : GraphExecution.STATUS_SUCCESS,
                 idTail(action.confirmationId()), "APPROVED", error,
-                System.currentTimeMillis() - start);
+                System.currentTimeMillis() - start, null));
     }
 
     /**
@@ -359,6 +467,25 @@ public class AgentService {
                 blankToDefault(execution.getErrorMessage(), "写操作执行失败"));
     }
 
+    /** 任务状态转业务结果：多步骤写操作以整条任务是否成功为准。 */
+    private BusinessResult businessResult(TaskRun run) {
+        if (run == null) {
+            return BusinessResult.failure("NO_TASK_RUN", "未找到任务执行记录");
+        }
+        return switch (run.getStatus()) {
+            case SUCCEEDED -> BusinessResult.ok();
+            case RUNNING -> BusinessResult.failure("IN_PROGRESS", "任务仍在执行中");
+            case PLANNING, WAITING_CONFIRM ->
+                    BusinessResult.failure("NOT_EXECUTED", "任务尚未执行或仍在等待确认");
+            case CANCELLED -> BusinessResult.failure("CANCELLED", "任务已取消");
+            case PARTIAL_FAILED -> BusinessResult.failure("PARTIAL_FAILED",
+                    blankToDefault(run.getErrorMessage(), "部分步骤执行失败"));
+            case FAILED -> BusinessResult.failure(
+                    blankToDefault(run.getErrorCode(), "TASK_FAILED"),
+                    blankToDefault(run.getErrorMessage(), "任务执行失败"));
+        };
+    }
+
     /**
      * 审计失败原因：没有台账、执行中、执行失败分别给出可检索的错误码
      */
@@ -379,11 +506,57 @@ public class AgentService {
                 blankToDefault(execution.getErrorMessage(), "写操作执行失败");
     }
 
+    /** 任务失败原因：优先使用失败步骤写入的错误码。 */
+    private String failureReason(TaskRun run) {
+        if (run == null) {
+            return "NO_TASK_RUN:未找到任务执行记录";
+        }
+        if (run.getStatus() == TaskRun.Status.SUCCEEDED) {
+            return "";
+        }
+        return blankToDefault(run.getErrorCode(), "TASK_FAILED") + ":" +
+                blankToDefault(run.getErrorMessage(), "任务执行失败");
+    }
+
     /**
      * 令牌已不存在时的幂等重放：已成功返回上次结果，执行中 409，失败要求重新发起
      */
     private ChatResponse replayFinished(String conversationId, String confirmationId, String userId,
                                         long start) {
+        // 多步骤任务优先按确认 ID 找回 run：它的结果快照比单个工具台账完整。
+        TaskRun run = taskRunService.findByConfirmationId(userId, confirmationId).orElse(null);
+        if (run != null) {
+            if (!conversationId.equals(run.getConversationId())) {
+                throw new BizException(ErrorCode.NOT_FOUND,
+                        "确认请求不存在、已过期或已使用，请重新发起操作");
+            }
+            if (run.getStatus() == TaskRun.Status.SUCCEEDED) {
+                log.info("[agent] task replay, conversation={}, confirmationTail={}, runTail={}",
+                        conversationId, idTail(confirmationId), idTail(run.getId()));
+                String result = run.getResult() == null || run.getResult().isBlank()
+                        ? "该任务已执行完成。" : run.getResult();
+                ChatResponse response = ChatResponse.of(conversationId, result, false, null,
+                        System.currentTimeMillis() - start, true, "");
+                response.setBusiness(BusinessResult.ok());
+                response.setTaskRunId(run.getId());
+                response.setTaskStatus(run.getStatus().name());
+                return response;
+            }
+            if (run.getStatus() == TaskRun.Status.RUNNING) {
+                throw new BizException(ErrorCode.CONFIRMATION_IN_PROGRESS);
+            }
+            if (run.getStatus() == TaskRun.Status.PLANNING
+                    || run.getStatus() == TaskRun.Status.WAITING_CONFIRM) {
+                throw new BizException(ErrorCode.NOT_FOUND,
+                        "确认请求已过期且未执行，请重新发起操作");
+            }
+            if (run.getStatus() == TaskRun.Status.CANCELLED) {
+                throw new BizException(ErrorCode.NOT_FOUND,
+                        "确认请求已取消或已过期，请重新发起操作");
+            }
+            throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED,
+                    "上次任务执行失败：" + failureReason(run) + "，请重新发起操作");
+        }
         ToolExecution execution = toolExecutionService.find(userId, confirmationId).orElse(null);
         if (execution == null || !conversationId.equals(execution.getConversationId())) {
             throw new BizException(ErrorCode.NOT_FOUND,
@@ -438,6 +611,10 @@ public class AgentService {
                         String.valueOf(value)));
         inputs.put(WorkflowState.TASK_APPROVED, true);
         inputs.put(WorkflowState.TASK_IDEMPOTENCY_KEY, action.confirmationId());
+        if (!action.runId().isBlank()) {
+            inputs.put(WorkflowState.TASK_RUN_ID, action.runId());
+            inputs.put(WorkflowState.TASK_RUN_STATUS, TaskRun.Status.RUNNING.name());
+        }
         inputs.put(WorkflowState.TASK_PENDING_ACTION, Map.of());
         inputs.put(WorkflowState.TASK_CONFIRMATION_REQUIRED, false);
         RunnableConfig config = RunnableConfig.builder().threadId(action.conversationId()).build();
@@ -562,9 +739,21 @@ public class AgentService {
         if (confirmationId.isBlank()) {
             return null;
         }
+        List<ChatResponse.PendingStep> steps = new ArrayList<>();
+        Object rawSteps = pending.get("steps");
+        if (rawSteps instanceof List<?> list) {
+            for (Object item : list) {
+                Map<String, Object> map = mapOf(item);
+                steps.add(new ChatResponse.PendingStep(
+                        (int) longOf(map.get("stepNo")),
+                        Texts.textOr(map.get("tool"), ""),
+                        mapOf(map.get("args"))));
+            }
+        }
         return new ChatResponse.PendingAction(confirmationId, Texts.textOr(pending.get("tool"), ""),
                 mapOf(pending.get("args")), Texts.textOr(pending.get("summary"), ""),
-                Texts.textOr(pending.get("risk"), ""), longOf(pending.get("expiresAt")));
+                Texts.textOr(pending.get("risk"), ""), longOf(pending.get("expiresAt")),
+                Texts.textOr(pending.get("runId"), state.taskRunId()), steps);
     }
 
     /**
@@ -693,8 +882,9 @@ public class AgentService {
         rewriteOutput.put("topic", rewrite.topic());
         rewriteOutput.put("newTopic", rewrite.newTopic());
         rewriteOutput.put("segmentId", segment.getSegmentId());
-        auditService.auditJson(conversationId, "rewrite", GraphExecution.STATUS_SUCCESS,
-                rewriteInput, rewriteOutput, null, rewriteCostMs);
+        auditService.record(AuditEntry.of(conversationId, "rewrite",
+                GraphExecution.STATUS_SUCCESS, rewriteInput, rewriteOutput, null, rewriteCostMs,
+                null));
         // 步骤6：生成视图（当前话题段内原文，只给生成 LLM；token 预算装配，排除当前消息）
         List<Map<String, String>> generationView =
                 conversationService.generationHistoryView(conversationId, segment.getSegmentId(),
@@ -845,8 +1035,8 @@ public class AgentService {
 
         // TIMEOUT：cancel 成功，工作线程已停止；返回降级应答保证一问一答闭环。
         long costMs = System.currentTimeMillis() - start;
-        auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query, null,
-                "执行超时已中止", costMs);
+        auditService.record(AuditEntry.text(conversationId, "workflow",
+                GraphExecution.STATUS_FAILED, query, null, "执行超时已中止", costMs, null));
         metrics.recordGraphDuration(costMs);
         log.warn("[agent] execution timeout after {}s, thread={}, task cancelled, return fallback answer",
                 timeoutSeconds, conversationId);
@@ -860,13 +1050,14 @@ public class AgentService {
                                         long start) {
         long costMs = System.currentTimeMillis() - start;
         if (state == null) {
-            auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query,
-                    null, "图执行未返回状态", costMs);
+            auditService.record(AuditEntry.text(conversationId, "workflow",
+                    GraphExecution.STATUS_FAILED, query, null, "图执行未返回状态", costMs, null));
             throw new BizException(ErrorCode.AGENT_EXECUTION_FAILED, "图执行未返回结果");
         }
         metrics.recordGraphDuration(costMs);
-        auditService.audit(conversationId, "workflow", GraphExecution.STATUS_SUCCESS, query,
-                state.result(), null, costMs, state.rootCause());
+        auditService.record(AuditEntry.text(conversationId, "workflow",
+                GraphExecution.STATUS_SUCCESS, query, state.result(), null, costMs,
+                state.rootCause()));
         return state;
     }
 
@@ -875,8 +1066,9 @@ public class AgentService {
      */
     private BizException graphFailure(Throwable cause, String conversationId, String query,
                                       long start) {
-        auditService.audit(conversationId, "workflow", GraphExecution.STATUS_FAILED, query, null,
-                Throwables.rootMessage(cause), System.currentTimeMillis() - start);
+        auditService.record(AuditEntry.text(conversationId, "workflow",
+                GraphExecution.STATUS_FAILED, query, null, Throwables.rootMessage(cause),
+                System.currentTimeMillis() - start, null));
         if (cause instanceof BizException biz) {
             return biz;
         }
@@ -920,8 +1112,8 @@ public class AgentService {
         output.put("confidence", evidence.confidence());
         output.put("sufficient", evidence.sufficient());
         output.put("rootCause", state.rootCause());
-        auditService.auditJson(conversationId, "retrieval-plan", GraphExecution.STATUS_SUCCESS,
-                input, output, null, null);
+        auditService.record(AuditEntry.of(conversationId, "retrieval-plan",
+                GraphExecution.STATUS_SUCCESS, input, output, null, null, null));
     }
 
     /**

@@ -129,7 +129,11 @@ class TaskConfirmNodeTest {
                         "args", Map.of("entityId", "B1001", "reason", "不想要了"),
                         "purpose", "修改业务数据"));
         ConfirmationService.PendingAction action = new ConfirmationService.PendingAction(
-                "cfm_1", "demo", "c1", "test-model", "write_tool", plan,
+                "cfm_1", "demo", "c1", "test-model", "",
+                "write_tool",
+                List.of(new ConfirmationService.PendingWriteStep(
+                        0, "write_tool", Map.of("entityId", "B1001", "reason", "不想要了"))),
+                plan,
                 "即将执行：修改业务数据。", "WRITE", 1760000000000L);
         when(confirmationService.create(eq("demo"), eq("c1"), eq("test-model"),
                 eq("write_tool"), eq(plan), anyString(), eq("WRITE"))).thenReturn(action);

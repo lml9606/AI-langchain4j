@@ -24,6 +24,9 @@ public class AgentProperties {
     /** LLM 调用线程池配置（与图执行线程池隔离） */
     private LlmExecutor llmExecutor = new LlmExecutor();
 
+    /** 审计异步落库线程池配置（与主链路隔离，队列满可丢弃） */
+    private AuditExecutor auditExecutor = new AuditExecutor();
+
     /** LLM 网关防护配置 */
     private Llm llm = new Llm();
 
@@ -47,6 +50,9 @@ public class AgentProperties {
 
     /** 会话锁配置 */
     private Lock lock = new Lock();
+
+    /** 多步骤任务执行配置 */
+    private Task task = new Task();
 
     /** 校验重试上限（图内重试环次数） */
     private int maxValidateRetries = 3;
@@ -109,6 +115,8 @@ public class AgentProperties {
         private int taskSummaryMaxLength = 500;
         /** 审计 JSON 单字段最大字符数 */
         private int auditJsonMaxLength = 4000;
+        /** 节点/方法审计单个字段最大字符数（防止每个节点重复存整段上下文） */
+        private int auditNodeValueMaxLength = 400;
         /** 改写结果相对原句允许的额外字符数（防模型输出解释废话） */
         private int rewriteOutputSlack = 200;
         /** 工单列表默认返回条数 */
@@ -170,6 +178,15 @@ public class AgentProperties {
         private int corePoolSize = 8;
         private int maxPoolSize = 32;
         private int queueCapacity = 400;
+        private int keepAliveSeconds = 60;
+    }
+
+    /** 审计线程池：单/低并发批量落库，队列满丢弃审计而不阻塞业务。 */
+    @Data
+    public static class AuditExecutor {
+        private int corePoolSize = 1;
+        private int maxPoolSize = 2;
+        private int queueCapacity = 1000;
         private int keepAliveSeconds = 60;
     }
 
@@ -385,7 +402,7 @@ public class AgentProperties {
         /** 单用户单工具每分钟调用上限（Redis 固定窗口，多实例共享计数） */
         private int maxCallsPerMinute = 20;
         /** 单个任务最多执行计划步骤数（防模型输出超长计划导致成本失控） */
-        private int maxStepsPerTask = 3;
+        private int maxStepsPerTask = 10;
         /** 工具执行线程池 */
         private ExecutorConfig executor = new ExecutorConfig();
         /** 写操作人工确认配置 */
@@ -405,6 +422,31 @@ public class AgentProperties {
             private int ttlSeconds = 300;
             /** 执行台账失联判定（秒）：RUNNING 超过该时长视为进程崩溃，允许接管重试 */
             private int staleSeconds = 60;
+        }
+    }
+
+    /**
+     * 多步骤任务配置：任务/步骤表是执行事实源，线程池只负责同阶段只读步骤并行。
+     */
+    @Data
+    public static class Task {
+        /** 单个任务允许的最大写步骤数（批量确认上限） */
+        private int maxWritesPerTask = 5;
+        /** 执行租约时长（秒）：进程崩溃后超过该时长允许其他实例接管 */
+        private int leaseSeconds = 120;
+        /** 同阶段只读步骤是否允许并行执行 */
+        private boolean parallelReads = true;
+        /** 崩溃恢复 worker 配置 */
+        private Recovery recovery = new Recovery();
+
+        @Data
+        public static class Recovery {
+            /** 是否开启租约过期任务恢复 */
+            private boolean enabled = true;
+            /** 扫描间隔（毫秒） */
+            private long intervalMs = 30000;
+            /** 每轮最多恢复任务数 */
+            private int batchSize = 10;
         }
     }
 }

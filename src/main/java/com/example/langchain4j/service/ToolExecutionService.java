@@ -10,6 +10,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Objects;
 import java.util.Optional;
+import java.util.List;
 
 /**
  * 工具执行台账服务：写工具幂等闸门与结果查询。
@@ -68,6 +69,27 @@ public class ToolExecutionService {
     }
 
     /**
+     * 批量创建待确认台账：一个确认令牌对应多个写步骤时使用。
+     *
+     * <p>任一条写入失败就抛异常，让整个事务回滚，避免出现"部分写步骤有台账、
+     * 部分没有"的半成品确认卡片。调用方收到异常后负责撤销 Redis 令牌。
+     */
+    @Transactional
+    public void recordPendingBatch(List<ToolExecution> executions) {
+        if (executions == null || executions.isEmpty()) {
+            return;
+        }
+        int inserted = 0;
+        for (ToolExecution execution : executions) {
+            // 同一 run 重新确认时幂等键不变，已有台账保持原状态：
+            // SUCCEEDED 继续重放，FAILED 可被接管；这里不重复插入也不覆盖。
+            inserted += executionMapper.insertPending(execution);
+        }
+        log.info("[tool-exec] pending batch recorded, total={}, inserted={}",
+                executions.size(), inserted);
+    }
+
+    /**
      * 幂等闸门：抢占执行权、命中重放或判定冲突。
      * <p>必须在业务事务内调用，返回值决定调用方是继续执行还是直接返回上次结果。
      */
@@ -103,7 +125,7 @@ public class ToolExecutionService {
         }
         int staleSeconds = Math.max(1, properties.getTool().getConfirmation().getStaleSeconds());
         if (executionMapper.tryReclaim(execution.getUserId(), execution.getExecutionId(),
-                staleSeconds, execution.getArgsHash()) == 1) {
+                staleSeconds, execution.getArgsHash(), execution.getArgsJson()) == 1) {
             log.info("[tool-exec] reclaimed, executionTail={}, tool={}",
                     idTail(execution.getExecutionId()), execution.getTool());
             return new BeginResult(BeginStatus.ACQUIRED, existing);

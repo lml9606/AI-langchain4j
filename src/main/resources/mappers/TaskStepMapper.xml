@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.TaskStepMapper">
+
+    <resultMap id="TaskStepMap" type="com.example.langchain4j.repository.entity.TaskStep">
+        <id property="id" column="id"/>
+        <result property="runId" column="run_id"/>
+        <result property="stepNo" column="step_no"/>
+        <result property="stageId" column="stage_id"/>
+        <result property="toolName" column="tool_name"/>
+        <result property="sideEffect" column="side_effect"/>
+        <result property="argsJson" column="args_json"/>
+        <result property="purpose" column="purpose"/>
+        <result property="status" column="status"/>
+        <result property="resultSummary" column="result_summary"/>
+        <result property="resultJson" column="result_json"/>
+        <result property="evidenceJson" column="evidence_json"/>
+        <result property="errorCode" column="error_code"/>
+        <result property="errorMessage" column="error_message"/>
+        <result property="costMs" column="cost_ms"/>
+        <result property="attempts" column="attempts"/>
+        <result property="startedAt" column="started_at"/>
+        <result property="finishedAt" column="finished_at"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <insert id="insertBatch">
+        INSERT INTO ai_task_step
+            (run_id, step_no, stage_id, tool_name, side_effect, args_json, purpose, status)
+        VALUES
+        <foreach collection="steps" item="step" separator=",">
+            (#{step.runId}, #{step.stepNo}, #{step.stageId}, #{step.toolName},
+             #{step.sideEffect}, #{step.argsJson}, #{step.purpose}, #{step.status})
+        </foreach>
+    </insert>
+
+    <select id="selectByRunId" resultMap="TaskStepMap">
+        SELECT id, run_id, step_no, stage_id, tool_name, side_effect, args_json, purpose,
+               status, result_summary, result_json, evidence_json, error_code, error_message,
+               cost_ms, attempts, started_at, finished_at, created_at, updated_at
+        FROM ai_task_step
+        WHERE run_id = #{runId}
+        ORDER BY step_no
+    </select>
+
+    <update id="markRunning">
+        UPDATE ai_task_step
+        SET status = 'RUNNING', attempts = attempts + 1, started_at = now(), updated_at = now(),
+            error_code = NULL, error_message = NULL
+        WHERE run_id = #{runId}
+          AND step_no = #{stepNo}
+          AND status IN ('PENDING', 'FAILED', 'RUNNING')
+    </update>
+
+    <update id="updateArgs">
+        UPDATE ai_task_step
+        SET args_json = #{argsJson}, updated_at = now()
+        WHERE run_id = #{runId}
+          AND step_no = #{stepNo}
+    </update>
+
+    <update id="markSucceeded">
+        UPDATE ai_task_step
+        SET status = 'SUCCEEDED', result_summary = #{summary}, result_json = #{resultJson},
+            evidence_json = #{evidenceJson}, cost_ms = #{costMs}, finished_at = now(),
+            error_code = NULL, error_message = NULL, updated_at = now()
+        WHERE run_id = #{runId}
+          AND step_no = #{stepNo}
+    </update>
+
+    <update id="markFailed">
+        UPDATE ai_task_step
+        SET status = 'FAILED', error_code = #{errorCode}, error_message = #{errorMessage},
+            cost_ms = #{costMs}, finished_at = now(), updated_at = now()
+        WHERE run_id = #{runId}
+          AND step_no = #{stepNo}
+    </update>
+
+    <update id="markSkipped">
+        UPDATE ai_task_step
+        SET status = 'SKIPPED', error_code = 'UPSTREAM_FAILED',
+            error_message = '前序步骤失败，本步未执行', finished_at = now(), updated_at = now()
+        WHERE run_id = #{runId}
+          AND step_no &gt;= #{fromStepNo}
+          AND status = 'PENDING'
+    </update>
+
+    <update id="resetSkipped">
+        UPDATE ai_task_step
+        SET status = 'PENDING', error_code = NULL, error_message = NULL,
+            finished_at = NULL, updated_at = now()
+        WHERE run_id = #{runId}
+          AND status = 'SKIPPED'
+    </update>
+
+    <update id="markCancelledByRun">
+        UPDATE ai_task_step
+        SET status = 'CANCELLED', finished_at = now(), updated_at = now()
+        WHERE run_id = #{runId}
+          AND status IN ('PENDING', 'RUNNING')
+    </update>
+
+    <update id="markCancelledByConversation">
+        UPDATE ai_task_step
+        SET status = 'CANCELLED', finished_at = now(), updated_at = now()
+        WHERE status IN ('PENDING', 'RUNNING')
+          AND run_id IN (
+              SELECT id FROM ai_task_run
+              WHERE user_id = #{userId}
+                AND conversation_id = #{conversationId}
+                AND status = 'CANCELLED'
+          )
+    </update>
+
+</mapper>

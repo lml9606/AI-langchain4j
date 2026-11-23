@@ -29,8 +29,13 @@ public interface TaskWorkflow {
         return List.copyOf(names);
     }
 
-    /** 执行阶段：阶段 ID 用于追踪，tools 是该阶段允许调用的完整工具集合。 */
-    record Stage(String id, String description, List<String> tools) {
+    /**
+     * 执行阶段：阶段 ID 用于追踪，tools 是该阶段允许调用的完整工具集合。
+     *
+     * @param parallel 同阶段只读步骤是否允许并行；写步骤始终串行。
+     *                 阶段之间隐含顺序依赖，后面阶段可以引用前面阶段的结果。
+     */
+    record Stage(String id, String description, List<String> tools, boolean parallel) {
 
         public Stage {
             id = id == null ? "" : id.trim();
@@ -39,6 +44,11 @@ public interface TaskWorkflow {
                     .filter(tool -> tool != null && !tool.isBlank())
                     .map(String::trim)
                     .toList();
+        }
+
+        /** 兼容旧写法：默认不并行。 */
+        public Stage(String id, String description, List<String> tools) {
+            this(id, description, tools, false);
         }
     }
 }

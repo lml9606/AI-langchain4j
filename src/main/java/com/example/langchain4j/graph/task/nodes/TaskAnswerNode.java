@@ -9,6 +9,7 @@ import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.LlmResult;
 import com.example.langchain4j.llm.PromptTemplates;
+import com.example.langchain4j.repository.entity.TaskRun;
 import com.example.langchain4j.service.PromptTemplateService;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
@@ -51,6 +52,18 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
         List<Map<String, Object>> trace = state.taskTrace();
         String answer;
         Integer tokenUsage = null;
+        if (TaskRun.Status.RUNNING.name().equals(state.taskRunStatus())) {
+            // 执行租约被其他实例持有：不调用模型，避免把未完成轨迹包装成最终答案。
+            Map<String, Object> running = new LinkedHashMap<>();
+            running.put(WorkflowState.RESULT,
+                    "任务正在执行中，请稍后通过任务进度接口查询结果。");
+            running.put(WorkflowState.TASK_CONFIDENCE, 0.5);
+            running.put(WorkflowState.TASK_CONFIDENCE_REASON, "任务执行中，结果尚未确定");
+            running.put(WorkflowState.ERROR, "");
+            log.info("[task-answer] task still running, return status answer, runTail={}",
+                    tail(state.taskRunId()));
+            return running;
+        }
         try {
             // 步骤1：优先让模型基于证据组织自然语言回答
             LlmResult result = llmGateway.generate(LlmRequest.of(state.model(),
@@ -198,5 +211,12 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
 
     private int maxSnippet() {
         return properties.getLimits().getTaskAnswerMaxSnippet();
+    }
+
+    private String tail(String id) {
+        if (id == null || id.isBlank()) {
+            return "";
+        }
+        return id.length() <= 8 ? "***" : id.substring(id.length() - 8);
     }
 }

@@ -56,14 +56,16 @@ class TaskWorkflowRegistryTest {
     }
 
     @Test
-    @DisplayName("工作流内重复工具 -> 启动期 fail-fast")
-    void rejectDuplicateTool() {
+    @DisplayName("同一工具可在多个步骤重复 -> 允许")
+    void allowDuplicateTool() {
         ToolRegistry tools = new ToolRegistry(List.of(tool("first", ToolSideEffect.READ_ONLY)));
 
-        assertThatThrownBy(() -> new TaskWorkflowRegistry(
-                List.of(workflow("wf", "stage", "first", "first")), tools))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("duplicate tool");
+        TaskWorkflowRegistry registry = new TaskWorkflowRegistry(
+                List.of(workflow("wf", "stage", "first", "first")), tools);
+
+        assertThat(registry.find("wf")).isPresent();
+        assertThat(registry.validatePlan(registry.find("wf").orElseThrow(),
+                List.of(Map.of("tool", "first"), Map.of("tool", "first"))).valid()).isTrue();
     }
 
     @Test

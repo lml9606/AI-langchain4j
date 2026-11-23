@@ -1,5 +1,7 @@
 package com.example.langchain4j.service;
 
+import com.example.langchain4j.audit.AuditEntry;
+import com.example.langchain4j.audit.AuditRecorder;
 import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.repository.entity.GraphExecution;
@@ -7,18 +9,18 @@ import com.example.langchain4j.repository.mapper.GraphExecutionMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.util.Map;
 import java.util.UUID;
 
 /**
- * 图执行审计服务：节点级执行记录落库（可观测性数据，失败仅告警不阻断主流程）。
- * <p>
- * 审计范围：图内节点（由流式事件迭代器逐节点写入）与图外步骤（如 "rewrite"）、
- * 整体图执行（"workflow"），共用同一张表按 nodeName 区分。
+ * 图执行审计服务：审计记录落库（可观测性数据，失败仅告警不阻断主流程）。
+ *
+ * <p>审计范围：图内节点、图外步骤（rewrite/retrieval-plan）、整体图执行（workflow）
+ * 与工具调用，共用同一张表按 nodeName 区分。executionId 优先取请求 traceId，
+ * 同一次请求的多条审计可以按 executionId 串起来。
  */
 @Slf4j
 @Service
-public class AuditService {
+public class AuditService implements AuditRecorder {
 
     private final GraphExecutionMapper graphExecutionMapper;
     private final AgentProperties properties;
@@ -28,71 +30,31 @@ public class AuditService {
         this.properties = properties;
     }
 
-    /**
-     * 审计落库（失败仅告警，不阻断主流程）。节点级审计无需根因，委托重载版本传 null。
-     *
-     * @param conversationId 会话 ID（threadId）
-     * @param nodeName       节点名（图外步骤如 "rewrite" 也复用此字段）
-     * @param status         执行状态（GraphExecution.STATUS_*）
-     * @param input          输入摘要（写入 inputJson）
-     * @param output         输出摘要（写入 outputJson）
-     * @param errorMsg       错误信息（成功时为空）
-     * @param costMs         耗时（毫秒，可为空）
-     */
-    public void audit(String conversationId, String nodeName, String status,
-                      String input, String output, String errorMsg, Long costMs) {
-        audit(conversationId, nodeName, status, input, output, errorMsg, costMs, null);
-    }
-
-    /**
-     * 审计落库（失败仅告警，不阻断主流程）。
-     *
-     * @param conversationId 会话 ID（threadId）
-     * @param nodeName       节点名（图外步骤如 "rewrite" 也复用此字段）
-     * @param status         执行状态（GraphExecution.STATUS_*）
-     * @param input          输入摘要（写入 inputJson）
-     * @param output         输出摘要（写入 outputJson）
-     * @param errorMsg       错误信息（成功时为空）
-     * @param costMs         耗时（毫秒，可为空）
-     * @param rootCause      检索根因（workflow 级/节点级带根因的记录写此列；无根因时为空）
-     */
-    public void audit(String conversationId, String nodeName, String status,
-                      String input, String output, String errorMsg, Long costMs, String rootCause) {
-        auditJson(conversationId, nodeName, status,
-                Map.of("query", input == null ? "" : input),
-                Map.of("result", output == null ? "" : output),
-                errorMsg, costMs, rootCause);
-    }
-
-    /**
-     * 结构化审计落库：输入/输出直接以 JSON 对象写入，避免把多个字段拼成字符串后再二次转义。
-     * 适用于 rewrite、retrieval-plan 这类需要保留多个排查字段的步骤。
-     */
-    public void auditJson(String conversationId, String nodeName, String status,
-                          Map<String, Object> input, Map<String, Object> output,
-                          String errorMsg, Long costMs) {
-        auditJson(conversationId, nodeName, status, input, output, errorMsg, costMs, null);
-    }
-
-    /** 结构化审计落库（带根因）；审计失败只告警，不影响主流程。 */
-    public void auditJson(String conversationId, String nodeName, String status,
-                          Map<String, Object> input, Map<String, Object> output,
-                          String errorMsg, Long costMs, String rootCause) {
+    /** 统一审计入口：同步落库，异常降级为告警。 */
+    @Override
+    public void record(AuditEntry entry) {
         try {
             GraphExecution execution = new GraphExecution();
-            execution.setExecutionId(UUID.randomUUID().toString().replace("-", ""));
-            execution.setConversationId(conversationId);
-            execution.setNodeName(nodeName);
-            execution.setStatus(status);
-            execution.setInputJson(truncate(JsonUtil.toJson(input == null ? Map.of() : input)));
-            execution.setOutputJson(truncate(JsonUtil.toJson(output == null ? Map.of() : output)));
-            execution.setErrorMsg(errorMsg);
-            execution.setCostMs(costMs);
-            execution.setRootCause(rootCause == null || rootCause.isBlank() ? null : rootCause);
+            execution.setExecutionId(executionId(entry));
+            execution.setConversationId(entry.conversationId());
+            execution.setNodeName(entry.nodeName());
+            execution.setStatus(entry.status());
+            execution.setInputJson(truncate(JsonUtil.toJson(entry.input())));
+            execution.setOutputJson(truncate(JsonUtil.toJson(entry.output())));
+            execution.setErrorMsg(entry.errorMsg());
+            execution.setCostMs(entry.costMs());
+            execution.setRootCause(entry.rootCause());
             graphExecutionMapper.insert(execution);
         } catch (Exception e) {
             log.warn("[audit] audit insert failed, degrade: {}", e.getMessage());
         }
+    }
+
+    /** AuditEntry 已填充 traceId；极端情况下仍为空时用随机 ID 兜底。 */
+    private String executionId(AuditEntry entry) {
+        String id = entry.executionId();
+        return id == null || id.isBlank()
+                ? UUID.randomUUID().toString().replace("-", "") : id;
     }
 
     /** 审计 JSON 超长截断（保留头部 + 截断标记），防单条审计记录撑爆 DB 字段 */

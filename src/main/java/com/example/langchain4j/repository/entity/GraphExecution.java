@@ -15,7 +15,7 @@ public class GraphExecution {
     public static final String STATUS_FAILED = "FAILED";
 
     private Long id;
-    /** 单次图执行 ID（UUID 去横线） */
+    /** 请求 traceId（同一次请求的节点/工具/改写/整体执行记录共享） */
     private String executionId;
     /** 会话 ID（threadId） */
     private String conversationId;

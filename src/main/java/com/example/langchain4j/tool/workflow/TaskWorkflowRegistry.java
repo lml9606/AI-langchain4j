@@ -110,7 +110,6 @@ public class TaskWorkflowRegistry {
         }
 
         Set<String> stageIds = new LinkedHashSet<>();
-        Set<String> toolNames = new LinkedHashSet<>();
         for (TaskWorkflow.Stage stage : workflow.stages()) {
             if (stage == null || stage.id().isBlank()) {
                 throw new IllegalStateException("[workflow] stage id must not be blank: " + workflow.id());
@@ -124,10 +123,8 @@ public class TaskWorkflowRegistry {
                         + workflow.id() + "/" + stage.id());
             }
             for (String toolName : stage.tools()) {
-                if (!toolNames.add(toolName)) {
-                    throw new IllegalStateException("[workflow] duplicate tool in workflow: "
-                            + workflow.id() + "/" + toolName);
-                }
+                // 同一个工具允许在多个阶段重复出现（例如查询 a/b/c 都走 query 工具），
+                // 契约校验按"工具序列 + 参数"进行，不按工具名去重。
                 ToolDefinition definition = toolRegistry.definition(toolName)
                         .orElseThrow(() -> new IllegalStateException(
                                 "[workflow] unknown or disabled tool: "

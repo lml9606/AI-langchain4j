@@ -112,6 +112,10 @@ public class WorkflowState extends AgentState {
     public static final String TASK_IDEMPOTENCY_KEY = "taskIdempotencyKey";
     /** 固定任务工作流 ID（TaskPlanNode 写入；确认链路据此复核工具契约） */
     public static final String TASK_WORKFLOW_ID = "taskWorkflowId";
+    /** 任务运行 ID（TaskExecuteNode 写入；多步骤执行、确认和查询都以它为主键） */
+    public static final String TASK_RUN_ID = "taskRunId";
+    /** 任务运行状态（PLANNING/WAITING_CONFIRM/RUNNING/SUCCEEDED/FAILED 等，响应透出） */
+    public static final String TASK_RUN_STATUS = "taskRunStatus";
 
     // ---- 旧版平铺字段 key：仅用于升级前 checkpoint 的迁移与兼容读取，新数据一律写入嵌套子对象 ----
     private static final String LEGACY_VALIDATED = "validated";
@@ -586,6 +590,16 @@ public class WorkflowState extends AgentState {
     /** 任务执行计划：只接受 List<Map>，逐项转字符串键值对（保留嵌套 args 对象） */
     public List<Map<String, Object>> taskPlan() {
         return mapList(TASK_PLAN);
+    }
+
+    /** 当前任务的运行 ID；没有进入多步骤执行时为空字符串。 */
+    public String taskRunId() {
+        return value(TASK_RUN_ID).map(String::valueOf).orElse("");
+    }
+
+    /** 当前任务的运行状态；没有进入多步骤执行时为空字符串。 */
+    public String taskRunStatus() {
+        return value(TASK_RUN_STATUS).map(String::valueOf).orElse("");
     }
 
     /** 工具调用轨迹（结构同计划步骤，额外含 success/summary/errorCode/costMs） */

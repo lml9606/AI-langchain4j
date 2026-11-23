@@ -42,6 +42,7 @@ class ToolExecutionServiceTest {
         execution.setConversationId("c1");
         execution.setTool("complete_demo_record");
         execution.setArgsHash("hash-1");
+        execution.setArgsJson("{\"recordId\":1}");
         execution.setStatus(status);
         return execution;
     }
@@ -72,12 +73,13 @@ class ToolExecutionServiceTest {
         ToolExecution pending = execution(ToolExecution.Status.PENDING);
         when(executionMapper.insertRunning(running)).thenReturn(0);
         when(executionMapper.selectByExecutionId("demo", "cfm_1")).thenReturn(pending);
-        when(executionMapper.tryReclaim("demo", "cfm_1", 60, "hash-1")).thenReturn(1);
+        when(executionMapper.tryReclaim("demo", "cfm_1", 60, "hash-1", "{\"recordId\":1}"))
+                .thenReturn(1);
 
         ToolExecutionService.BeginResult result = service.begin(running);
 
         assertThat(result.status()).isEqualTo(ToolExecutionService.BeginStatus.ACQUIRED);
-        verify(executionMapper).tryReclaim("demo", "cfm_1", 60, "hash-1");
+        verify(executionMapper).tryReclaim("demo", "cfm_1", 60, "hash-1", "{\"recordId\":1}");
     }
 
     @Test
@@ -91,6 +93,7 @@ class ToolExecutionServiceTest {
         ToolExecutionService.BeginResult result = service.begin(running);
 
         assertThat(result.status()).isEqualTo(ToolExecutionService.BeginStatus.CONFLICT);
-        verify(executionMapper, never()).tryReclaim(anyString(), anyString(), anyInt(), anyString());
+        verify(executionMapper, never()).tryReclaim(anyString(), anyString(), anyInt(), anyString(),
+                anyString());
     }
 }

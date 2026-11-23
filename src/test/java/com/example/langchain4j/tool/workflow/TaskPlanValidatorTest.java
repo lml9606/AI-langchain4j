@@ -106,16 +106,40 @@ class TaskPlanValidatorTest {
     }
 
     @Test
-    @DisplayName("多个写操作 -> 规划阶段拒绝")
-    void rejectMultipleWrites() {
+    @DisplayName("多个写操作 -> 允许，作为一次批量确认")
+    void allowMultipleWrites() {
         TaskPlanValidator validator = new TaskPlanValidator(workflowRegistry, List.of());
 
         TaskPlanValidator.PlanValidationResult result = validator.validate(
                 TaskPlanPhase.PLAN, workflow,
                 List.of(step("write_tool"), step("write_tool")), definitions, Map.of());
 
-        assertThat(result.valid()).isFalse();
-        assertThat(result.message()).contains("一次只能确认一个写操作");
+        assertThat(result.valid()).isTrue();
+        assertThat(result.writeSteps()).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("前置只读步骤后的多个写步骤 -> 按绝对 stepNo 校验通过")
+    void allowBatchWritesAfterReadSteps() {
+        TaskPlanValidator validator = new TaskPlanValidator(workflowRegistry, List.of());
+        Map<String, Object> read = step("read_tool");
+        read.put("stepNo", 0);
+        Map<String, Object> firstWrite = step("write_tool");
+        firstWrite.put("stepNo", 2);
+        Map<String, Object> secondWrite = step("write_tool");
+        secondWrite.put("stepNo", 3);
+        Map<String, Object> pending = Map.of("steps", List.of(
+                Map.of("stepNo", 2, "tool", "write_tool",
+                        "args", Map.of("entityId", "B1001")),
+                Map.of("stepNo", 3, "tool", "write_tool",
+                        "args", Map.of("entityId", "B1001"))));
+
+        TaskPlanValidator.PlanValidationResult result = validator.validate(
+                TaskPlanPhase.CONFIRM, workflow,
+                List.of(read, firstWrite, secondWrite), definitions, pending);
+
+        assertThat(result.valid()).isTrue();
+        assertThat(result.writeSteps()).hasSize(2);
     }
 
     @Test
@@ -149,10 +173,12 @@ class TaskPlanValidatorTest {
     void extensionCannotRunAfterBuiltInFailure() {
         TaskPlanRule rule = mock(TaskPlanRule.class);
         TaskPlanValidator validator = new TaskPlanValidator(workflowRegistry, List.of(rule));
+        Map<String, Object> invalid = step("read_tool");
+        invalid.put("args", Map.of());
 
         TaskPlanValidator.PlanValidationResult result = validator.validate(
                 TaskPlanPhase.PLAN, workflow,
-                List.of(step("write_tool"), step("write_tool")), definitions, Map.of());
+                List.of(invalid, step("write_tool")), definitions, Map.of());
 
         assertThat(result.valid()).isFalse();
         verifyNoInteractions(rule);

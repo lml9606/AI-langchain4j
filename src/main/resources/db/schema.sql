@@ -83,7 +83,7 @@ WHERE m.conversation_id = sub.conversation_id
 -- 图执行审计表（节点级可观测：每次节点执行一行）
 CREATE TABLE IF NOT EXISTS ai_graph_execution (
     id              BIGSERIAL PRIMARY KEY,
-    execution_id    VARCHAR(64) NOT NULL,                  -- 单次图执行 ID
+    execution_id    VARCHAR(64) NOT NULL,                  -- 请求 traceId（同一次请求的审计可聚合）
     conversation_id VARCHAR(64) NOT NULL,                  -- 会话 ID（thread_id）
     node_name       VARCHAR(64) NOT NULL,                  -- 图节点名
     status          VARCHAR(16) NOT NULL,                  -- RUNNING / SUCCESS / FAILED
@@ -195,11 +195,15 @@ CREATE TABLE IF NOT EXISTS ai_tool_execution (
     conversation_id VARCHAR(64)  NOT NULL,
     tool            VARCHAR(64)  NOT NULL,
     args_hash       VARCHAR(64),                          -- 参数指纹：同键不同参直接拒绝
+    args_json       TEXT,                                 -- 实际执行参数（PENDING 阶段为待确认参数）
     plan_json       TEXT,                                 -- 待确认计划快照（用户确认的内容）
     summary         TEXT,                                 -- 确认卡片摘要
     risk            VARCHAR(16),                          -- READ_ONLY / WRITE 等风险等级
     expires_at      TIMESTAMPTZ,                          -- 待确认动作过期时间（展示/审计用）
     status          VARCHAR(16)  NOT NULL,                -- PENDING / RUNNING / SUCCEEDED / FAILED / CANCELLED
+    attempt_count   INT          NOT NULL DEFAULT 0,      -- 已接管执行次数（含僵尸执行重试）
+    started_at      TIMESTAMPTZ,                          -- 最近一次进入 RUNNING 的时间
+    finished_at     TIMESTAMPTZ,                          -- 最近一次进入终态的时间
     result          TEXT,                                 -- 成功结果（重放时原样返回）
     error_code      VARCHAR(64),
     error_message   TEXT,
@@ -211,9 +215,72 @@ ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS plan_json TEXT;
 ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS summary TEXT;
 ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS risk VARCHAR(16);
 ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS args_json TEXT;
+ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS attempt_count INT NOT NULL DEFAULT 0;
+ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_tool_execution_user ON ai_tool_execution (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_execution_status ON ai_tool_execution (status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_tool_execution_pending ON ai_tool_execution (status, expires_at);
+
+-- ============================================================
+-- 任务执行（多步骤编排）
+-- 一次任务 = 一条 ai_task_run，多个步骤 = 多条 ai_task_step。
+-- run 保存"执行到哪一步"，step 保存"每步是否成功、结果是什么"。
+  -- 写步骤的幂等键 = run_id + ':' + step_no，与 ai_tool_execution 一一对应。
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS ai_task_run (
+    id              VARCHAR(64)  PRIMARY KEY,              -- run_xxx（对外任务 ID）
+    conversation_id VARCHAR(64)  NOT NULL,
+    user_id         VARCHAR(64)  NOT NULL,
+    workflow_id     VARCHAR(64)  NOT NULL,                 -- 固定任务工作流契约
+    status          VARCHAR(24)  NOT NULL,                 -- PLANNING/WAITING_CONFIRM/RUNNING/SUCCEEDED/PARTIAL_FAILED/FAILED/CANCELLED
+    current_step    INT          NOT NULL DEFAULT 0,       -- 下一个待执行步骤序号（0 基）
+    plan_json       TEXT         NOT NULL,                 -- 本轮完整计划快照
+    plan_hash       VARCHAR(64),                           -- 计划指纹：确认后参数被篡改会被发现
+    confirmation_id VARCHAR(128),                          -- 批量确认 ID（一个 run 一个）
+    result          TEXT,                                  -- 最终回答快照（确认重放时原样返回）
+    lease_owner     VARCHAR(64),                           -- 执行租约持有者（多实例防重复跑）
+    lease_until     TIMESTAMPTZ,                           -- 租约到期时间
+    error_code      VARCHAR(64),
+    error_message   TEXT,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+ALTER TABLE ai_task_run ADD COLUMN IF NOT EXISTS result TEXT;
+CREATE INDEX IF NOT EXISTS idx_task_run_user ON ai_task_run (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_run_conversation ON ai_task_run (conversation_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_run_status ON ai_task_run (status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_task_run_lease ON ai_task_run (status, lease_until);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_task_run_confirmation
+    ON ai_task_run (user_id, confirmation_id) WHERE confirmation_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS ai_task_step (
+    id              BIGSERIAL    PRIMARY KEY,
+    run_id          VARCHAR(64)  NOT NULL,
+    step_no         INT          NOT NULL,                 -- 0 基，按计划顺序
+    stage_id        VARCHAR(64),                           -- 工作流阶段（同阶段只读步骤可并行）
+    tool_name       VARCHAR(64)  NOT NULL,
+    side_effect     VARCHAR(16)  NOT NULL,                 -- READ_ONLY / WRITE
+    args_json       TEXT,                                  -- 已解析参数快照（$ref 解析后）
+    purpose         TEXT,
+    status          VARCHAR(16)  NOT NULL,                 -- PENDING/RUNNING/SUCCEEDED/FAILED/SKIPPED/CANCELLED
+    result_summary  TEXT,                                  -- 给回答模型看的摘要
+    result_json     TEXT,                                  -- 结构化结果（$ref 后续步骤从这里取值）
+    evidence_json   TEXT,                                  -- 工具证据快照（确认图恢复回答时使用）
+    error_code      VARCHAR(64),
+    error_message   TEXT,
+    cost_ms         BIGINT,
+    attempts        INT          NOT NULL DEFAULT 0,
+    started_at      TIMESTAMPTZ,
+    finished_at     TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT uk_task_step UNIQUE (run_id, step_no)
+);
+CREATE INDEX IF NOT EXISTS idx_task_step_run ON ai_task_step (run_id, step_no);
+CREATE INDEX IF NOT EXISTS idx_task_step_status ON ai_task_step (status, updated_at);
 
 -- 工单表（运营闭环：转人工自动建单，运营回复后结单；根因字段联动审计表驱动知识治理）
 CREATE TABLE IF NOT EXISTS ai_ticket (

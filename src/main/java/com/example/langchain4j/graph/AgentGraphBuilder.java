@@ -1,5 +1,8 @@
 package com.example.langchain4j.graph;
 
+import com.example.langchain4j.audit.AuditEntry;
+import com.example.langchain4j.audit.AuditPayloads;
+import com.example.langchain4j.audit.AuditRecorder;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.common.nodes.FinalizeNode;
 import com.example.langchain4j.graph.qa.edges.Router;
@@ -17,12 +20,17 @@ import com.example.langchain4j.graph.task.nodes.TaskAnswerNode;
 import com.example.langchain4j.graph.task.nodes.TaskConfirmNode;
 import com.example.langchain4j.graph.task.nodes.TaskExecuteNode;
 import com.example.langchain4j.graph.task.nodes.TaskPlanNode;
+import com.example.langchain4j.repository.entity.GraphExecution;
 import org.bsc.langgraph4j.CompileConfig;
 import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.GraphStateException;
 import org.bsc.langgraph4j.StateGraph;
+import org.bsc.langgraph4j.action.AsyncNodeAction;
+import org.bsc.langgraph4j.action.NodeAction;
 import org.bsc.langgraph4j.checkpoint.BaseCheckpointSaver;
 import org.bsc.langgraph4j.serializer.StateSerializer;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -59,6 +67,7 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
  * 条件边通过 {@link Router} 返回稳定的 route key，再映射到目标节点；
  * 图内不写业务判断，所有分流条件集中在 Router，便于单测覆盖。
  */
+@Slf4j
 @Component
 public class AgentGraphBuilder {
 
@@ -92,6 +101,7 @@ public class AgentGraphBuilder {
     private final TaskAnswerNode taskAnswerNode;
     private final FinalizeNode finalizeNode;
     private final AgentProperties properties;
+    private final AuditRecorder auditRecorder;
 
     public AgentGraphBuilder(WorkflowStateSerializer stateSerializer,
                              Router router,
@@ -108,7 +118,8 @@ public class AgentGraphBuilder {
                              TaskExecuteNode taskExecuteNode,
                              TaskAnswerNode taskAnswerNode,
                              FinalizeNode finalizeNode,
-                             AgentProperties properties) {
+                             AgentProperties properties,
+                             @Qualifier("asyncAuditRecorder") AuditRecorder auditRecorder) {
         this.stateSerializer = stateSerializer;
         this.router = router;
         this.entryNode = entryNode;
@@ -125,6 +136,7 @@ public class AgentGraphBuilder {
         this.taskAnswerNode = taskAnswerNode;
         this.finalizeNode = finalizeNode;
         this.properties = properties;
+        this.auditRecorder = auditRecorder;
     }
 
     /**
@@ -137,21 +149,21 @@ public class AgentGraphBuilder {
         StateGraph<WorkflowState> graph = new StateGraph<>(stateSerializer);
         try {
             // ---- 主链路节点：问答、检索、生成、质检、兜底、转人工 ----
-            graph.addNode(NODE_ENTRY, node_async(entryNode));
-            graph.addNode(NODE_INTENT_PLAN, node_async(intentPlanNode));
-            graph.addNode(NODE_RETRIEVAL_PROBE, node_async(retrievalProbeNode));
-            graph.addNode(NODE_RETRIEVAL_FULL, node_async(retrievalNode));
-            graph.addNode(NODE_GENERATE, node_async(generateNode));
-            graph.addNode(NODE_VALIDATE, node_async(validateNode));
-            graph.addNode(NODE_FALLBACK, node_async(fallbackNode));
-            graph.addNode(NODE_HANDOFF, node_async(handoffNode));
+            graph.addNode(NODE_ENTRY, audited(NODE_ENTRY, entryNode));
+            graph.addNode(NODE_INTENT_PLAN, audited(NODE_INTENT_PLAN, intentPlanNode));
+            graph.addNode(NODE_RETRIEVAL_PROBE, audited(NODE_RETRIEVAL_PROBE, retrievalProbeNode));
+            graph.addNode(NODE_RETRIEVAL_FULL, audited(NODE_RETRIEVAL_FULL, retrievalNode));
+            graph.addNode(NODE_GENERATE, audited(NODE_GENERATE, generateNode));
+            graph.addNode(NODE_VALIDATE, audited(NODE_VALIDATE, validateNode));
+            graph.addNode(NODE_FALLBACK, audited(NODE_FALLBACK, fallbackNode));
+            graph.addNode(NODE_HANDOFF, audited(NODE_HANDOFF, handoffNode));
             // ---- 任务分支节点：规划 → 人工确认/直接执行 → 工具执行 → 证据回答 ----
-            graph.addNode(NODE_TASK_PLAN, node_async(taskPlanNode));
-            graph.addNode(NODE_TASK_CONFIRM, node_async(taskConfirmNode));
-            graph.addNode(NODE_TASK_EXECUTE, node_async(taskExecuteNode));
-            graph.addNode(NODE_TASK_ANSWER, node_async(taskAnswerNode));
+            graph.addNode(NODE_TASK_PLAN, audited(NODE_TASK_PLAN, taskPlanNode));
+            graph.addNode(NODE_TASK_CONFIRM, audited(NODE_TASK_CONFIRM, taskConfirmNode));
+            graph.addNode(NODE_TASK_EXECUTE, audited(NODE_TASK_EXECUTE, taskExecuteNode));
+            graph.addNode(NODE_TASK_ANSWER, audited(NODE_TASK_ANSWER, taskAnswerNode));
             // ---- 统一收尾节点：所有正常/降级/转人工路径最终都汇合到这里 ----
-            graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
+            graph.addNode(NODE_FINALIZE, audited(NODE_FINALIZE, finalizeNode));
 
             // 入口守卫：空输入/清洗失败 -> fallback；正常 -> 意图与规划
             graph.addEdge(START, NODE_ENTRY);
@@ -183,18 +195,20 @@ public class AgentGraphBuilder {
                             Router.TO_RETRIEVAL_FULL, NODE_RETRIEVAL_FULL,
                             Router.TO_FALLBACK, NODE_FALLBACK));
 
-            // 任务规划后：缺参追问 -> 直接收尾；规划失败 -> 兜底；写工具 -> 确认；只读工具 -> 执行
+            // 任务规划后：缺参追问 -> 直接收尾；规划失败 -> 兜底；否则先执行只读步骤
             graph.addConditionalEdges(NODE_TASK_PLAN, edge_async(router.afterTaskPlan()),
                     Map.of(Router.TO_FINALIZE, NODE_FINALIZE,
-                            Router.TO_TASK_CONFIRM, NODE_TASK_CONFIRM,
                             Router.TO_TASK_EXECUTE, NODE_TASK_EXECUTE,
                             Router.TO_FALLBACK, NODE_FALLBACK));
             // 确认令牌创建后：成功 -> 收尾并透出 pendingAction；失败 -> 兜底
             graph.addConditionalEdges(NODE_TASK_CONFIRM, edge_async(router.afterTaskConfirm()),
                     Map.of(Router.TO_FINALIZE, NODE_FINALIZE,
                             Router.TO_FALLBACK, NODE_FALLBACK));
-            // 任务执行 -> 基于工具证据回答 -> 收尾；兜底/转人工同样汇合到收尾
-            graph.addEdge(NODE_TASK_EXECUTE, NODE_TASK_ANSWER);
+            // 任务执行：还有未确认写步骤 -> 确认；否则 -> 基于工具证据回答
+            graph.addConditionalEdges(NODE_TASK_EXECUTE, edge_async(router.afterTaskExecute()),
+                    Map.of(Router.TO_TASK_CONFIRM, NODE_TASK_CONFIRM,
+                            Router.TO_TASK_ANSWER, NODE_TASK_ANSWER,
+                            Router.TO_FALLBACK, NODE_FALLBACK));
             graph.addEdge(NODE_TASK_ANSWER, NODE_FINALIZE);
             graph.addEdge(NODE_FALLBACK, NODE_FINALIZE);
             graph.addEdge(NODE_HANDOFF, NODE_FINALIZE);
@@ -220,6 +234,57 @@ public class AgentGraphBuilder {
     }
 
     /**
+     * 给节点统一包一层审计：节点内部不再关心节点名、耗时、异常与结果摘要。
+     *
+     * <p>审计失败只告警，不影响节点返回；节点自身抛出的异常仍原样上抛，
+     * 保持原有路由和 fallback 行为不变。
+     */
+    AsyncNodeAction<WorkflowState> audited(String nodeName,
+                                           NodeAction<WorkflowState> node) {
+        return node_async(state -> {
+            long start = System.currentTimeMillis();
+            int maxLength = Math.max(1, properties.getLimits().getAuditNodeValueMaxLength());
+            Map<String, Object> input = AuditPayloads.nodeInput(state, maxLength);
+            try {
+                Map<String, Object> output = node.apply(state);
+                String error = text(output == null ? null : output.get(WorkflowState.ERROR));
+                safeRecord(AuditEntry.of(state.conversationId(), nodeName,
+                        error.isBlank() ? GraphExecution.STATUS_SUCCESS : GraphExecution.STATUS_FAILED,
+                        input, AuditPayloads.output(output, maxLength),
+                        error.isBlank() ? null : error,
+                        System.currentTimeMillis() - start,
+                        rootCause(output, state)));
+                return output;
+            } catch (Exception e) {
+                safeRecord(AuditEntry.of(state.conversationId(), nodeName,
+                        GraphExecution.STATUS_FAILED, input, Map.of(),
+                        e.getMessage(), System.currentTimeMillis() - start, state.rootCause()));
+                throw e;
+            }
+        });
+    }
+
+    /** 节点输出中的 rootCause 优先于执行前状态，保证本轮根因写入本轮审计。 */
+    private String rootCause(Map<String, Object> output, WorkflowState state) {
+        String current = text(output == null ? null : output.get(WorkflowState.ROOT_CAUSE));
+        return current.isBlank() ? state.rootCause() : current;
+    }
+
+    /** 审计实现异常不能反向破坏图执行。 */
+    private void safeRecord(AuditEntry entry) {
+        try {
+            auditRecorder.record(entry);
+        } catch (Exception e) {
+            log.warn("[audit] node audit failed, node={}, reason={}", entry.nodeName(),
+                    e.getMessage());
+        }
+    }
+
+    private String text(Object value) {
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    /**
      * 确认执行图：用户确认后只跑“执行 → 回答 → 收尾”，不重新做意图识别和规划。
      * <p>
      * 独立小图的原因：确认后的计划已经过人工审核，必须严格按 TASK_PLAN 执行，
@@ -229,9 +294,9 @@ public class AgentGraphBuilder {
     public CompiledGraph<WorkflowState> buildTaskConfirmGraph() {
         StateGraph<WorkflowState> graph = new StateGraph<>(stateSerializer);
         try {
-            graph.addNode(NODE_TASK_EXECUTE, node_async(taskExecuteNode));
-            graph.addNode(NODE_TASK_ANSWER, node_async(taskAnswerNode));
-            graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
+            graph.addNode(NODE_TASK_EXECUTE, audited(NODE_TASK_EXECUTE, taskExecuteNode));
+            graph.addNode(NODE_TASK_ANSWER, audited(NODE_TASK_ANSWER, taskAnswerNode));
+            graph.addNode(NODE_FINALIZE, audited(NODE_FINALIZE, finalizeNode));
             graph.addEdge(START, NODE_TASK_EXECUTE);
             graph.addEdge(NODE_TASK_EXECUTE, NODE_TASK_ANSWER);
             graph.addEdge(NODE_TASK_ANSWER, NODE_FINALIZE);

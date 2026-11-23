@@ -162,6 +162,8 @@ class WriteExecutionTemplateTest {
         verify(executionService, org.mockito.Mockito.times(2)).begin(captor.capture());
         assertThat(captor.getAllValues().get(0).getArgsHash())
                 .isNotEqualTo(captor.getAllValues().get(1).getArgsHash());
+        assertThat(captor.getAllValues().get(0).getArgsJson()).isEqualTo("{\"recordId\":1}");
+        assertThat(captor.getAllValues().get(1).getArgsJson()).isEqualTo("{\"recordId\":2}");
     }
 
     private JsonNode args(String json) throws Exception {

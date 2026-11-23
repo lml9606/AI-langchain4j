@@ -4,14 +4,18 @@ import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.common.util.Texts;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.state.WorkflowState;
+import com.example.langchain4j.repository.entity.TaskRun;
+import com.example.langchain4j.service.TaskRunService;
 import com.example.langchain4j.tool.api.ToolContext;
 import com.example.langchain4j.tool.api.ToolEvidence;
 import com.example.langchain4j.tool.api.ToolResult;
 import com.example.langchain4j.tool.runtime.ToolErrorCode;
 import com.example.langchain4j.tool.runtime.ToolExecutor;
+import com.example.langchain4j.tool.runtime.TaskRunExecutor;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -47,16 +51,94 @@ public class TaskExecuteNode implements NodeAction<WorkflowState> {
 
     private final ToolExecutor toolExecutor;
     private final AgentProperties properties;
+    private final TaskRunService taskRunService;
+    private final TaskRunExecutor taskRunExecutor;
 
-    /** 注入统一工具执行器与执行上限配置。 */
+    /** 生产构造：多步骤任务走 TaskRunExecutor，按步骤表推进。 */
+    @Autowired
+    public TaskExecuteNode(ToolExecutor toolExecutor, AgentProperties properties,
+                           TaskRunService taskRunService, TaskRunExecutor taskRunExecutor) {
+        this.toolExecutor = toolExecutor;
+        this.properties = properties;
+        this.taskRunService = taskRunService;
+        this.taskRunExecutor = taskRunExecutor;
+    }
+
+    /** 兼容旧测试/旧 checkpoint：没有任务运行时走内存计划执行。 */
     public TaskExecuteNode(ToolExecutor toolExecutor, AgentProperties properties) {
         this.toolExecutor = toolExecutor;
         this.properties = properties;
+        this.taskRunService = null;
+        this.taskRunExecutor = null;
     }
 
     /** 按计划顺序调用工具，收集调用轨迹与证据；致命错误时提前停止。 */
     @Override
     public Map<String, Object> apply(WorkflowState state) {
+        if (taskRunService != null && taskRunExecutor != null) {
+            return applyWithRun(state);
+        }
+        return applyInMemory(state);
+    }
+
+    /**
+     * 多步骤执行：先确保任务已持久化，再由 TaskRunExecutor 推进。
+     * <p>未确认时只执行只读步骤，遇到写步骤会停下，交给确认节点。
+     */
+    private Map<String, Object> applyWithRun(WorkflowState state) {
+        String runId = state.taskRunId();
+        if (runId.isBlank()) {
+            if (state.taskPlan().isEmpty()) {
+                return Map.of(
+                        WorkflowState.TASK_TRACE, List.of(),
+                        WorkflowState.TASK_EVIDENCE, List.of(),
+                        WorkflowState.ERROR, "执行计划为空，拒绝执行");
+            }
+            TaskRun run = taskRunService.createRun(state.conversationId(), state.userId(),
+                    workflowIdOf(state), state.taskPlan());
+            runId = run.getId();
+        }
+
+        TaskRunExecutor.TaskRunResult result =
+                taskRunExecutor.execute(state.userId(), runId, state.taskApproved());
+        Map<String, Object> updates = new LinkedHashMap<>();
+        updates.put(WorkflowState.TASK_TRACE, result.trace());
+        updates.put(WorkflowState.TASK_EVIDENCE, result.evidence());
+        updates.put(WorkflowState.TASK_RUN_ID, runId);
+        updates.put(WorkflowState.TASK_RUN_STATUS, result.run().getStatus().name());
+        if (result.busy()) {
+            // 另一个实例持有执行租约：不能用旧快照继续生成回答，否则用户会看到一份
+            // "看起来执行完了"的半成品。交给回答节点给出明确的进行中提示。
+            updates.put(WorkflowState.ERROR, "任务正在执行中，请稍后查询任务进度");
+            log.info("[task-execute] busy, delegated to status answer, runTail={}", runId.length() <= 8
+                    ? "***" : runId.substring(runId.length() - 8));
+            return updates;
+        }
+        if (result.run().getStatus() == TaskRun.Status.FAILED) {
+            updates.put(WorkflowState.ERROR, result.run().getErrorMessage());
+        } else {
+            updates.put(WorkflowState.ERROR, "");
+        }
+        log.info("[task-execute] run advanced, runTail={}, status={}, steps={}, approved={}",
+                runId.length() <= 8 ? "***" : runId.substring(runId.length() - 8),
+                result.run().getStatus(), result.steps().size(), state.taskApproved());
+        return updates;
+    }
+
+    private String workflowIdOf(WorkflowState state) {
+        if (!state.taskWorkflowId().isBlank()) {
+            return state.taskWorkflowId();
+        }
+        return state.taskPlan().stream()
+                .map(step -> step.get("workflowId"))
+                .filter(value -> value != null && !String.valueOf(value).isBlank())
+                .map(String::valueOf)
+                .findFirst()
+                .orElse("");
+    }
+
+    /** 旧版内存计划执行：没有任务表时的兼容路径。 */
+    private Map<String, Object> applyInMemory(WorkflowState state) {
         ToolContext context = new ToolContext(state.userId(), state.conversationId(),
                 state.taskApproved(), state.taskIdempotencyKey());
         List<Map<String, Object>> trace = new ArrayList<>();

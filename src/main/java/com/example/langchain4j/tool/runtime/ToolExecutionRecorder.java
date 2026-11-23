@@ -2,6 +2,7 @@ package com.example.langchain4j.tool.runtime;
 
 import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.common.util.JsonUtil;
+import com.example.langchain4j.audit.AuditEntry;
 import com.example.langchain4j.repository.entity.GraphExecution;
 import com.example.langchain4j.service.AuditService;
 import com.example.langchain4j.tool.api.ToolContext;
@@ -41,10 +42,11 @@ public final class ToolExecutionRecorder {
         }
         String conversationId = context.conversationId().isBlank()
                 ? "tool-debug" : context.conversationId();
-        auditService.audit(conversationId, "tool:" + toolName,
+        auditService.record(AuditEntry.text(conversationId, "tool:" + toolName,
                 result.success() ? GraphExecution.STATUS_SUCCESS : GraphExecution.STATUS_FAILED,
                 JsonUtil.toJson(args), JsonUtil.toJson(result.summary()),
-                result.success() ? null : result.errorCode() + ":" + result.errorMessage(), cost);
+                result.success() ? null : result.errorCode() + ":" + result.errorMessage(), cost,
+                null));
         log.info("[tool] name={}, ok={}, cost={}ms, error={}", toolName, result.success(), cost,
                 result.success() ? "" : result.errorCode());
         return result;

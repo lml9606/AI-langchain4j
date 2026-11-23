@@ -1,5 +1,6 @@
 package com.example.langchain4j.tool.runtime;
 
+import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.repository.entity.ToolExecution;
 import com.example.langchain4j.service.ToolExecutionService;
 import com.example.langchain4j.tool.api.ToolContext;
@@ -57,6 +58,7 @@ public class WriteExecutionTemplate {
         execution.setConversationId(context.conversationId());
         execution.setTool(toolName);
         execution.setArgsHash(argsHash(args));
+        execution.setArgsJson(args == null ? "{}" : JsonUtil.toJson(args));
 
         ToolExecutionService.BeginResult begin = executionService.begin(execution);
         switch (begin.status()) {

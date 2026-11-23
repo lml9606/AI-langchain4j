@@ -1,5 +1,7 @@
 package com.example.langchain4j.tool.runtime;
 
+import com.example.langchain4j.audit.AuditPayloadProvider;
+import com.example.langchain4j.audit.AuditStep;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.util.JsonUtil;
@@ -15,7 +17,13 @@ import org.springframework.stereotype.Service;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -65,6 +73,7 @@ public class ConfirmationService {
      * @return 含 confirmationId 与过期时间的待确认动作
      * @throws BizException Redis 不可用时抛出（fail-closed，不下发无法执行的令牌）
      */
+    @AuditStep("confirm-create")
     public PendingAction create(String userId,
                                 String conversationId,
                                 String model,
@@ -72,11 +81,36 @@ public class ConfirmationService {
                                 List<Map<String, Object>> plan,
                                 String summary,
                                 String risk) {
+        // 兼容旧版单写确认：沿用 confirmationId 作为幂等键，不追加 stepNo。
+        return create(userId, conversationId, model, "", plan, summary, risk,
+                List.of(new PendingWriteStep(0, tool, argsFromPlan(plan, tool))));
+    }
+
+    /**
+     * 批量确认：一个令牌覆盖本轮全部写步骤。
+     *
+     * <p>每个写步骤对应一条 PENDING 台账，幂等键为 {@code runId:stepNo}；
+     * 用户确认后 TaskRunExecutor 按步骤顺序执行，不会重复写。
+     *
+     * @param runId 任务运行 ID；空字符串表示旧版单写链路
+     * @param steps 待确认写步骤（stepNo 必须是计划中的真实步骤号）
+     */
+    @AuditStep("confirm-create")
+    public PendingAction create(String userId,
+                                String conversationId,
+                                String model,
+                                String runId,
+                                List<Map<String, Object>> plan,
+                                String summary,
+                                String risk,
+                                List<PendingWriteStep> steps) {
         int ttlSeconds = Math.max(30, properties.getTool().getConfirmation().getTtlSeconds());
         String confirmationId = "cfm_" + UUID.randomUUID().toString().replace("-", "");
         long expiresAt = System.currentTimeMillis() + ttlSeconds * 1000L;
+        String tool = steps != null && steps.size() == 1
+                ? steps.get(0).tool() : "MULTI_WRITE";
         PendingAction action = new PendingAction(confirmationId, userId, conversationId,
-                model, tool, plan, summary, risk, expiresAt);
+                model, runId, tool, steps, plan, summary, risk, expiresAt);
         RBucket<String> bucket = conversationBucket(conversationId);
         try {
             String json = objectMapper.writeValueAsString(action);
@@ -93,36 +127,80 @@ public class ConfirmationService {
         }
 
         try {
-            if (!toolExecutionService.recordPending(toExecution(action))) {
-                deleteQuietly(bucket);
-                throw new BizException(ErrorCode.INTERNAL_ERROR,
-                        "确认记录写入失败，请重新发起操作");
-            }
+            toolExecutionService.recordPendingBatch(toExecutions(action));
         } catch (BizException e) {
+            deleteQuietly(bucket);
             throw e;
         } catch (Exception e) {
             deleteQuietly(bucket);
             log.error("[confirm] pending record failed, rollback redis key: {}", e.getMessage());
             throw new BizException(ErrorCode.DB_UNAVAILABLE, "确认记录保存失败，请稍后重试");
         }
-        log.info("[confirm] created, idTail={}, tool={}, ttl={}s", idTail(confirmationId), tool,
-                ttlSeconds);
+        log.info("[confirm] created, idTail={}, tool={}, writes={}, runTail={}, ttl={}s",
+                idTail(confirmationId), tool, action.steps().size(), idTail(runId), ttlSeconds);
         return action;
     }
 
-    /** PendingAction → 待确认台账快照。 */
-    private ToolExecution toExecution(PendingAction action) {
-        ToolExecution execution = new ToolExecution();
-        execution.setExecutionId(action.confirmationId());
-        execution.setUserId(action.userId());
-        execution.setConversationId(action.conversationId());
-        execution.setTool(action.tool());
-        execution.setPlanJson(JsonUtil.toJson(action.plan()));
-        execution.setSummary(action.summary());
-        execution.setRisk(action.risk());
-        execution.setExpiresAt(OffsetDateTime.ofInstant(
-                Instant.ofEpochMilli(action.expiresAt()), ZoneOffset.UTC));
-        return execution;
+    /** PendingAction → 每个写步骤一条待确认台账。 */
+    private List<ToolExecution> toExecutions(PendingAction action) {
+        List<ToolExecution> executions = new ArrayList<>(action.steps().size());
+        OffsetDateTime expiresAt = OffsetDateTime.ofInstant(
+                Instant.ofEpochMilli(action.expiresAt()), ZoneOffset.UTC);
+        for (PendingWriteStep step : action.steps()) {
+            ToolExecution execution = new ToolExecution();
+            execution.setExecutionId(executionId(action, step));
+            execution.setUserId(action.userId());
+            execution.setConversationId(action.conversationId());
+            execution.setTool(step.tool());
+            String argsJson = JsonUtil.toJson(step.args() == null ? Map.of() : step.args());
+            execution.setArgsJson(argsJson);
+            execution.setArgsHash(sha256(argsJson));
+            execution.setPlanJson(JsonUtil.toJson(action.plan()));
+            execution.setSummary(action.summary());
+            execution.setRisk(action.risk());
+            execution.setExpiresAt(expiresAt);
+            executions.add(execution);
+        }
+        return executions;
+    }
+
+    /**
+     * 幂等键必须跨"重新确认"保持稳定：
+     * 旧版单写用 confirmationId；多步骤用 runId:stepNo，重试换令牌也不会重复写。
+     */
+    private String executionId(PendingAction action, PendingWriteStep step) {
+        if (action.runId() == null || action.runId().isBlank()) {
+            return action.confirmationId();
+        }
+        return action.runId() + ":" + step.stepNo();
+    }
+
+    /** 从计划中提取写工具参数；找不到时返回空对象。 */
+    private Map<String, Object> argsFromPlan(List<Map<String, Object>> plan, String tool) {
+        if (plan == null) {
+            return Map.of();
+        }
+        for (Map<String, Object> step : plan) {
+            if (step == null || !tool.equals(String.valueOf(step.get("tool")))) {
+                continue;
+            }
+            Object args = step.get("args");
+            if (args instanceof Map<?, ?> map) {
+                Map<String, Object> result = new LinkedHashMap<>();
+                map.forEach((key, value) -> result.put(String.valueOf(key), value));
+                return result;
+            }
+        }
+        return Map.of();
+    }
+
+    private String sha256(String text) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(text.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
     }
 
     /** 撤销刚写入的会话 key；失败只告警，原异常继续上抛。 */
@@ -282,27 +360,57 @@ public class ConfirmationService {
         return id.length() <= 8 ? "***" : id.substring(id.length() - 8);
     }
 
+    /** 待确认写步骤：stepNo 对应 ai_task_step.step_no。 */
+    public record PendingWriteStep(int stepNo,
+                                   String tool,
+                                   Map<String, Object> args) {
+
+        public PendingWriteStep {
+            tool = tool == null ? "" : tool;
+            args = args == null ? Map.of() : Map.copyOf(args);
+        }
+    }
+
     /**
-     * 待确认写操作：plan 为完整执行计划，确认后原样交给执行图
+     * 待确认写操作：plan 为完整执行计划，steps 为本轮全部写步骤。
+     * 确认后原样交给执行图，按步骤顺序执行。
      */
     public record PendingAction(String confirmationId,
                                 String userId,
                                 String conversationId,
                                 String model,
+                                String runId,
                                 String tool,
+                                List<PendingWriteStep> steps,
                                 List<Map<String, Object>> plan,
                                 String summary,
                                 String risk,
-                                long expiresAt) {
+                                long expiresAt) implements AuditPayloadProvider {
 
         public PendingAction {
             userId = userId == null ? "" : userId;
             conversationId = conversationId == null ? "" : conversationId;
             model = model == null ? "" : model;
+            runId = runId == null ? "" : runId;
             tool = tool == null ? "" : tool;
+            steps = steps == null ? List.of() : List.copyOf(steps);
             plan = plan == null ? List.of() : List.copyOf(plan);
             summary = summary == null ? "" : summary;
             risk = risk == null ? "" : risk;
+        }
+
+        /** 审计只保留令牌展示字段，不回写完整计划，避免重复存储和泄露内部参数。 */
+        @Override
+        public Map<String, Object> auditPayload() {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("confirmationId", confirmationId);
+            payload.put("tool", tool);
+            payload.put("runId", runId);
+            payload.put("writes", steps.size());
+            payload.put("summary", summary);
+            payload.put("risk", risk);
+            payload.put("expiresAt", expiresAt);
+            return payload;
         }
     }
 }

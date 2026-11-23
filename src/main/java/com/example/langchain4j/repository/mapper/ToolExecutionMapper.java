@@ -51,5 +51,6 @@ public interface ToolExecutionMapper {
     int tryReclaim(@Param("userId") String userId,
                    @Param("executionId") String executionId,
                    @Param("staleSeconds") int staleSeconds,
-                   @Param("argsHash") String argsHash);
+                   @Param("argsHash") String argsHash,
+                   @Param("argsJson") String argsJson);
 }
