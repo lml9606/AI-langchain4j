@@ -25,15 +25,12 @@
 | POST | `/api/agent/chat` | 同步对话（invoke 全图） | `{conversationId?, query, model?, history?}` |
 | POST | `/api/agent/chat/stream` | 流式对话（SSE） | 同 chat |
 | POST | `/api/agent/confirm` | 确认/取消写操作（同一会话只允许一个待确认动作） | `{conversationId, confirmationId, approved}` |
-| GET | `/api/agent/task/{runId}` | 查询多步骤任务进度与每步结果 | 路径参数 runId |
 | POST | `/api/agent/resume` | 断点恢复（从最近 checkpoint 继续） | `{conversationId, query?}` |
 | GET | `/api/agent/state/{threadId}` | 查询 checkpoint 执行状态 | 路径参数 threadId |
 | GET | `/api/agent/conversation/{id}/messages` | 会话历史（默认 50 条，上限 200） | `?limit=50` |
 
 安全：会话归属校验（403 防水平越权）；身份以 Token 为准（服务端从 Authorization 头解析，请求体不携带用户 ID）。
-`confirm` 的 `approved=true` 表示执行、`false` 表示取消；响应 `data.business.success/errorCode/errorMessage` 表示业务动作结果，`data.taskRunId/taskStatus` 表示多步骤任务的执行状态。确认卡片生成时 `ai_tool_execution=PENDING`，确认后为 `RUNNING`，最终为 `SUCCEEDED/FAILED/CANCELLED`；Redis 仅保存带 TTL 的待确认计划，`ai_task_run` / `ai_task_step` 保存任务与步骤执行事实。
-
-多步骤任务的确认卡片包含 `runId` 和 `steps[]`；批量写使用 `runId:stepNo` 作为幂等键。任务进度接口返回 `status/currentStep/steps[]`，可用于确认超时后的结果核对。
+`confirm` 的 `approved=true` 表示执行、`false` 表示取消；响应 `data.business.success/errorCode/errorMessage` 表示业务动作结果。确认卡片生成时 `ai_tool_execution=PENDING`，确认后为 `RUNNING`，最终为 `SUCCEEDED/FAILED/CANCELLED`；Redis 仅保存带 TTL 的确认令牌，`ai_tool_execution` 保存写操作执行事实。`confirmationId` 同时作为单写操作幂等键，重复确认不会重复修改业务数据。
 
 ## 3. 知识库 `/api/knowledge`
 
@@ -96,10 +93,9 @@ key 必须为 `PromptTemplates` 已声明常量名（如 `INTENT_PLAN_SYSTEM`）
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/tools` | 查看启动期注册的 `ToolDefinition` |
-| GET | `/api/tools/workflows` | 查看代码中固定声明的任务工作流及其工具集合 |
-| POST | `/api/tools/{name}/invoke` | 手工调用工具，仍经过角色、参数 Schema、超时、限流与审计；写工具默认返回 `CONFIRMATION_REQUIRED` |
+| POST | `/api/tools/{name}/invoke` | 手工调用工具，仍经过角色、参数 Schema、超时与限流；写工具默认返回 `CONFIRMATION_REQUIRED` |
 
-工具元数据、参数 Schema、副作用、超时、限流与角色策略以 `ToolDefinition` 为唯一事实源，不写入 `application.properties` 或数据库。数据库只保存执行事实：`ai_tool_execution`（写操作确认/执行台账）与 `ai_graph_execution`（节点/工具审计）。
+工具元数据、参数 Schema、副作用、超时、限流与角色策略以 `ToolDefinition` 为唯一事实源，不写入 `application.properties` 或数据库。数据库只保存执行事实：`ai_tool_execution`（写操作确认/执行台账）；节点与工具的可观测性由结构化日志和 Micrometer 指标承担。
 
 ## 通用错误码
 

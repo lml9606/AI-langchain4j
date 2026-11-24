@@ -5,7 +5,7 @@ import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.qa.nodes.ValidateNode;
 import com.example.langchain4j.graph.state.WorkflowState;
-import com.example.langchain4j.repository.entity.TaskRun;
+import com.example.langchain4j.graph.task.TaskOperation;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.EdgeAction;
 import org.springframework.stereotype.Component;
@@ -34,13 +34,13 @@ public class Router {
     public static final String TO_FINALIZE = "to_finalize";
     /** 完整检索仍无证据 → 转人工节点 */
     public static final String TO_HANDOFF = "to_handoff";
-    /** intent 为任务型请求 → 任务规划节点 */
-    public static final String TO_TASK_PLAN = "to_task_plan";
-    /** 计划可执行 → 工具执行节点 */
-    public static final String TO_TASK_EXECUTE = "to_task_execute";
-    /** 计划包含写工具 → 确认节点 */
+    /** intent 为任务型请求 → 任务解析节点 */
+    public static final String TO_TASK_RESOLVE = "to_task_resolve";
+    /** 参数完整且为只读 → 读工具节点 */
+    public static final String TO_TASK_READ = "to_task_read";
+    /** 参数完整且为写操作 → 确认节点 */
     public static final String TO_TASK_CONFIRM = "to_task_confirm";
-    /** 任务步骤执行完（或只读任务）→ 任务回答节点 */
+    /** 任务回答节点 */
     public static final String TO_TASK_ANSWER = "to_task_answer";
 
     private final AgentProperties properties;
@@ -77,7 +77,7 @@ public class Router {
                 return route("intent-plan", state, TO_RETRIEVAL_PROBE);
             }
             if (QaIntent.TASK.equals(state.intent())) {
-                return route("intent-plan", state, TO_TASK_PLAN);
+                return route("intent-plan", state, TO_TASK_RESOLVE);
             }
             if (QaIntent.CHITCHAT.equals(state.intent())) {
                 return route("intent-plan", state, TO_GENERATE);
@@ -111,36 +111,26 @@ public class Router {
         };
     }
 
-    /** 任务规划后：缺参追问 → 直接收尾；规划失败 → 兜底；否则先执行只读步骤。 */
-    public EdgeAction<WorkflowState> afterTaskPlan() {
+    /**
+     * 任务解析后：缺参 → 直接收尾(追问)；失败 → 兜底；
+     * READ → 只读节点；WRITE → 确认节点，绝不直接进入写节点。
+     */
+    public EdgeAction<WorkflowState> afterTaskResolve() {
         return state -> {
             if (state.taskClarify()) {
-                return route("task-plan", state, TO_FINALIZE);
+                return route("task-resolve", state, TO_FINALIZE);
             }
             if (state.error() != null && !state.error().isBlank()) {
-                return route("task-plan", state, TO_FALLBACK);
+                return route("task-resolve", state, TO_FALLBACK);
             }
-            return route("task-plan", state, TO_TASK_EXECUTE);
-        };
-    }
-
-    /**
-     * 任务执行后：只读步骤执行完且还有写步骤 → 确认；否则直接回答。
-     * 未确认时 TaskRunExecutor 会停在第一个写步骤，不会产生业务副作用。
-     */
-    public EdgeAction<WorkflowState> afterTaskExecute() {
-        return state -> {
-            if (state.error() != null && !state.error().isBlank()) {
-                // 租约冲突：任务仍由另一个实例执行，返回明确的进行中提示，不能走兜底转人工
-                if (TaskRun.Status.RUNNING.name().equals(state.taskRunStatus())) {
-                    return route("task-execute", state, TO_TASK_ANSWER);
-                }
-                return route("task-execute", state, TO_FALLBACK);
+            TaskOperation operation = TaskOperation.parse(state.taskOperation());
+            if (operation == TaskOperation.READ) {
+                return route("task-resolve", state, TO_TASK_READ);
             }
-            if (state.taskConfirmationRequired() && !state.taskApproved()) {
-                return route("task-execute", state, TO_TASK_CONFIRM);
+            if (operation == TaskOperation.WRITE) {
+                return route("task-resolve", state, TO_TASK_CONFIRM);
             }
-            return route("task-execute", state, TO_TASK_ANSWER);
+            return route("task-resolve", state, TO_FALLBACK);
         };
     }
 

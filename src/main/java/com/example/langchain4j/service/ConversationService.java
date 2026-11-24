@@ -110,7 +110,7 @@ public class ConversationService {
 
     /**
      * 带幂等键的消息写入：唯一键冲突时返回已存在的同键消息。
-     * 用于恢复 worker 补发回答。Redis 会话锁 fail-open、多个实例同时补偿时，
+     * 用于需要消息级幂等的补偿场景。Redis 会话锁 fail-open、多个实例同时补偿时，
      * 数据库唯一键仍能保证同一任务最多产生一条回复。
      */
     @Transactional(rollbackFor = Exception.class)

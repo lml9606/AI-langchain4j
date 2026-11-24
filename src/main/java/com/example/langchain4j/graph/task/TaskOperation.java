@@ -1,0 +1,30 @@
+package com.example.langchain4j.graph.task;
+
+/**
+ * 任务操作类型：固定链路只执行 READ 和 WRITE，REACT 作为后续自由工具循环的扩展位保留。
+ */
+public enum TaskOperation {
+
+    /** 只读查询：不产生业务副作用，不需要确认。 */
+    READ,
+
+    /** 写操作：必须经过人工确认并携带幂等键。 */
+    WRITE,
+
+    /** 预留：ReAct 自由工具循环，当前版本不开放。 */
+    REACT;
+
+    /** 解析模型输出；未知值返回 null，由调用方 fail-closed。 */
+    public static TaskOperation parse(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String normalized = value.trim().toUpperCase();
+        return switch (normalized) {
+            case "READ" -> READ;
+            case "WRITE" -> WRITE;
+            case "REACT" -> REACT;
+            default -> null;
+        };
+    }
+}

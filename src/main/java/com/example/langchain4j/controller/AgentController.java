@@ -8,7 +8,6 @@ import com.example.langchain4j.dto.request.ConfirmRequest;
 import com.example.langchain4j.dto.request.AgentResumeRequest;
 import com.example.langchain4j.dto.response.ChatResponse;
 import com.example.langchain4j.dto.response.MessageDto;
-import com.example.langchain4j.dto.response.TaskRunDto;
 import com.example.langchain4j.service.AgentService;
 import com.example.langchain4j.service.ConversationService;
 import jakarta.validation.Valid;
@@ -58,16 +57,6 @@ public class AgentController {
     @PostMapping("/confirm")
     public ApiResponse<ChatResponse> confirm(@Valid @RequestBody ConfirmRequest request) {
         return ApiResponse.success(agentService.confirm(request));
-    }
-
-    /**
-     * 查询多步骤任务进度：前端在确认后轮询该接口，直到 SUCCEEDED / FAILED。
-     *
-     * @param runId 任务 ID（chat 或 confirm 响应中的 taskRunId）
-     */
-    @GetMapping("/task/{runId}")
-    public ApiResponse<TaskRunDto> task(@PathVariable String runId) {
-        return ApiResponse.success(agentService.taskStatus(runId));
     }
 
     /**

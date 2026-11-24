@@ -3,7 +3,6 @@ package com.example.langchain4j.tool.runtime;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.tool.api.ToolDefinition;
 import com.example.langchain4j.tool.api.ToolSideEffect;
-import com.example.langchain4j.tool.workflow.TaskWorkflow;
 import org.springframework.stereotype.Component;
 
 /**
@@ -59,17 +58,6 @@ public class ToolAccessPolicy {
                     "写操作在当前环境已禁用");
         }
         return new Decision(true, Status.ALLOWED, toolName, "");
-    }
-
-    /** 流程头节点整组预检：任一工具失败则整个任务失败，不执行半份计划。 */
-    public Decision checkAll(TaskWorkflow workflow, String role) {
-        for (String toolName : workflow.requiredTools()) {
-            Decision decision = check(toolName, role);
-            if (!decision.allowed()) {
-                return decision;
-            }
-        }
-        return new Decision(true, Status.ALLOWED, "", "");
     }
 
     public enum Status {

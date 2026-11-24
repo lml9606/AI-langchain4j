@@ -7,7 +7,6 @@ import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.common.util.Throwables;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.guard.RateLimiter;
-import com.example.langchain4j.audit.AuditRecorder;
 import com.example.langchain4j.tool.api.ToolContext;
 import com.example.langchain4j.tool.api.ToolDefinition;
 import com.example.langchain4j.tool.api.ToolResult;
@@ -21,14 +20,14 @@ import org.springframework.stereotype.Service;
 import java.util.concurrent.Callable;
 
 /**
- * 工具执行器：权限、写契约、参数、限流、隔离线程池、超时和审计统一收口。
+ * 工具执行器：权限、写契约、参数、限流、隔离线程池和超时统一收口。
  *
  * 任何异常都转成结构化 ToolResult，不向图抛裸异常。工具定义是策略事实源，
  * 执行器只负责在执行前再次做防御性校验，不能信任模型生成的计划。
  *
- * 这里刻意保留重复校验：规划节点和确认节点都可能被绕过，而真正产生副作用的是
- * 本类，所以权限、写开关、幂等键和参数 Schema 必须在最终执行前再验一次。
- * 规划、确认、执行三处共享的是 {@link ToolAccessPolicy} 和 {@link ToolInputValidator}
+ * 任务解析节点只负责判断读写和抽取参数，它产出的工具名、参数和确认状态都不可信；
+ * 真正产生副作用的是本类，所以权限、写开关、幂等键和参数 Schema 必须在最终执行前再验一次。
+ * 确认创建和执行两个阶段共享的是 {@link ToolAccessPolicy} 和 {@link ToolInputValidator}
  * 的判定语义，不是把校验从图里删掉。
  */
 @Slf4j
@@ -45,7 +44,6 @@ public class ToolExecutor {
 
     public ToolExecutor(ToolRegistry registry,
                         ToolAccessPolicy accessPolicy,
-                        AuditRecorder auditRecorder,
                         AgentMetrics metrics,
                         @Qualifier("toolExecutorPool") ThreadPoolTaskExecutor executor,
                         AgentProperties properties,
@@ -57,14 +55,14 @@ public class ToolExecutor {
         this.properties = properties;
         this.rateLimiter = rateLimiter;
         this.writeExecutionTemplate = writeExecutionTemplate;
-        this.recorder = new ToolExecutionRecorder(auditRecorder, metrics);
+        this.recorder = new ToolExecutionRecorder(metrics);
     }
 
     /**
      * 执行一次工具调用，返回结构化结果；所有失败分支都通过 Outcome 翻译成 ToolResult。
      *
      * 固定顺序是安全语义：解析注册项、权限门禁、写契约、参数 Schema、限流、隔离线程池执行、
-     * 记录指标和审计。顺序不能调整，否则模型生成的计划可能绕过最终校验。写工具缺少确认或
+     * 记录指标和日志。顺序不能调整，否则模型生成的计划可能绕过最终校验。写工具缺少确认或
      * 幂等键时直接拒绝；线程池满、超时和工具异常都会转成对应的 ToolErrorCode。
      *
      * @param context  用户、会话、确认状态和幂等键
@@ -79,7 +77,7 @@ public class ToolExecutor {
         // 第一步：一次查找同时拿到实现和定义；找不到即未知/停用，不再做第二次回退查找。
         ToolRegistry.RegisteredTool registered = registry.findRegistered(toolName).orElse(null);
         if (registered == null) {
-            return fail(context, toolName, safeArgs, start, ToolErrorCode.UNKNOWN_TOOL,
+            return fail(context, toolName, start, ToolErrorCode.UNKNOWN_TOOL,
                     "未知或未启用的工具: " + toolName);
         }
         ToolDefinition definition = registered.definition();
@@ -87,26 +85,26 @@ public class ToolExecutor {
         // 第二步：权限门禁。传定义而不是工具名，避免策略层再次查注册表导致策略漂移。
         ToolAccessPolicy.Decision access = accessPolicy.check(definition, UserContext.role());
         if (!access.allowed()) {
-            return fail(context, toolName, safeArgs, start,
+            return fail(context, toolName, start,
                     accessErrorCode(access.status()), access.message());
         }
 
         // 第三步：写工具契约。只读工具直接放行；写工具必须已确认且带幂等键。
         ToolResult writeContractFailure = checkWriteContract(context, definition, toolName, start);
         if (writeContractFailure != null) {
-            return record(context, toolName, safeArgs, writeContractFailure, start);
+            return record(context, toolName, writeContractFailure, start);
         }
 
         // 第四步：参数 Schema 校验。工具内部仍可做业务校验，但模型输出不能绕过这一层。
         ToolInputValidator.Result validation = ToolInputValidator.validate(definition, safeArgs);
         if (!validation.valid()) {
-            return fail(context, toolName, safeArgs, start, ToolErrorCode.INVALID_ARGS,
+            return fail(context, toolName, start, ToolErrorCode.INVALID_ARGS,
                     validation.message());
         }
 
         // 第五步：限流放在真正执行之前，避免队列满或超时后仍然打满下游。
         if (!allowCall(context, definition, toolName)) {
-            return fail(context, toolName, safeArgs, start, ToolErrorCode.RATE_LIMITED,
+            return fail(context, toolName, start, ToolErrorCode.RATE_LIMITED,
                     "工具调用过于频繁，请稍后重试");
         }
 
@@ -121,8 +119,8 @@ public class ToolExecutor {
                         executor, timeoutMs);
         ToolResult result = toToolResult(outcome, toolName, timeoutMs, start);
 
-        // 第七步：统一记录。record 同时处理指标、审计和日志，任何失败路径都不会漏记。
-        return record(context, toolName, safeArgs, result, start);
+        // 第七步：统一记录。record 同时处理指标和日志，任何失败路径都不会漏记。
+        return record(context, toolName, result, start);
     }
 
     /** 参数归一：null 统一为空对象，避免各工具重复判空。 */
@@ -192,22 +190,21 @@ public class ToolExecutor {
         };
     }
 
-    /** 记录并返回；抽成方法后所有失败分支只需一行，避免漏掉审计。 */
-    private ToolResult record(ToolContext context, String toolName, JsonNode args,
-                              ToolResult result, long start) {
-        return recorder.record(context, toolName, args, result, start);
+    /** 记录并返回；抽成方法后所有失败分支只需一行，避免漏掉指标和日志。 */
+    private ToolResult record(ToolContext context, String toolName, ToolResult result, long start) {
+        return recorder.record(context, toolName, result, start);
     }
 
     /** 失败快捷方法：统一耗时计算和记录，避免每个分支重复写 System.currentTimeMillis()。 */
-    private ToolResult fail(ToolContext context, String toolName, JsonNode args, long start,
+    private ToolResult fail(ToolContext context, String toolName, long start,
                             ToolErrorCode code, String message) {
-        return fail(context, toolName, args, start, code.name(), message);
+        return fail(context, toolName, start, code.name(), message);
     }
 
     /** 字符串错误码重载：访问策略状态映射后的结果已经是字符串，避免再做一次枚举转换。 */
-    private ToolResult fail(ToolContext context, String toolName, JsonNode args, long start,
+    private ToolResult fail(ToolContext context, String toolName, long start,
                             String code, String message) {
-        return record(context, toolName, args,
+        return record(context, toolName,
                 ToolResult.failure(code, message, elapsed(start)), start);
     }
 

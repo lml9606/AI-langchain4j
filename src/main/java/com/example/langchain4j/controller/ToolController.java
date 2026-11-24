@@ -10,8 +10,6 @@ import com.example.langchain4j.tool.api.ToolDefinition;
 import com.example.langchain4j.tool.api.ToolResult;
 import com.example.langchain4j.tool.runtime.ToolExecutor;
 import com.example.langchain4j.tool.runtime.ToolRegistry;
-import com.example.langchain4j.tool.workflow.TaskWorkflow;
-import com.example.langchain4j.tool.workflow.TaskWorkflowRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -24,7 +22,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 工具管理接口：查看注册工具、固定任务契约与手工调试调用。
+ * 工具管理接口：查看注册工具与手工调试调用。
  *
  * 仅管理员可用；手工调用同样经过 ToolExecutor 的写开关、角色、参数、超时、限流与审计，
  * 不绕过任何线上防护。生产环境可关闭该接口或限制内网访问。
@@ -36,25 +34,16 @@ public class ToolController {
 
     private final ToolRegistry toolRegistry;
     private final ToolExecutor toolExecutor;
-    private final TaskWorkflowRegistry workflowRegistry;
 
-    public ToolController(ToolRegistry toolRegistry, ToolExecutor toolExecutor,
-                          TaskWorkflowRegistry workflowRegistry) {
+    public ToolController(ToolRegistry toolRegistry, ToolExecutor toolExecutor) {
         this.toolRegistry = toolRegistry;
         this.toolExecutor = toolExecutor;
-        this.workflowRegistry = workflowRegistry;
     }
 
     /** 列出已注册工具（名称/描述/参数 Schema/副作用/超时） */
     @GetMapping
     public ApiResponse<List<ToolDefinition>> list() {
         return ApiResponse.success(toolRegistry.definitions());
-    }
-
-    /** 查看代码中固定声明的任务工作流与工具集合，便于排查“为什么没有某个工具”。 */
-    @GetMapping("/workflows")
-    public ApiResponse<List<TaskWorkflow>> workflows() {
-        return ApiResponse.success(workflowRegistry.all());
     }
 
     /**

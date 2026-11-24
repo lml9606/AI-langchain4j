@@ -1,85 +1,65 @@
 package com.example.langchain4j.service;
 
-import com.example.langchain4j.audit.AuditEntry;
-import com.example.langchain4j.audit.AuditPayloads;
-import com.example.langchain4j.audit.AuditRecorder;
-import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.common.nodes.FinalizeNode;
 import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
+import com.example.langchain4j.graph.task.TaskOperation;
 import com.example.langchain4j.graph.task.nodes.TaskAnswerNode;
-import com.example.langchain4j.graph.task.nodes.TaskExecuteNode;
-import com.example.langchain4j.repository.entity.GraphExecution;
-import com.example.langchain4j.repository.entity.TaskRun;
+import com.example.langchain4j.graph.task.nodes.TaskWriteNode;
 import com.example.langchain4j.tool.runtime.ConfirmationService;
 import lombok.extern.slf4j.Slf4j;
-import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 确认后执行编排：按已确认计划推进任务，再生成回答并收尾。
+ * 确认后执行编排：直接执行已确认的单个写工具，再生成回答并收尾。
  *
- * 不重新走意图识别和任务规划，避免“用户确认 A、系统执行 B”。执行事实以
- * ai_task_run / ai_task_step 为准；这里只按顺序调用执行、回答、收尾三个节点，
- * 不构建 LangGraph 子图。节点抛出的运行时异常继续向上抛出，非运行时异常统一包装。
+ * 不重新走意图识别、读写分类和参数抽取，避免“用户确认 A、系统执行 B”。
+ * 执行事实以 {@code ai_tool_execution} 为准；这里只按顺序调用写节点、回答节点和收尾节点。
  */
 @Slf4j
 @Service
 public class TaskConfirmService {
 
-    private static final String NODE_TASK_EXECUTE = "task_execute";
-    private static final String NODE_TASK_ANSWER = "task_answer";
-    private static final String NODE_FINALIZE = "finalize";
-
-    private final TaskExecuteNode taskExecuteNode;
+    private final TaskWriteNode taskWriteNode;
     private final TaskAnswerNode taskAnswerNode;
     private final FinalizeNode finalizeNode;
-    private final AgentProperties properties;
-    private final AuditRecorder auditRecorder;
 
-    public TaskConfirmService(TaskExecuteNode taskExecuteNode,
+    public TaskConfirmService(TaskWriteNode taskWriteNode,
                               TaskAnswerNode taskAnswerNode,
-                              FinalizeNode finalizeNode,
-                              AgentProperties properties,
-                              AuditRecorder auditRecorder) {
-        this.taskExecuteNode = taskExecuteNode;
+                              FinalizeNode finalizeNode) {
+        this.taskWriteNode = taskWriteNode;
         this.taskAnswerNode = taskAnswerNode;
         this.finalizeNode = finalizeNode;
-        this.properties = properties;
-        this.auditRecorder = auditRecorder;
     }
 
     /**
-     * 执行一条已确认动作；输入是令牌中的完整计划、当前用户和确认轮问题。
+     * 执行一条已确认写操作：写节点 → 回答节点 → 收尾节点。
      *
-     * 依次推进任务执行、回答生成和最终收尾，返回合并后的最终状态。节点异常会先写失败审计
-     * 再抛出；审计写入失败只告警，不改变业务异常和主流程。
+     * 入参只带令牌中的固定工具和参数，不携带任何重新规划入口；节点异常原样向上抛出。
      */
     public WorkflowState execute(ConfirmationService.PendingAction action,
                                  String userId, String query) {
         long start = System.currentTimeMillis();
         WorkflowState state = new WorkflowState(initialState(action, userId, query));
-        log.info("[task-confirm] start, conversation={}, confirmationTail={}, runTail={}, " +
-                        "planSteps={}, writeSteps={}", action.conversationId(),
-                tail(action.confirmationId()), tail(action.runId()), action.plan().size(),
-                action.steps().size());
+        log.info("[task-confirm] start, conversation={}, confirmationTail={}, tool={}, argKeys={}",
+                action.conversationId(), tail(action.confirmationId()), action.tool(),
+                action.args().keySet());
 
-        state = apply(state, NODE_TASK_EXECUTE, taskExecuteNode);
-        state = apply(state, NODE_TASK_ANSWER, taskAnswerNode);
-        state = apply(state, NODE_FINALIZE, finalizeNode);
+        state = merge(state, taskWriteNode.apply(state));
+        state = merge(state, taskAnswerNode.apply(state));
+        state = merge(state, finalizeNode.apply(state));
 
-        log.info("[task-confirm] done, conversation={}, confirmationTail={}, runTail={}, " +
-                        "runStatus={}, resultLength={}, costMs={}",
-                action.conversationId(), tail(action.confirmationId()), tail(action.runId()),
-                state.taskRunStatus(), state.result() == null ? 0 : state.result().length(),
+        log.info("[task-confirm] done, conversation={}, confirmationTail={}, resultLength={}, costMs={}",
+                action.conversationId(), tail(action.confirmationId()),
+                state.result() == null ? 0 : state.result().length(),
                 System.currentTimeMillis() - start);
         return state;
     }
 
-    /** 构造确认执行入参：只带已确认计划与授权标记，不携带任何重新规划入口。 */
+    /** 构造确认执行入参：固定 WRITE 操作、已确认标记和 confirmationId 幂等键。 */
     private Map<String, Object> initialState(ConfirmationService.PendingAction action,
                                              String userId, String query) {
         Map<String, Object> inputs = new LinkedHashMap<>();
@@ -87,49 +67,15 @@ public class TaskConfirmService {
         inputs.put(WorkflowState.MODEL, action.model());
         inputs.put(WorkflowState.USER_ID, userId);
         inputs.put(WorkflowState.CONVERSATION_ID, action.conversationId());
-        // 置信度透出依赖 intent=task；确认链路不跑 IntentPlanNode，这里显式补齐
+        // 置信度透出依赖 intent=task；确认链路不跑 IntentPlanNode，这里显式补齐。
         inputs.put(WorkflowState.INTENT, QaIntent.TASK);
-        inputs.put(WorkflowState.TASK_PLAN, action.plan());
-        action.plan().stream().findFirst()
-                .map(step -> step.get("workflowId"))
-                .filter(value -> value != null && !String.valueOf(value).isBlank())
-                .ifPresent(value -> inputs.put(WorkflowState.TASK_WORKFLOW_ID,
-                        String.valueOf(value)));
+        inputs.put(WorkflowState.TASK_OPERATION, TaskOperation.WRITE.name());
+        inputs.put(WorkflowState.TASK_ARGS, action.args());
         inputs.put(WorkflowState.TASK_APPROVED, true);
         inputs.put(WorkflowState.TASK_IDEMPOTENCY_KEY, action.confirmationId());
-        if (!action.runId().isBlank()) {
-            inputs.put(WorkflowState.TASK_RUN_ID, action.runId());
-            inputs.put(WorkflowState.TASK_RUN_STATUS, TaskRun.Status.RUNNING.name());
-        }
         inputs.put(WorkflowState.TASK_PENDING_ACTION, Map.of());
         inputs.put(WorkflowState.TASK_CONFIRMATION_REQUIRED, false);
         return inputs;
-    }
-
-    /** 顺序执行单个节点，并把节点增量合并进状态；审计失败不影响业务。 */
-    private WorkflowState apply(WorkflowState state, String nodeName,
-                                NodeAction<WorkflowState> node) {
-        long start = System.currentTimeMillis();
-        int maxLength = Math.max(1, properties.getLimits().getAuditNodeValueMaxLength());
-        Map<String, Object> input = AuditPayloads.nodeInput(state, maxLength);
-        try {
-            Map<String, Object> updates = node.apply(state);
-            String error = text(updates == null ? null : updates.get(WorkflowState.ERROR));
-            safeRecord(AuditEntry.of(state.conversationId(), nodeName,
-                    error.isBlank() ? GraphExecution.STATUS_SUCCESS : GraphExecution.STATUS_FAILED,
-                    input, AuditPayloads.output(updates, maxLength),
-                    error.isBlank() ? null : error,
-                    System.currentTimeMillis() - start, rootCause(updates, state)));
-            return merge(state, updates);
-        } catch (Exception e) {
-            safeRecord(AuditEntry.of(state.conversationId(), nodeName,
-                    GraphExecution.STATUS_FAILED, input, Map.of(), e.getMessage(),
-                    System.currentTimeMillis() - start, state.rootCause()));
-            if (e instanceof RuntimeException runtime) {
-                throw runtime;
-            }
-            throw new IllegalStateException("Task confirm node failed: " + nodeName, e);
-        }
     }
 
     /** 节点返回增量 Map，合并时复制原状态，保持与图内不可变更新一致的语义。 */
@@ -139,26 +85,6 @@ public class TaskConfirmService {
             data.putAll(updates);
         }
         return new WorkflowState(data);
-    }
-
-    /** 节点输出中的 rootCause 优先于执行前状态，保证本轮根因写入本轮审计。 */
-    private String rootCause(Map<String, Object> output, WorkflowState state) {
-        String current = text(output == null ? null : output.get(WorkflowState.ROOT_CAUSE));
-        return current.isBlank() ? state.rootCause() : current;
-    }
-
-    /** 审计失败只告警，不能反向破坏写操作和回答链路。 */
-    private void safeRecord(AuditEntry entry) {
-        try {
-            auditRecorder.record(entry);
-        } catch (Exception e) {
-            log.warn("[audit] task confirm audit failed, node={}, reason={}",
-                    entry.nodeName(), e.getMessage());
-        }
-    }
-
-    private String text(Object value) {
-        return value == null ? "" : String.valueOf(value);
     }
 
     private String tail(String id) {

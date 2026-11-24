@@ -30,7 +30,10 @@ public final class AuditPayloads {
         input.put("retryCount", state.retryCount());
         input.put("hopCount", state.hop().count());
         input.put("contextLength", state.context() == null ? 0 : state.context().length());
-        input.put("planSteps", state.taskPlan().size());
+        input.put("taskOperation", state.taskOperation());
+        input.put("taskArgs", summarize(state.taskArgs(), maxLength));
+        input.put("taskMissing", state.taskMissingSlots().size());
+        input.put("confirmationRequired", state.taskConfirmationRequired());
         input.put("approved", state.taskApproved());
         return input;
     }

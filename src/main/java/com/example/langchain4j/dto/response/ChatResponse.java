@@ -40,10 +40,6 @@ public class ChatResponse extends BaseResponse {
     private boolean clarify;
     /** 写操作待确认信息（含一次性 confirmationId）；非写操作轮为 null */
     private PendingAction pendingAction;
-    /** 多步骤任务 ID（无任务轮为空；可用于查询进度） */
-    private String taskRunId = "";
-    /** 多步骤任务状态（PLANNING/WAITING_CONFIRM/RUNNING/SUCCEEDED/FAILED 等） */
-    private String taskStatus = "";
     /** 业务执行结果；接口成功不代表业务动作成功（尤其写工具/确认链路） */
     private BusinessResult business = BusinessResult.ok();
 
@@ -85,11 +81,6 @@ public class ChatResponse extends BaseResponse {
 
     /** 写操作确认卡片：只暴露展示所需字段，不泄露内部用户/会话标识 */
     public record PendingAction(String confirmationId, String tool, Map<String, Object> args,
-                                String summary, String risk, long expiresAt,
-                                String runId, List<PendingStep> steps) {
-    }
-
-    /** 批量确认中的单个写步骤。 */
-    public record PendingStep(int stepNo, String tool, Map<String, Object> args) {
+                                String summary, String risk, long expiresAt) {
     }
 }

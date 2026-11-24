@@ -16,8 +16,8 @@ import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 
 /**
- * 线程池配置：按用途隔离 agentExecutor、llmExecutor、auditExecutor、knowledgeImportExecutor、
- * toolExecutorPool、taskStepPool 和 summaryExecutor。
+ * 线程池配置：按用途隔离 agentExecutor、llmExecutor、knowledgeImportExecutor、
+ * toolExecutorPool 和 summaryExecutor。
  *
  * 隔离原因：
  *
@@ -81,29 +81,6 @@ public class AsyncConfig {
     }
 
     /**
-     * 审计异步落库线程池：独立低并发池，避免审计 INSERT 拖慢图节点与工具调用。
-     * 审计是可观测性数据，队列满直接丢弃并告警，不阻塞业务主链路。
-     */
-    @Bean("auditExecutor")
-    public ThreadPoolTaskExecutor auditExecutor(AgentProperties properties, MeterRegistry registry) {
-        AgentProperties.AuditExecutor exec = properties.getAuditExecutor();
-        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(exec.getCorePoolSize());
-        executor.setMaxPoolSize(exec.getMaxPoolSize());
-        executor.setQueueCapacity(exec.getQueueCapacity());
-        executor.setKeepAliveSeconds(exec.getKeepAliveSeconds());
-        executor.setThreadNamePrefix("audit-exec-");
-        executor.setTaskDecorator(contextTaskDecorator());
-        executor.setRejectedExecutionHandler((r, e) ->
-                log.warn("[audit] executor overloaded, drop audit record"));
-        executor.setWaitForTasksToCompleteOnShutdown(true);
-        executor.setAwaitTerminationSeconds(30);
-        executor.initialize();
-        registerExecutorMetrics("audit", executor, registry);
-        return executor;
-    }
-
-    /**
      * 知识导入线程池：批量导入逐篇并行执行专用，与图执行/LLM/摘要池隔离。
      *
      * 隔离原因：导入任务含切分 + 逐块嵌入（本地 Ollama）+ 批量落库，单篇可耗时数秒到数十秒，
@@ -148,27 +125,6 @@ public class AsyncConfig {
         executor.setAwaitTerminationSeconds(30);
         executor.initialize();
         registerExecutorMetrics("tool", executor, registry);
-        return executor;
-    }
-
-    /**
-     * 任务步骤线程池：只用于"同一阶段内的只读步骤"并行。
-     * 写步骤由 TaskRunExecutor 强制串行，不会进入这个池。
-     */
-    @Bean("taskStepPool")
-    public ThreadPoolTaskExecutor taskStepPool(MeterRegistry registry) {
-        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(4);
-        executor.setMaxPoolSize(8);
-        executor.setQueueCapacity(50);
-        executor.setKeepAliveSeconds(60);
-        executor.setThreadNamePrefix("task-step-");
-        executor.setTaskDecorator(contextTaskDecorator());
-        executor.setRejectedExecutionHandler(abortPolicy("task step executor overloaded, queue full"));
-        executor.setWaitForTasksToCompleteOnShutdown(true);
-        executor.setAwaitTerminationSeconds(30);
-        executor.initialize();
-        registerExecutorMetrics("taskStep", executor, registry);
         return executor;
     }
 

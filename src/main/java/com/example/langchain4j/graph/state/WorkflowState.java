@@ -58,7 +58,7 @@ public class WorkflowState extends AgentState {
     public static final String GROUNDING_CONFIDENCE = "groundingConfidence";
     /** 最终置信度 = min(检索证据置信度, 证据支撑置信度)，供响应透出 */
     public static final String FINAL_CONFIDENCE = "finalConfidence";
-    /** 检索根因标记（EntryNode 归零；写入点与取值见 ROOT_CAUSE_* 常量注释；透出到响应与审计表供用户区分与数据闭环） */
+    /** 检索根因标记（EntryNode 归零；写入点与取值见 ROOT_CAUSE_* 常量注释；透出到响应供用户区分与数据闭环） */
     public static final String ROOT_CAUSE = "rootCause";
     /** 根因取值：问题太复杂（并列复合问题，分解后子查询分别命中召回，用户问法本身没问题） */
     public static final String ROOT_CAUSE_COMPLEX_QUERY = "COMPLEX_QUERY";
@@ -78,31 +78,33 @@ public class WorkflowState extends AgentState {
     public static final String DONE = "done";
     /** 当前用户 ID（服务层入图时注入；需要按用户隔离数据的节点使用） */
     public static final String USER_ID = "userId";
-    /** 当前会话 ID（服务层入图时注入；需要回写会话或审计记录的节点使用） */
+    /** 当前会话 ID（服务层入图时注入；需要回写会话记录的节点使用） */
     public static final String CONVERSATION_ID = "conversationId";
     /** 回答模式（服务层归一后入图：auto/deep；deep 放宽检索候选数并强制完整质检） */
     public static final String ANSWER_MODE = "answerMode";
     /** 检索可见范围（服务层归一后入图：all/private；private 仅检索本人库） */
     public static final String VISIBILITY = "visibility";
-    /** 任务实体槽位（TaskPlanNode 写入：工具调用所需的业务实体槽位，缺失时为空值） */
-    public static final String TASK_ENTITIES = "taskEntities";
-    /** 任务缺失槽位（TaskPlanNode 写入：非空时本轮转为追问，不调用工具） */
+    /** 任务操作类型（TaskResolveNode 写入：READ=只读查询，WRITE=需要确认的写操作，REACT=预留扩展） */
+    public static final String TASK_OPERATION = "taskOperation";
+    /** 任务解析理由（TaskResolveNode 写入，仅用于日志和排查，不参与路由） */
+    public static final String TASK_RESOLVE_REASON = "taskResolveReason";
+    /** 任务参数（TaskResolveNode 写入：模型根据用户请求抽取） */
+    public static final String TASK_ARGS = "taskArgs";
+    /** 任务缺失参数（TaskResolveNode 写入：非空时本轮转为追问，不调用工具） */
     public static final String TASK_MISSING = "taskMissing";
-    /** 任务执行计划（TaskPlanNode 写入：步骤列表，每步含 tool/args/purpose） */
-    public static final String TASK_PLAN = "taskPlan";
-    /** 工具调用轨迹（TaskExecuteNode 写入：tool/args/success/summary/errorCode/costMs） */
+    /** 工具调用轨迹（TaskReadNode/TaskWriteNode 写入：tool/args/success/summary/errorCode/costMs） */
     public static final String TASK_TRACE = "taskTrace";
-    /** 工具证据（TaskExecuteNode 写入：type/sourceId/title/snippet/score，供回答引用） */
+    /** 工具证据（TaskReadNode 写入：type/sourceId/title/snippet/score，供回答引用） */
     public static final String TASK_EVIDENCE = "taskEvidence";
     /** 本轮回答置信度（TaskAnswerNode 写入：0~1 启发式评分） */
     public static final String TASK_CONFIDENCE = "taskConfidence";
     /** 置信度说明（TaskAnswerNode 写入：证据条数/失败次数等可解释理由） */
     public static final String TASK_CONFIDENCE_REASON = "taskConfidenceReason";
-    /** 追问标记（TaskPlanNode 缺参时写入 true，路由直接收尾，不执行工具） */
+    /** 追问标记（TaskResolveNode 缺参时写入 true，路由直接收尾，不执行工具） */
     public static final String TASK_CLARIFY = "taskClarify";
-    /** 待确认写操作（TaskPlanNode 写入：tool/args/purpose/risk） */
+    /** 待确认写操作（TaskConfirmNode 写入：confirmationId/tool/args/summary/risk/expiresAt） */
     public static final String TASK_PENDING_ACTION = "taskPendingAction";
-    /** 写操作待确认标记（TaskPlanNode 写入 true，路由转确认节点） */
+    /** 写操作待确认标记（TaskResolveNode 写入 true，路由转确认节点） */
     public static final String TASK_CONFIRMATION_REQUIRED = "taskConfirmationRequired";
     /** 确认令牌 ID（TaskConfirmNode 写入，响应透出给前端） */
     public static final String TASK_CONFIRMATION_ID = "taskConfirmationId";
@@ -110,13 +112,6 @@ public class WorkflowState extends AgentState {
     public static final String TASK_APPROVED = "taskApproved";
     /** 写工具幂等键（确认执行链路入参，等于 confirmationId） */
     public static final String TASK_IDEMPOTENCY_KEY = "taskIdempotencyKey";
-    /** 固定任务工作流 ID（TaskPlanNode 写入；确认链路据此复核工具契约） */
-    public static final String TASK_WORKFLOW_ID = "taskWorkflowId";
-    /** 任务运行 ID（TaskExecuteNode 写入；多步骤执行、确认和查询都以它为主键） */
-    public static final String TASK_RUN_ID = "taskRunId";
-    /** 任务运行状态（PLANNING/WAITING_CONFIRM/RUNNING/SUCCEEDED/FAILED 等，响应透出） */
-    public static final String TASK_RUN_STATUS = "taskRunStatus";
-
     // ---- 旧版平铺字段 key：仅用于升级前 checkpoint 的迁移与兼容读取，新数据一律写入嵌套子对象 ----
     private static final String LEGACY_VALIDATED = "validated";
     private static final String LEGACY_VALIDATION_ISSUE = "validationIssue";
@@ -285,10 +280,11 @@ public class WorkflowState extends AgentState {
         reset.put(CONTEXT_INCOMPLETE, false);
         reset.put(GROUNDING_CONFIDENCE, 0.0);
         reset.put(FINAL_CONFIDENCE, 0.0);
-        // 步骤3：任务链路字段归零（防止断点恢复重入时残留上一轮计划/证据）
-        reset.put(TASK_ENTITIES, Map.of());
+        // 步骤3：任务链路字段归零（防止断点恢复重入时残留上一轮参数/证据）
+        reset.put(TASK_OPERATION, "");
+        reset.put(TASK_RESOLVE_REASON, "");
+        reset.put(TASK_ARGS, Map.of());
         reset.put(TASK_MISSING, List.of());
-        reset.put(TASK_PLAN, List.of());
         reset.put(TASK_TRACE, List.of());
         reset.put(TASK_EVIDENCE, List.of());
         reset.put(TASK_CONFIDENCE, 0.0);
@@ -299,7 +295,6 @@ public class WorkflowState extends AgentState {
         reset.put(TASK_CONFIRMATION_ID, "");
         reset.put(TASK_APPROVED, false);
         reset.put(TASK_IDEMPOTENCY_KEY, "");
-        reset.put(TASK_WORKFLOW_ID, "");
         return reset;
     }
 
@@ -571,14 +566,24 @@ public class WorkflowState extends AgentState {
         return ChatOptions.normalizeVisibility(scope, ChatOptions.VISIBILITY_ALL);
     }
 
-    /** 任务实体槽位：checkpoint 反序列化后可能为 Map，统一转成字符串键值对 */
-    public Map<String, String> taskEntities() {
-        Object v = value(TASK_ENTITIES).orElse(null);
+    /** 任务操作类型：READ/WRITE；未识别或 REACT 预留扩展时为空串或 REACT。 */
+    public String taskOperation() {
+        return value(TASK_OPERATION, "");
+    }
+
+    /** 任务解析理由：只用于排查模型为何判定为读/写，不参与路由。 */
+    public String taskResolveReason() {
+        return value(TASK_RESOLVE_REASON, "");
+    }
+
+    /** 任务工具参数：checkpoint 反序列化后可能为 Map，统一转成字符串键值对。 */
+    public Map<String, Object> taskArgs() {
+        Object v = value(TASK_ARGS).orElse(null);
         if (!(v instanceof Map<?, ?> m)) {
             return Map.of();
         }
-        Map<String, String> result = new LinkedHashMap<>(m.size());
-        m.forEach((k, val) -> result.put(String.valueOf(k), strOf(val)));
+        Map<String, Object> result = new LinkedHashMap<>(m.size());
+        m.forEach((k, val) -> result.put(String.valueOf(k), val));
         return result;
     }
 
@@ -587,22 +592,7 @@ public class WorkflowState extends AgentState {
         return stringList(TASK_MISSING);
     }
 
-    /** 任务执行计划：只接受 List<Map>，逐项转字符串键值对（保留嵌套 args 对象） */
-    public List<Map<String, Object>> taskPlan() {
-        return mapList(TASK_PLAN);
-    }
-
-    /** 当前任务的运行 ID；没有进入多步骤执行时为空字符串。 */
-    public String taskRunId() {
-        return value(TASK_RUN_ID).map(String::valueOf).orElse("");
-    }
-
-    /** 当前任务的运行状态；没有进入多步骤执行时为空字符串。 */
-    public String taskRunStatus() {
-        return value(TASK_RUN_STATUS).map(String::valueOf).orElse("");
-    }
-
-    /** 工具调用轨迹（结构同计划步骤，额外含 success/summary/errorCode/costMs） */
+    /** 工具调用轨迹（tool/args/success/summary/errorCode/costMs） */
     public List<Map<String, Object>> taskTrace() {
         return mapList(TASK_TRACE);
     }
@@ -646,11 +636,6 @@ public class WorkflowState extends AgentState {
     /** 写工具幂等键；缺省空串 */
     public String taskIdempotencyKey() {
         return value(TASK_IDEMPOTENCY_KEY, "");
-    }
-
-    /** 固定任务工作流 ID；缺省空串 */
-    public String taskWorkflowId() {
-        return value(TASK_WORKFLOW_ID, "");
     }
 
     /** 本轮回答置信度（0~1）；缺省 0 */

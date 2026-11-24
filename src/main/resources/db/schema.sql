@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS ai_message (
     model           VARCHAR(64),
     token_usage     INTEGER,                               -- 该条消息消耗 token 数
     segment_id      INTEGER,                               -- 话题段归属（user 落库后回填；assistant 继承同轮 user）
-    dedupe_key      VARCHAR(160),                          -- 系统消息幂等键（恢复补偿等）；普通对话为空
+    dedupe_key      VARCHAR(160),                          -- 系统消息幂等键（补偿等系统消息）；普通对话为空
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_message_conversation ON ai_message (conversation_id, id);
@@ -51,7 +51,7 @@ ALTER TABLE ai_message ADD COLUMN IF NOT EXISTS segment_id INTEGER;
 -- 改写视图锚定资料原文用（追问指代消解不锚定可能带偏的生成答案）；user 消息为空
 ALTER TABLE ai_message ADD COLUMN IF NOT EXISTS context TEXT;
 ALTER TABLE ai_message ADD COLUMN IF NOT EXISTS dedupe_key VARCHAR(160);
--- 系统消息幂等键：多个恢复实例并发补偿同一任务时，最多落一条助手回复；NULL 不参与唯一约束
+-- 系统消息幂等键：多个实例并发补偿同一消息时，最多落一条助手回复；NULL 不参与唯一约束
 CREATE UNIQUE INDEX IF NOT EXISTS uk_message_dedupe ON ai_message (dedupe_key);
 
 -- 会话段摘要表（话题段索引：不存对话内容，只记段的 topic/摘要/起点/摘要进度，
@@ -83,27 +83,6 @@ WHERE m.conversation_id = sub.conversation_id
   AND m.id >= sub.start_message_id
   AND m.id < sub.next_start
   AND m.segment_id IS NULL;
-
--- 图执行审计表（节点级可观测：每次节点执行一行）
-CREATE TABLE IF NOT EXISTS ai_graph_execution (
-    id              BIGSERIAL PRIMARY KEY,
-    execution_id    VARCHAR(64) NOT NULL,                  -- 请求 traceId（同一次请求的审计可聚合）
-    conversation_id VARCHAR(64) NOT NULL,                  -- 会话 ID（thread_id）
-    node_name       VARCHAR(64) NOT NULL,                  -- 图节点名
-    status          VARCHAR(16) NOT NULL,                  -- RUNNING / SUCCESS / FAILED
-    input_json      TEXT,
-    output_json     TEXT,
-    error_msg       TEXT,
-    cost_ms         BIGINT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_execution_thread ON ai_graph_execution (conversation_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_execution_id ON ai_graph_execution (execution_id);
--- 已存在表补列（幂等）：检索根因（COMPLEX_QUERY/EXPRESSION_ISSUE/KNOWLEDGE_MISSING，正常命中为空）
--- 数据闭环：按 node_name='workflow' 与 root_cause 分组统计知识缺口/表述问题，驱动补知识与改写优化
-ALTER TABLE ai_graph_execution ADD COLUMN IF NOT EXISTS root_cause VARCHAR(32);
--- 根因统计索引（按根因聚合审计记录，支撑知识缺口报表）
-CREATE INDEX IF NOT EXISTS idx_execution_root_cause ON ai_graph_execution (root_cause, created_at DESC);
 
 -- 知识块表（pgvector 向量检索）
 CREATE TABLE IF NOT EXISTS ai_knowledge_chunk (
@@ -191,7 +170,7 @@ CREATE TABLE IF NOT EXISTS ai_tool_demo_record (
 CREATE INDEX IF NOT EXISTS idx_tool_demo_user ON ai_tool_demo_record (user_id, status, id);
 
 -- 工具确认/执行台账：从待确认到执行结束的唯一业务事实源。
--- Redis 只保存当前待确认动作（含计划）作为短期授权；本表记录确认状态、计划快照与执行结果。
+-- Redis 只保存当前待确认动作作为短期授权；本表记录确认状态与执行结果。
 CREATE TABLE IF NOT EXISTS ai_tool_execution (
     id              BIGSERIAL PRIMARY KEY,
     execution_id    VARCHAR(128) NOT NULL,                -- 幂等键（当前= confirmationId）
@@ -200,7 +179,6 @@ CREATE TABLE IF NOT EXISTS ai_tool_execution (
     tool            VARCHAR(64)  NOT NULL,
     args_hash       VARCHAR(64),                          -- 参数指纹：同键不同参直接拒绝
     args_json       TEXT,                                 -- 实际执行参数（PENDING 阶段为待确认参数）
-    plan_json       TEXT,                                 -- 待确认计划快照（用户确认的内容）
     summary         TEXT,                                 -- 确认卡片摘要
     risk            VARCHAR(16),                          -- READ_ONLY / WRITE 等风险等级
     expires_at      TIMESTAMPTZ,                          -- 待确认动作过期时间（展示/审计用）
@@ -215,7 +193,6 @@ CREATE TABLE IF NOT EXISTS ai_tool_execution (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uk_tool_execution UNIQUE (user_id, execution_id)
 );
-ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS plan_json TEXT;
 ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS summary TEXT;
 ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS risk VARCHAR(16);
 ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
@@ -227,69 +204,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_execution_user ON ai_tool_execution (user_id
 CREATE INDEX IF NOT EXISTS idx_tool_execution_status ON ai_tool_execution (status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_tool_execution_pending ON ai_tool_execution (status, expires_at);
 
--- ============================================================
--- 任务执行（多步骤编排）
--- 一次任务 = 一条 ai_task_run，多个步骤 = 多条 ai_task_step。
--- run 保存"执行到哪一步"，step 保存"每步是否成功、结果是什么"。
-  -- 写步骤的幂等键 = run_id + ':' + step_no，与 ai_tool_execution 一一对应。
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS ai_task_run (
-    id              VARCHAR(64)  PRIMARY KEY,              -- run_xxx（对外任务 ID）
-    conversation_id VARCHAR(64)  NOT NULL,
-    user_id         VARCHAR(64)  NOT NULL,
-    workflow_id     VARCHAR(64)  NOT NULL,                 -- 固定任务工作流契约
-    status          VARCHAR(24)  NOT NULL,                 -- PLANNING/WAITING_CONFIRM/RUNNING/SUCCEEDED/PARTIAL_FAILED/FAILED/CANCELLED
-    current_step    INT          NOT NULL DEFAULT 0,       -- 下一个待执行步骤序号（0 基）
-    plan_json       TEXT         NOT NULL,                 -- 本轮完整计划快照
-    plan_hash       VARCHAR(64),                           -- 计划指纹：确认后参数被篡改会被发现
-    confirmation_id VARCHAR(128),                          -- 批量确认 ID（一个 run 一个）
-    result          TEXT,                                  -- 最终回答快照（确认重放时原样返回）
-      reply_saved     BOOLEAN      NOT NULL DEFAULT TRUE,    -- 终态回答是否已补偿到会话消息；新 run 由 mapper 显式写 false
-    lease_owner     VARCHAR(64),                           -- 执行租约持有者（多实例防重复跑）
-    lease_until     TIMESTAMPTZ,                           -- 租约到期时间
-    error_code      VARCHAR(64),
-    error_message   TEXT,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
-);
-ALTER TABLE ai_task_run ADD COLUMN IF NOT EXISTS result TEXT;
--- 存量任务默认视为已回复，避免升级后恢复 worker 给历史任务补发消息
-ALTER TABLE ai_task_run ADD COLUMN IF NOT EXISTS reply_saved BOOLEAN NOT NULL DEFAULT TRUE;
-CREATE INDEX IF NOT EXISTS idx_task_run_user ON ai_task_run (user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_task_run_conversation ON ai_task_run (conversation_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_task_run_status ON ai_task_run (status, updated_at);
-CREATE INDEX IF NOT EXISTS idx_task_run_lease ON ai_task_run (status, lease_until);
-CREATE UNIQUE INDEX IF NOT EXISTS uk_task_run_confirmation
-    ON ai_task_run (user_id, confirmation_id) WHERE confirmation_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS ai_task_step (
-    id              BIGSERIAL    PRIMARY KEY,
-    run_id          VARCHAR(64)  NOT NULL,
-    step_no         INT          NOT NULL,                 -- 0 基，按计划顺序
-    stage_id        VARCHAR(64),                           -- 工作流阶段（同阶段只读步骤可并行）
-    tool_name       VARCHAR(64)  NOT NULL,
-    side_effect     VARCHAR(16)  NOT NULL,                 -- READ_ONLY / WRITE
-    args_json       TEXT,                                  -- 已解析参数快照（$ref 解析后）
-    purpose         TEXT,
-    status          VARCHAR(16)  NOT NULL,                 -- PENDING/RUNNING/SUCCEEDED/FAILED/SKIPPED/CANCELLED
-    result_summary  TEXT,                                  -- 给回答模型看的摘要
-    result_json     TEXT,                                  -- 结构化结果（$ref 后续步骤从这里取值）
-    evidence_json   TEXT,                                  -- 工具证据快照（确认图恢复回答时使用）
-    error_code      VARCHAR(64),
-    error_message   TEXT,
-    cost_ms         BIGINT,
-    attempts        INT          NOT NULL DEFAULT 0,
-    started_at      TIMESTAMPTZ,
-    finished_at     TIMESTAMPTZ,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    CONSTRAINT uk_task_step UNIQUE (run_id, step_no)
-);
-CREATE INDEX IF NOT EXISTS idx_task_step_run ON ai_task_step (run_id, step_no);
-CREATE INDEX IF NOT EXISTS idx_task_step_status ON ai_task_step (status, updated_at);
-
--- 工单表（运营闭环：转人工自动建单，运营回复后结单；根因字段联动审计表驱动知识治理）
+-- 工单表（运营闭环：转人工自动建单，运营回复后结单；根因字段驱动知识治理）
 CREATE TABLE IF NOT EXISTS ai_ticket (
     id              BIGSERIAL PRIMARY KEY,
     ticket_no       VARCHAR(64)  NOT NULL UNIQUE,        -- 工单号（展示用）

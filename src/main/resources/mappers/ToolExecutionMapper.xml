@@ -11,7 +11,6 @@
         <result property="tool" column="tool"/>
         <result property="argsHash" column="args_hash"/>
         <result property="argsJson" column="args_json"/>
-        <result property="planJson" column="plan_json"/>
         <result property="summary" column="summary"/>
         <result property="risk" column="risk"/>
         <result property="expiresAt" column="expires_at"/>
@@ -40,16 +39,16 @@
     <!-- 创建待确认动作：先落 PENDING，保证用户看到确认卡片时数据库已有记录 -->
     <insert id="insertPending" parameterType="com.example.langchain4j.repository.entity.ToolExecution">
         INSERT INTO ai_tool_execution
-            (execution_id, user_id, conversation_id, tool, args_hash, args_json, plan_json,
+            (execution_id, user_id, conversation_id, tool, args_hash, args_json,
              summary, risk, expires_at, status)
         VALUES
             (#{executionId}, #{userId}, #{conversationId}, #{tool}, #{argsHash}, #{argsJson},
-             #{planJson}, #{summary}, #{risk}, #{expiresAt}, 'PENDING')
+             #{summary}, #{risk}, #{expiresAt}, 'PENDING')
         ON CONFLICT (user_id, execution_id) DO NOTHING
     </insert>
 
     <select id="selectByExecutionId" resultMap="ToolExecutionMap">
-        SELECT id, execution_id, user_id, conversation_id, tool, args_hash, args_json, plan_json,
+        SELECT id, execution_id, user_id, conversation_id, tool, args_hash, args_json,
                summary, risk, expires_at, status, attempt_count, started_at, finished_at, result,
                error_code, error_message, created_at, updated_at
         FROM ai_tool_execution

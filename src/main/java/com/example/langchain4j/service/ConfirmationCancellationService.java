@@ -11,9 +11,8 @@ import java.util.Optional;
 /**
  * 新消息到达时取消旧确认：数据库优先，Redis 令牌最后清理。
  *
- * 取消顺序固定：先读取旧令牌但不删除，拿到 confirmationId 用于最后精准删除；再在同一
- * 数据库事务内取消 ai_tool_execution、ai_task_run、ai_task_step；数据库事务提交成功后，
- * 才删除 Redis 旧令牌。
+     * 取消顺序固定：先读取旧令牌但不删除，拿到 confirmationId 用于最后精准删除；再在同一
+     * 数据库事务内取消 ai_tool_execution；数据库事务提交成功后，才删除 Redis 旧令牌。
  *
  * 这样可以避免“Redis 已删、数据库没删”的不可恢复窗口：数据库取消失败时保留令牌，
  * 用户仍可在原上下文确认或取消；Redis 删除失败时数据库已是 CANCELLED，确认链路会按台账
@@ -25,16 +24,13 @@ public class ConfirmationCancellationService {
 
     private final ConfirmationService confirmationService;
     private final ToolExecutionService toolExecutionService;
-    private final TaskRunService taskRunService;
     private final TransactionTemplate transactionTemplate;
 
     public ConfirmationCancellationService(ConfirmationService confirmationService,
                                            ToolExecutionService toolExecutionService,
-                                           TaskRunService taskRunService,
                                            PlatformTransactionManager transactionManager) {
         this.confirmationService = confirmationService;
         this.toolExecutionService = toolExecutionService;
-        this.taskRunService = taskRunService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -54,7 +50,6 @@ public class ConfirmationCancellationService {
         try {
             transactionTemplate.executeWithoutResult(status -> {
                 toolExecutionService.cancelPendingByConversation(userId, conversationId);
-                taskRunService.cancelByConversation(userId, conversationId);
             });
         } catch (RuntimeException e) {
             log.warn("[confirm-cancel] database cancel failed, keep redis token, conversation={}: {}",

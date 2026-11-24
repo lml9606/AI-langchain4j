@@ -28,7 +28,7 @@ public class ToolExecution {
     }
 
     private Long id;
-    /** 幂等键（旧版单写 = confirmationId；多步骤 = runId:stepNo） */
+    /** 幂等键：当前单写操作固定使用 confirmationId */
     private String executionId;
     private String userId;
     private String conversationId;
@@ -37,8 +37,6 @@ public class ToolExecution {
     private String argsHash;
     /** 本次执行的工具参数；PENDING 阶段为待确认参数，RUNNING 时覆盖为实际执行参数 */
     private String argsJson;
-    /** 待确认计划快照；创建确认动作时写入 */
-    private String planJson;
     /** 确认卡片摘要 */
     private String summary;
     /** READ_ONLY / WRITE 等风险等级 */
