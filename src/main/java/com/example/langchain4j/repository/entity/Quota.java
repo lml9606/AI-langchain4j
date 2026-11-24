@@ -14,6 +14,8 @@ public class Quota {
     private Long id;
     /** 活动编号。 */
     private String activityNo;
+    /** 关联报名单号；可空，用于“报名单号查额度”。 */
+    private String enrollmentNo;
     private String userId;
     /** 额度月份，格式 YYYY-MM。 */
     private String month;

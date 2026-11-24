@@ -16,6 +16,9 @@ public interface EnrollmentMapper {
 
     Enrollment selectById(@Param("id") long id, @Param("userId") String userId);
 
+    Enrollment selectByEnrollmentNo(@Param("enrollmentNo") String enrollmentNo,
+                                    @Param("userId") String userId);
+
     List<Enrollment> selectByUserId(@Param("userId") String userId,
                                     @Param("limit") int limit);
 

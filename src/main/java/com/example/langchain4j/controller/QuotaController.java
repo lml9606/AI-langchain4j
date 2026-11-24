@@ -40,8 +40,10 @@ public class QuotaController {
     /** 查询当前用户的额度账户列表。 */
     @GetMapping
     public ApiResponse<List<Quota>> list(
+            @RequestParam(required = false) String enrollmentNo,
             @RequestParam(defaultValue = "20") int limit) {
-        return ApiResponse.success(quotaService.list(UserContext.require(), limit));
+        return ApiResponse.success(quotaService.list(
+                UserContext.require(), enrollmentNo, null, null, limit));
     }
 
     /** 查询当前用户的单条额度账户。 */

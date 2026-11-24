@@ -18,6 +18,7 @@ public interface QuotaTransactionMapper {
 
     List<QuotaTransaction> selectByUserId(@Param("userId") String userId,
                                           @Param("quotaId") Long quotaId,
+                                          @Param("enrollmentId") Long enrollmentId,
                                           @Param("limit") int limit);
 
     int update(QuotaTransaction transaction);

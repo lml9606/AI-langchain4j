@@ -51,6 +51,14 @@ public class EnrollmentService {
         return requireOwned(id, userId);
     }
 
+    /** 按报名单号查询当前用户的报名记录；不存在返回 null，不泄露其他用户的数据。 */
+    public Enrollment findByNo(String userId, String enrollmentNo) {
+        if (enrollmentNo == null || enrollmentNo.isBlank()) {
+            return null;
+        }
+        return enrollmentMapper.selectByEnrollmentNo(enrollmentNo.trim(), userId);
+    }
+
     /** 查询当前用户的报名列表。 */
     public List<Enrollment> list(String userId, int limit) {
         List<Enrollment> list = enrollmentMapper.selectByUserId(userId, safeLimit(limit));

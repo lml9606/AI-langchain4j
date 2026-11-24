@@ -32,6 +32,8 @@
 安全：会话归属校验（403 防水平越权）；身份以 Token 为准（服务端从 Authorization 头解析，请求体不携带用户 ID）。
 `confirm` 的 `approved=true` 表示执行、`false` 表示取消；响应 `data.business.success/errorCode/errorMessage` 表示业务动作结果。确认卡片生成时 `ai_tool_execution=PENDING`，确认后为 `RUNNING`，最终为 `SUCCEEDED/FAILED/CANCELLED`；Redis 仅保存带 TTL 的确认令牌，`ai_tool_execution` 保存写操作执行事实。`confirmationId` 同时作为单写操作幂等键，重复确认不会重复修改业务数据。
 
+只读任务响应中的 `data.businessData` 是业务明细行列表（手机号等敏感字段由读节点脱敏）；`data.citations` 是可供回答引用的证据摘要，`data.toolTrace` 是节点执行轨迹。两者用途不同：前端渲染明细使用 `businessData`，回答溯源使用 `citations`。
+
 ## 3. 知识库 `/api/knowledge`
 
 | 方法 | 路径 | 说明 |

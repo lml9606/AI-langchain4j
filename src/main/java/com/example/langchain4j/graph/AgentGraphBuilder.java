@@ -15,8 +15,10 @@ import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.graph.state.WorkflowStateSerializer;
 import com.example.langchain4j.graph.task.nodes.TaskAnswerNode;
 import com.example.langchain4j.graph.task.nodes.TaskConfirmNode;
+import com.example.langchain4j.graph.task.nodes.TaskQuotaReadNode;
 import com.example.langchain4j.graph.task.nodes.TaskReadNode;
 import com.example.langchain4j.graph.task.nodes.TaskResolveNode;
+import com.example.langchain4j.graph.task.nodes.TaskTransactionReadNode;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.CompileConfig;
 import org.bsc.langgraph4j.CompiledGraph;
@@ -46,7 +48,8 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
  * fallback 在异常或重试耗尽时给出确定性降级回答。
  * handoff 在知识库确实无证据时转人工并标记根因。
  * task_resolve 同时完成读写判断和参数抽取，之后按读/写分流：
- * 读链路 task_read → task_answer；写链路先 task_confirm 生成令牌并收尾，
+ * 读链路 task_read → task_answer；报名关联额度时由 task_read_quota 读额度表，
+ * 报名/额度关联交易时由 task_read_transaction 读交易表；写链路先 task_confirm 生成令牌并收尾，
  * 用户确认后由 TaskConfirmService 直接执行 task_write → task_answer → finalize。
  * finalize 统一收尾，把结果、完成标记和待确认动作写回最终状态。
  * <p>
@@ -75,6 +78,8 @@ public class AgentGraphBuilder {
     public static final String NODE_TASK_RESOLVE = "task_resolve";
     public static final String NODE_TASK_CONFIRM = "task_confirm";
     public static final String NODE_TASK_READ = "task_read";
+    public static final String NODE_TASK_READ_QUOTA = "task_read_quota";
+    public static final String NODE_TASK_READ_TRANSACTION = "task_read_transaction";
     public static final String NODE_TASK_ANSWER = "task_answer";
     public static final String NODE_FINALIZE = "finalize";
 
@@ -91,6 +96,8 @@ public class AgentGraphBuilder {
     private final TaskResolveNode taskResolveNode;
     private final TaskConfirmNode taskConfirmNode;
     private final TaskReadNode taskReadNode;
+    private final TaskQuotaReadNode taskQuotaReadNode;
+    private final TaskTransactionReadNode taskTransactionReadNode;
     private final TaskAnswerNode taskAnswerNode;
     private final FinalizeNode finalizeNode;
     private final AgentProperties properties;
@@ -108,6 +115,8 @@ public class AgentGraphBuilder {
                              TaskResolveNode taskResolveNode,
                              TaskConfirmNode taskConfirmNode,
                              TaskReadNode taskReadNode,
+                             TaskQuotaReadNode taskQuotaReadNode,
+                             TaskTransactionReadNode taskTransactionReadNode,
                              TaskAnswerNode taskAnswerNode,
                              FinalizeNode finalizeNode,
                              AgentProperties properties) {
@@ -124,6 +133,8 @@ public class AgentGraphBuilder {
         this.taskResolveNode = taskResolveNode;
         this.taskConfirmNode = taskConfirmNode;
         this.taskReadNode = taskReadNode;
+        this.taskQuotaReadNode = taskQuotaReadNode;
+        this.taskTransactionReadNode = taskTransactionReadNode;
         this.taskAnswerNode = taskAnswerNode;
         this.finalizeNode = finalizeNode;
         this.properties = properties;
@@ -151,6 +162,8 @@ public class AgentGraphBuilder {
             graph.addNode(NODE_TASK_RESOLVE, node_async(taskResolveNode));
             graph.addNode(NODE_TASK_CONFIRM, node_async(taskConfirmNode));
             graph.addNode(NODE_TASK_READ, node_async(taskReadNode));
+            graph.addNode(NODE_TASK_READ_QUOTA, node_async(taskQuotaReadNode));
+            graph.addNode(NODE_TASK_READ_TRANSACTION, node_async(taskTransactionReadNode));
             graph.addNode(NODE_TASK_ANSWER, node_async(taskAnswerNode));
             // ---- 统一收尾节点：所有正常/降级/转人工路径最终都汇合到这里 ----
             graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
@@ -196,8 +209,14 @@ public class AgentGraphBuilder {
             graph.addConditionalEdges(NODE_TASK_CONFIRM, edge_async(router.afterTaskConfirm()),
                     Map.of(Router.TO_FINALIZE, NODE_FINALIZE,
                             Router.TO_FALLBACK, NODE_FALLBACK));
-            // 读节点汇合到回答节点；写节点只在用户确认后由 TaskConfirmService 直接调用
-            graph.addEdge(NODE_TASK_READ, NODE_TASK_ANSWER);
+            // 第一段只读后：需要关联额度/交易且已命中来源 → 第二段查询；否则直接回答
+            graph.addConditionalEdges(NODE_TASK_READ, edge_async(router.afterTaskRead()),
+                    Map.of(Router.TO_TASK_READ_QUOTA, NODE_TASK_READ_QUOTA,
+                            Router.TO_TASK_READ_TRANSACTION, NODE_TASK_READ_TRANSACTION,
+                            Router.TO_TASK_ANSWER, NODE_TASK_ANSWER));
+            // 第二段额度/交易读取后汇合到回答节点；写节点只在用户确认后由 TaskConfirmService 直接调用
+            graph.addEdge(NODE_TASK_READ_QUOTA, NODE_TASK_ANSWER);
+            graph.addEdge(NODE_TASK_READ_TRANSACTION, NODE_TASK_ANSWER);
             graph.addEdge(NODE_TASK_ANSWER, NODE_FINALIZE);
             graph.addEdge(NODE_FALLBACK, NODE_FINALIZE);
             graph.addEdge(NODE_HANDOFF, NODE_FINALIZE);

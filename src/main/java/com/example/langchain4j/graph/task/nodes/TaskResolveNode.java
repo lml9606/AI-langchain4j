@@ -5,6 +5,7 @@ import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.graph.task.TaskOperation;
+import com.example.langchain4j.graph.task.TaskReadTarget;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.PromptTemplates;
 import com.example.langchain4j.service.PromptTemplateService;
@@ -20,10 +21,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 任务解析节点：一次模型调用完成“判断读写 + 抽取参数”。
+ * 任务解析节点：一次模型调用完成“判断读写、选择只读目标表、抽取参数”。
  *
- * 当前读写工具只是流程骨架，节点内不校验真实业务权限、状态或工具策略。
- * 真实业务接入后，再把业务规则放到对应执行节点或领域服务中。
+ * 本节点只产出业务动作候选，不执行工具，也不校验真实业务权限、状态或工具策略。
+ * 真实执行约束由固定执行节点、工具执行器和领域服务负责。
  */
 @Slf4j
 @Component
@@ -61,7 +62,7 @@ public class TaskResolveNode implements NodeAction<WorkflowState> {
             if (operation == TaskOperation.REACT) {
                 log.warn("[task-resolve] react reserved but disabled, queryLength={}",
                         state.effectiveQuery().length());
-                return error("当前暂不支持自由工具调用，请明确说明要查询还是修改演示记录");
+                return error("当前暂不支持自由工具调用，请明确说明要查询报名、额度、交易还是执行修改");
             }
             if (operation == null) {
                 return error("无法判断是查询还是修改，请明确说明要做什么");
@@ -69,10 +70,37 @@ public class TaskResolveNode implements NodeAction<WorkflowState> {
 
             Map<String, Object> args = parseArgs(node.get("args"));
             List<String> missing = parseMissing(node.get("missing"));
+            TaskReadTarget readTarget = operation == TaskOperation.READ
+                    ? TaskReadTarget.parse(node.path("readTarget").asText("")) : null;
+            boolean includeTransactions = operation == TaskOperation.READ
+                    && node.path("withTransactions").asBoolean(false);
+            boolean includeQuotas = operation == TaskOperation.READ
+                    && node.path("withQuotas").asBoolean(false);
+            if (operation == TaskOperation.READ) {
+                if (readTarget == null) {
+                    return error("无法判断要查询报名、额度还是交易，请明确说明查询对象");
+                }
+                if (includeQuotas && includeTransactions) {
+                    return error("一次只支持一段关联查询，请分别查询关联额度或关联交易");
+                }
+                if (includeQuotas && readTarget != TaskReadTarget.ENROLLMENT) {
+                    return error("关联额度查询必须先以报名单号查询报名记录");
+                }
+                validateFollowUpPrerequisite(readTarget, includeTransactions, includeQuotas,
+                        args, missing);
+            }
             Map<String, Object> updates = new LinkedHashMap<>();
             updates.put(WorkflowState.TASK_OPERATION, operation.name());
             updates.put(WorkflowState.TASK_RESOLVE_REASON, node.path("reason").asText(""));
             updates.put(WorkflowState.TASK_ARGS, args);
+            updates.put(WorkflowState.TASK_READ_TARGET, readTarget == null ? "" : readTarget.name());
+            updates.put(WorkflowState.TASK_INCLUDE_TRANSACTIONS,
+                    readTarget != null && readTarget != TaskReadTarget.TRANSACTION
+                            && includeTransactions);
+            updates.put(WorkflowState.TASK_INCLUDE_QUOTAS,
+                    readTarget == TaskReadTarget.ENROLLMENT && includeQuotas);
+            updates.put(WorkflowState.TASK_SOURCE_TYPE, "");
+            updates.put(WorkflowState.TASK_SOURCE_ID, "");
             updates.put(WorkflowState.TASK_MISSING, missing);
             updates.put(WorkflowState.TASK_PENDING_ACTION, Map.of());
 
@@ -94,8 +122,11 @@ public class TaskResolveNode implements NodeAction<WorkflowState> {
             updates.put(WorkflowState.TASK_CLARIFY, false);
             updates.put(WorkflowState.TASK_CONFIRMATION_REQUIRED, operation == TaskOperation.WRITE);
             updates.put(WorkflowState.ERROR, "");
-            log.info("[task-resolve] done, operation={}, argKeys={}, reason={}, costMs={}",
-                    operation, args.keySet(), node.path("reason").asText(""),
+            log.info("[task-resolve] done, operation={}, readTarget={}, withTransactions={}, withQuotas={}, "
+                            + "argKeys={}, reason={}, costMs={}",
+                    operation, readTarget, updates.get(WorkflowState.TASK_INCLUDE_TRANSACTIONS),
+                    updates.get(WorkflowState.TASK_INCLUDE_QUOTAS),
+                    args.keySet(), node.path("reason").asText(""),
                     System.currentTimeMillis() - start);
             return updates;
         } catch (BizException e) {
@@ -130,6 +161,44 @@ public class TaskResolveNode implements NodeAction<WorkflowState> {
             });
         }
         return missing;
+    }
+
+    /**
+     * 关联查询必须能唯一定位来源记录：报名关联额度需要报名单号；
+     * 报名关联交易需要报名单号；额度关联交易需要活动编号和月份。
+     */
+    private void validateFollowUpPrerequisite(TaskReadTarget readTarget,
+                                              boolean includeTransactions,
+                                              boolean includeQuotas,
+                                              Map<String, Object> args,
+                                              List<String> missing) {
+        if ((!includeTransactions && !includeQuotas) || readTarget == TaskReadTarget.TRANSACTION) {
+            return;
+        }
+        if (includeQuotas) {
+            if (text(args, "enrollmentNo").isBlank()) {
+                addMissing(missing, "报名单号");
+            }
+            return;
+        }
+        if (readTarget == TaskReadTarget.ENROLLMENT && text(args, "enrollmentNo").isBlank()) {
+            addMissing(missing, "报名单号");
+        }
+        if (readTarget == TaskReadTarget.QUOTA
+                && (text(args, "activityNo").isBlank() || text(args, "month").isBlank())) {
+            addMissing(missing, "活动编号和额度月份");
+        }
+    }
+
+    private void addMissing(List<String> missing, String slot) {
+        if (missing.stream().noneMatch(item -> item.contains(slot))) {
+            missing.add(slot);
+        }
+    }
+
+    private String text(Map<String, Object> args, String key) {
+        Object value = args.get(key);
+        return value == null ? "" : String.valueOf(value).trim();
     }
 
     private Map<String, Object> error(String message) {

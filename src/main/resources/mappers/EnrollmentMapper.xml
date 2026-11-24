@@ -35,6 +35,13 @@
           AND user_id = #{userId}
     </select>
 
+    <select id="selectByEnrollmentNo" resultMap="EnrollmentMap">
+        SELECT <include refid="EnrollmentColumns"/>
+        FROM enrollment
+        WHERE enrollment_no = #{enrollmentNo}
+          AND user_id = #{userId}
+    </select>
+
     <select id="selectByUserId" resultMap="EnrollmentMap">
         SELECT <include refid="EnrollmentColumns"/>
         FROM enrollment

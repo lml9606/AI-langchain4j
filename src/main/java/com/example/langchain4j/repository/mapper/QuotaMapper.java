@@ -17,6 +17,9 @@ public interface QuotaMapper {
     Quota selectById(@Param("id") long id, @Param("userId") String userId);
 
     List<Quota> selectByUserId(@Param("userId") String userId,
+                               @Param("enrollmentNo") String enrollmentNo,
+                               @Param("activityNo") String activityNo,
+                               @Param("month") String month,
                                @Param("limit") int limit);
 
     int update(Quota quota);

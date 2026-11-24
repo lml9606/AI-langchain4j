@@ -12,6 +12,9 @@ import java.math.BigDecimal;
  * 额度账户创建/更新请求。
  */
 public record QuotaRequest(
+        @Size(max = 64, message = "enrollmentNo 长度不能超过 64")
+        String enrollmentNo,
+
         @NotBlank(message = "activityNo 不能为空")
         @Size(max = 64, message = "activityNo 长度不能超过 64")
         String activityNo,

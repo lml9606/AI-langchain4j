@@ -71,7 +71,12 @@ public class QuotaTransactionService {
 
     /** 查询当前用户的交易流水；quotaId 为空表示不过滤。 */
     public List<QuotaTransaction> list(String userId, Long quotaId, int limit) {
-        List<QuotaTransaction> list = transactionMapper.selectByUserId(userId, quotaId,
+        return list(userId, quotaId, null, limit);
+    }
+
+    /** 查询当前用户的交易流水；quotaId/enrollmentId 为空表示不过滤。 */
+    public List<QuotaTransaction> list(String userId, Long quotaId, Long enrollmentId, int limit) {
+        List<QuotaTransaction> list = transactionMapper.selectByUserId(userId, quotaId, enrollmentId,
                 safeLimit(limit));
         return list == null ? List.of() : list;
     }

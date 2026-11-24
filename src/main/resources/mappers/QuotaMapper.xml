@@ -6,6 +6,7 @@
     <resultMap id="QuotaMap" type="com.example.langchain4j.repository.entity.Quota">
         <id property="id" column="id"/>
         <result property="activityNo" column="activity_no"/>
+        <result property="enrollmentNo" column="enrollment_no"/>
         <result property="userId" column="user_id"/>
         <result property="month" column="month"/>
         <result property="quotaType" column="quota_type"/>
@@ -16,16 +17,16 @@
     </resultMap>
 
     <sql id="QuotaColumns">
-        id, activity_no, user_id, month, quota_type, total_amount, used_amount,
+        id, activity_no, enrollment_no, user_id, month, quota_type, total_amount, used_amount,
         created_at, updated_at
     </sql>
 
     <insert id="insert" parameterType="com.example.langchain4j.repository.entity.Quota"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO quota
-            (activity_no, user_id, month, quota_type, total_amount, used_amount)
+            (activity_no, enrollment_no, user_id, month, quota_type, total_amount, used_amount)
         VALUES
-            (#{activityNo}, #{userId}, #{month}, #{quotaType}, #{totalAmount}, #{usedAmount})
+            (#{activityNo}, #{enrollmentNo}, #{userId}, #{month}, #{quotaType}, #{totalAmount}, #{usedAmount})
     </insert>
 
     <select id="selectById" resultMap="QuotaMap">
@@ -39,18 +40,28 @@
         SELECT <include refid="QuotaColumns"/>
         FROM quota
         WHERE user_id = #{userId}
+        <if test="enrollmentNo != null and enrollmentNo != ''">
+            AND enrollment_no = #{enrollmentNo}
+        </if>
+        <if test="activityNo != null and activityNo != ''">
+            AND activity_no = #{activityNo}
+        </if>
+        <if test="month != null and month != ''">
+            AND month = #{month}
+        </if>
         ORDER BY created_at DESC, id DESC
         LIMIT #{limit}
     </select>
 
     <update id="update" parameterType="com.example.langchain4j.repository.entity.Quota">
         UPDATE quota
-        SET activity_no  = #{activityNo},
-            month        = #{month},
-            quota_type   = #{quotaType},
-            total_amount = #{totalAmount},
-            used_amount  = #{usedAmount},
-            updated_at   = now()
+        SET activity_no   = #{activityNo},
+            enrollment_no = #{enrollmentNo},
+            month         = #{month},
+            quota_type    = #{quotaType},
+            total_amount  = #{totalAmount},
+            used_amount   = #{usedAmount},
+            updated_at    = now()
         WHERE id = #{id}
           AND user_id = #{userId}
     </update>

@@ -9,11 +9,13 @@
 | --- | --- |
 | 任务解析 | `TaskResolveNode` 一次输出 `READ`/`WRITE`、参数和缺失项，不接触工具名或执行计划 |
 | 参数抽取 | `TaskResolveNode` 抽取最小参数；缺参转追问 |
-| 只读查询 | `TaskReadNode` 固定调用 `query_demo_record`，不产生业务副作用 |
+| 只读查询 | `TaskReadNode` 按目标表直接调用 `EnrollmentService` / `QuotaService` / `QuotaTransactionService`，不经过 AgentTool；完整业务行写入 `taskData` 并透出为 `businessData` |
+| 报名关联额度 | 报名先按报名单号命中，再由 `TaskQuotaReadNode` 用 `quota.enrollment_no` 查询关联额度 |
+| 关联交易读取 | 报名或额度先读命中的主键，再由 `TaskTransactionReadNode` 读取 `quota_transaction`；两段业务行追加到同一个 `businessData` |
 | 写操作确认 | `TaskConfirmNode` 生成一次性 `confirmationId`，并写 `ai_tool_execution=PENDING` |
 | 写操作执行 | `TaskWriteNode` 固定调用 `complete_demo_record`，必须 `approved=true` 且携带幂等键 |
 | 幂等 | 单写操作的 `confirmationId` 同时作为台账主键和幂等键 |
-| 证据回答 | 工具 `ToolEvidence` 透出 `citations`，回答节点生成 `toolTrace` 与置信度 |
+| 证据回答 | 工具 `ToolEvidence` 透出 `citations`，回答节点生成 `toolTrace` 与置信度；完整查询明细由 `businessData` 透出 |
 | 输出安全 | 复用 `OutputGuardService` 敏感词门禁 |
 | 扩展位 | `TaskOperation.REACT` 已预留，当前不开放自由工具循环 |
 
@@ -24,7 +26,9 @@
 ```text
 START → entry → intent_plan ──task──→ task_resolve ──失败──→ fallback
                                            │
-                                           ├─READ──→ task_read → task_answer → finalize → END
+                                           ├─READ──→ task_read ──需要关联额度──→ task_read_quota
+                                           │             ├──需要关联交易──→ task_read_transaction
+                                           │             └──────────────→ task_answer → finalize → END
                                            └─WRITE─→ task_confirm → finalize → END
 
 用户确认后直接执行（不重新分类、不重新抽参）：
@@ -33,31 +37,43 @@ task_write(approved=true, idempotencyKey=confirmationId) → task_answer → fin
 
 缺参时 `task_resolve` 返回 `clarify=true` 和追问文案，直接收尾，不调用工具。
 
-## 3. 固定工具与权限
+## 3. 固定读取与写工具
 
-| 操作 | 固定工具 | 参数 | 说明 |
+| 操作 | 实现 | 参数 | 说明 |
 | --- | --- | --- | --- |
-| READ | `query_demo_record` | `status`, `limit` | 查询当前用户的演示记录 |
+| READ 报名 | `EnrollmentService` | `enrollmentNo`, `limit` | 查询当前用户的报名记录 |
+| READ 额度 | `QuotaService` | `enrollmentNo`, `activityNo`, `month`, `limit` | 查询当前用户的额度记录；`enrollment_no` 为可空关联报名单号 |
+| READ 交易 | `QuotaTransactionService` | `quotaId`, `enrollmentId`, `limit` | 查询当前用户的交易流水 |
 | WRITE | `complete_demo_record` | `recordId` / `title` | 标记演示记录完成，必须人工确认 |
 | KNOWLEDGE | `search_knowledge` | `query`, `topK` | 知识问答工具，不属于固定读写任务 |
 
 权限校验顺序：
 
 ```text
-TaskResolveNode → 只做读写判断与参数抽取（当前模拟工具不做真实业务权限校验）
-ToolExecutor  → 注册表 + 角色 + 写确认 + 幂等键 + JSON Schema + 限流 + 超时
+TaskResolveNode → 只做读写判断与参数抽取
+只读查询       → 节点直接调用领域 Service，由 SQL 的 user_id 条件做数据隔离
+ToolExecutor  → 只用于写工具和外部工具：注册表 + 角色 + 写确认 + 幂等键 + JSON Schema + 限流 + 超时
 ```
 
 模型输出只能作为参数候选；即使 prompt injection 让模型输出其他工具名，固定节点也不会使用。
+
+“先查报名再查额度”要求 `readTarget=ENROLLMENT`、`withQuotas=true` 且提供 `enrollmentNo`；
+第一段报名未命中时不会进入额度节点。额度表通过 `enrollment_no` 关联报名单号，查询仍带
+`user_id` 条件，不能跨用户读取。
+
+额度创建或更新时，`QuotaRequest.enrollmentNo` 可选；非空时服务层会校验该报名单号存在且
+属于当前用户，避免写入跨用户的孤儿关联。
+
+`businessData` 与 `citations` 的边界：前者是查询得到的业务明细行（敏感字段已脱敏），用于前端展示或后续业务处理；后者是截断后的可引用证据，用于回答溯源。没有数据时两者都为空，节点摘要会明确返回“没有查询到符合条件的记录”。
 
 ## 4. 新增固定任务
 
 新增业务任务时按节点扩展，而不是给模型一份工具目录：
 
-1. 实现 `AgentTool` 并注册为 Spring Bean；
-2. 在 `TaskTools` 增加固定工具名；
-3. 新增只读/写节点，节点内写死工具名；
-4. 在 `AgentGraphBuilder` 增加节点和边；
+1. 只读任务：在领域 Service 增加查询方法，扩展 `TaskReadTarget` 和 `TaskReadNode`；
+2. 只读任务：在 `AgentGraphBuilder` 增加目标路由或执行节点；
+3. 写任务：实现 `AgentTool` 并注册为 Spring Bean；
+4. 写任务：在 `TaskTools` 增加固定写工具名；
 5. 写操作必须经过确认节点，并在执行节点校验 `approved` 与幂等键。
 
 如果任务需要“先查询拿 ID，再修改”，在图上拆成只读节点 → 写节点，不把两个动作塞进一个模型计划。

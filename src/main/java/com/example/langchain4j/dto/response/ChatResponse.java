@@ -36,6 +36,8 @@ public class ChatResponse extends BaseResponse {
     private String confidenceReason = "";
     /** 工具调用轨迹（任务链路每一步的工具、参数、结果与耗时） */
     private List<ToolCallTrace> toolTrace = List.of();
+    /** 只读查询的业务明细行（敏感字段由读节点脱敏）；每行字段由对应领域表决定，无查询时为空列表 */
+    private List<Map<String, Object>> businessData = List.of();
     /** 本轮是否因缺参转为追问 */
     private boolean clarify;
     /** 写操作待确认信息（含一次性 confirmationId）；非写操作轮为 null */

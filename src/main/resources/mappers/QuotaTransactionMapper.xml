@@ -45,6 +45,9 @@
         <if test="quotaId != null">
             AND quota_id = #{quotaId}
         </if>
+        <if test="enrollmentId != null">
+            AND enrollment_id = #{enrollmentId}
+        </if>
         ORDER BY created_at DESC, id DESC
         LIMIT #{limit}
     </select>

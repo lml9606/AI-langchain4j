@@ -204,30 +204,48 @@ public final class PromptTemplates {
             """;
 
     /**
-     * 任务解析：一次模型调用完成“判断读写 + 抽取参数”。
+     * 任务解析：一次模型调用完成“判断读写、选择只读目标表、抽取参数”。
      *
-     * 当前只是流程骨架，参数描述保持最小，真实业务校验由后续领域节点补充。
+     * 模型不能输出工具名或执行计划，只能在这三类只读目标和有限参数中选择。
      */
     public static final String TASK_RESOLVE_SYSTEM = """
-            你是任务解析器。请完成两件事：
+            你是任务解析器。请完成三件事：
             1. 判断用户要 READ（查询/查看/列出）还是 WRITE（完成/关闭/标记）；
-            2. 按操作类型抽取最少参数。
+            2. READ 时选择要读取的目标表；
+            3. 按操作类型抽取最少参数。
 
-            READ 参数：
-            - status：可选，按状态过滤；
-            - limit：可选，返回条数。
+            READ 目标与参数：
+            - ENROLLMENT：报名表，参数 enrollmentNo（可选报名单号）、limit；
+            - QUOTA：额度表，参数 enrollmentNo（可选报名单号）、activityNo（可选活动编号）、month（可选，YYYY-MM）、limit；
+            - TRANSACTION：交易表，参数 quotaId（可选额度 ID）、enrollmentId（可选报名 ID）、limit。
+
+            withQuotas 规则：
+            - 用户要求“先查报名再查额度”或“按报名单号查关联额度”时，readTarget 填 ENROLLMENT，
+              并把 withQuotas 设为 true；必须提供 enrollmentNo；
+            - withQuotas 只允许跟在 ENROLLMENT 后面，不能与 withTransactions 同时为 true。
+
+            withTransactions 规则：
+            - 用户要查“某个报名 / 某个活动额度对应的交易流水”时，readTarget 仍填 ENROLLMENT 或 QUOTA，
+              并把 withTransactions 设为 true；
+            - ENROLLMENT + withTransactions 必须提供 enrollmentNo；
+            - QUOTA + withTransactions 必须同时提供 activityNo 和 month；
+            - 直接查询交易表时 readTarget=TRANSACTION，withTransactions=false。
+
             WRITE 参数：
             - recordId 或 title：至少提供一个，用于定位要修改的记录。
 
             JSON 形状：
-            {"operation":"READ 或 WRITE","reason":"一句话说明判断依据","args":{},"missing":[]}
+            {"operation":"READ 或 WRITE","readTarget":"ENROLLMENT/QUOTA/TRANSACTION 或空串",
+             "withQuotas":true 或 false,"withTransactions":true 或 false,"reason":"一句话说明判断依据",
+             "args":{},"missing":[]}
 
             规则：
             1. 只能输出 READ 或 WRITE，不能输出工具名或执行计划；
             2. READ 没有参数时 args 返回空对象；
-            3. WRITE 缺少 recordId 和 title 时写入 missing；
-            4. 参数值只能来自用户输入，禁止编造主键；
-            5. 只输出 JSON，不要输出解释文字或代码围栏。
+            3. withQuotas 或 withTransactions 为 true 时缺关键定位参数必须写入 missing，不能自行选择最近一条记录；
+            4. WRITE 缺少 recordId 和 title 时写入 missing；
+            5. 参数值只能来自用户输入，禁止编造主键；
+            6. 只输出 JSON，不要输出解释文字或代码围栏。
             """;
     /** 任务执行后的最终回答：只基于工具证据，不得编造；引用编号由系统追加 */
     public static final String TASK_ANSWER_SYSTEM = """

@@ -40,6 +40,10 @@ public class Router {
     public static final String TO_TASK_READ = "to_task_read";
     /** 参数完整且为写操作 → 确认节点 */
     public static final String TO_TASK_CONFIRM = "to_task_confirm";
+    /** 报名/额度已命中且需要关联交易 → 第二段只读节点 */
+    public static final String TO_TASK_READ_TRANSACTION = "to_task_read_transaction";
+    /** 报名已命中且需要关联额度 → 第二段只读节点 */
+    public static final String TO_TASK_READ_QUOTA = "to_task_read_quota";
     /** 任务回答节点 */
     public static final String TO_TASK_ANSWER = "to_task_answer";
 
@@ -131,6 +135,22 @@ public class Router {
                 return route("task-resolve", state, TO_TASK_CONFIRM);
             }
             return route("task-resolve", state, TO_FALLBACK);
+        };
+    }
+
+    /**
+     * 第一段只读后：需要关联额度 → 第二段额度查询；需要关联交易 → 第二段交易查询；
+     * 无数据、未要求关联查询或查询失败都进入回答节点，由回答节点解释结果。
+     */
+    public EdgeAction<WorkflowState> afterTaskRead() {
+        return state -> {
+            if (state.taskIncludeQuotas() && !state.taskSourceId().isBlank()) {
+                return route("task-read", state, TO_TASK_READ_QUOTA);
+            }
+            if (state.taskIncludeTransactions() && !state.taskSourceId().isBlank()) {
+                return route("task-read", state, TO_TASK_READ_TRANSACTION);
+            }
+            return route("task-read", state, TO_TASK_ANSWER);
         };
     }
 

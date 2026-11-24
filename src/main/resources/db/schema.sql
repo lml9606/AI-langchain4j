@@ -260,6 +260,7 @@ CREATE INDEX IF NOT EXISTS idx_enrollment_user ON enrollment (user_id, created_a
 CREATE TABLE IF NOT EXISTS quota (
     id           BIGSERIAL PRIMARY KEY,
     activity_no  VARCHAR(64)   NOT NULL,                  -- 活动编号
+    enrollment_no VARCHAR(64),                             -- 关联报名单号（可空）
     user_id      VARCHAR(64)   NOT NULL,
     month        VARCHAR(7)    NOT NULL,                  -- 月份 YYYY-MM
     quota_type   VARCHAR(32)   NOT NULL DEFAULT 'DEFAULT', -- 额度类型，例如 DEFAULT / TRAINING
@@ -269,9 +270,12 @@ CREATE TABLE IF NOT EXISTS quota (
     updated_at   TIMESTAMPTZ   NOT NULL DEFAULT now(),
     CONSTRAINT ck_quota_amount CHECK (total_amount >= 0 AND used_amount >= 0 AND used_amount <= total_amount)
 );
+ALTER TABLE quota ADD COLUMN IF NOT EXISTS enrollment_no VARCHAR(64);
 CREATE UNIQUE INDEX IF NOT EXISTS uk_quota_user_activity_month
     ON quota (user_id, activity_no, month);
 CREATE INDEX IF NOT EXISTS idx_quota_user ON quota (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_quota_user_enrollment
+    ON quota (user_id, enrollment_no, created_at DESC);
 
 -- 交易表：额度变动流水；quota_id 为所属额度记录，enrollment_id 可关联报名单
 CREATE TABLE IF NOT EXISTS quota_transaction (

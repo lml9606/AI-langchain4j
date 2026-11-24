@@ -24,9 +24,11 @@ public class QuotaService {
 
     private static final int MAX_PAGE_SIZE = 100;
     private final QuotaMapper quotaMapper;
+    private final EnrollmentService enrollmentService;
 
-    public QuotaService(QuotaMapper quotaMapper) {
+    public QuotaService(QuotaMapper quotaMapper, EnrollmentService enrollmentService) {
         this.quotaMapper = quotaMapper;
+        this.enrollmentService = enrollmentService;
     }
 
     /** 创建额度记录；活动编号和月份由业务请求指定。 */
@@ -36,8 +38,8 @@ public class QuotaService {
         quota.setUserId(userId);
         apply(quota, request, true);
         quotaMapper.insert(quota);
-        log.info("[quota] created, id={}, activityNo={}, month={}, user={}, total={}, used={}",
-                quota.getId(), quota.getActivityNo(), quota.getMonth(), userId,
+        log.info("[quota] created, id={}, activityNo={}, enrollmentNo={}, month={}, user={}, total={}, used={}",
+                quota.getId(), quota.getActivityNo(), quota.getEnrollmentNo(), quota.getMonth(), userId,
                 quota.getTotalAmount(), quota.getUsedAmount());
         return requireOwned(quota.getId(), userId);
     }
@@ -49,7 +51,20 @@ public class QuotaService {
 
     /** 查询当前用户的额度记录列表。 */
     public List<Quota> list(String userId, int limit) {
-        List<Quota> list = quotaMapper.selectByUserId(userId, safeLimit(limit));
+        return list(userId, null, null, null, limit);
+    }
+
+    /** 按活动编号和月份查询当前用户的额度记录；两个条件为空表示不过滤。 */
+    public List<Quota> list(String userId, String activityNo, String month, int limit) {
+        return list(userId, null, activityNo, month, limit);
+    }
+
+    /** 按报名单号、活动编号和月份查询当前用户的额度记录；条件为空表示不过滤。 */
+    public List<Quota> list(String userId, String enrollmentNo, String activityNo, String month,
+                            int limit) {
+        List<Quota> list = quotaMapper.selectByUserId(userId,
+                trimToNull(enrollmentNo), trimToNull(activityNo), trimToNull(month),
+                safeLimit(limit));
         return list == null ? List.of() : list;
     }
 
@@ -61,8 +76,8 @@ public class QuotaService {
         if (quotaMapper.update(quota) == 0) {
             throw new BizException(ErrorCode.NOT_FOUND, "额度记录不存在或无权操作: " + id);
         }
-        log.info("[quota] updated, id={}, user={}, total={}, used={}",
-                id, userId, quota.getTotalAmount(), quota.getUsedAmount());
+        log.info("[quota] updated, id={}, user={}, enrollmentNo={}, total={}, used={}",
+                id, userId, quota.getEnrollmentNo(), quota.getTotalAmount(), quota.getUsedAmount());
         return requireOwned(id, userId);
     }
 
@@ -98,6 +113,13 @@ public class QuotaService {
             throw new BizException(ErrorCode.BAD_REQUEST, "月份格式必须为 YYYY-MM");
         }
         quota.setActivityNo(request.activityNo().trim());
+        String enrollmentNo = trimToNull(request.enrollmentNo());
+        if (enrollmentNo != null
+                && enrollmentService.findByNo(quota.getUserId(), enrollmentNo) == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "报名单号不存在或不属于当前用户: " + enrollmentNo);
+        }
+        quota.setEnrollmentNo(enrollmentNo);
         quota.setMonth(month);
         quota.setQuotaType(trimToNull(request.quotaType()) == null
                 ? defaultQuotaType(quota) : request.quotaType().trim().toUpperCase(Locale.ROOT));

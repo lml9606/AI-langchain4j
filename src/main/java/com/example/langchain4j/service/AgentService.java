@@ -168,6 +168,7 @@ public class AgentService {
                 state.tokenUsage(), System.currentTimeMillis() - start, state.done(),
                 state.rootCause(), citations(state), confidence(state), confidenceReason(state),
                 toolTrace(state), state.taskClarify());
+        response.setBusinessData(state.taskData());
         response.setPendingAction(pendingAction(state));
         if (response.getPendingAction() != null) {
             response.setBusiness(BusinessResult.failure("NOT_EXECUTED", "等待用户确认写操作"));
@@ -314,6 +315,7 @@ public class AgentService {
                             state.tokenUsage(), System.currentTimeMillis() - start, state.done(),
                             state.rootCause(), citations(state), confidence(state),
                             confidenceReason(state), toolTrace(state), state.taskClarify());
+            response.setBusinessData(state.taskData());
             response.setBusiness(businessResult(execution));
             return response;
         } catch (RuntimeException e) {

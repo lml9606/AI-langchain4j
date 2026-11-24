@@ -90,6 +90,18 @@ public class WorkflowState extends AgentState {
     public static final String TASK_RESOLVE_REASON = "taskResolveReason";
     /** 任务参数（TaskResolveNode 写入：模型根据用户请求抽取） */
     public static final String TASK_ARGS = "taskArgs";
+    /** 只读目标表（TaskResolveNode 写入：ENROLLMENT/QUOTA/TRANSACTION） */
+    public static final String TASK_READ_TARGET = "taskReadTarget";
+    /** 是否需要继续读取关联交易（TaskResolveNode 写入：报名/额度读取后是否再查交易表） */
+    public static final String TASK_INCLUDE_TRANSACTIONS = "taskIncludeTransactions";
+    /** 是否需要继续读取关联额度（TaskResolveNode 写入：报名读取后按报名单号再查额度表） */
+    public static final String TASK_INCLUDE_QUOTAS = "taskIncludeQuotas";
+    /** 第一段读取命中的来源类型（TaskReadNode 写入，用于第二段交易查询） */
+    public static final String TASK_SOURCE_TYPE = "taskSourceType";
+    /** 第一段读取命中的来源主键（TaskReadNode 写入，用于第二段交易查询） */
+    public static final String TASK_SOURCE_ID = "taskSourceId";
+    /** 只读查询的完整业务行（TaskReadNode/TaskTransactionReadNode 写入，透出到响应） */
+    public static final String TASK_DATA = "taskData";
     /** 任务缺失参数（TaskResolveNode 写入：非空时本轮转为追问，不调用工具） */
     public static final String TASK_MISSING = "taskMissing";
     /** 工具调用轨迹（TaskReadNode/TaskWriteNode 写入：tool/args/success/summary/errorCode/costMs） */
@@ -284,6 +296,12 @@ public class WorkflowState extends AgentState {
         reset.put(TASK_OPERATION, "");
         reset.put(TASK_RESOLVE_REASON, "");
         reset.put(TASK_ARGS, Map.of());
+        reset.put(TASK_READ_TARGET, "");
+        reset.put(TASK_INCLUDE_TRANSACTIONS, false);
+        reset.put(TASK_INCLUDE_QUOTAS, false);
+        reset.put(TASK_SOURCE_TYPE, "");
+        reset.put(TASK_SOURCE_ID, "");
+        reset.put(TASK_DATA, List.of());
         reset.put(TASK_MISSING, List.of());
         reset.put(TASK_TRACE, List.of());
         reset.put(TASK_EVIDENCE, List.of());
@@ -585,6 +603,36 @@ public class WorkflowState extends AgentState {
         Map<String, Object> result = new LinkedHashMap<>(m.size());
         m.forEach((k, val) -> result.put(String.valueOf(k), val));
         return result;
+    }
+
+    /** 只读目标表；未识别时为空串。 */
+    public String taskReadTarget() {
+        return value(TASK_READ_TARGET, "");
+    }
+
+    /** 是否需要在报名/额度读取后继续读取关联交易。 */
+    public boolean taskIncludeTransactions() {
+        return Boolean.parseBoolean(String.valueOf(value(TASK_INCLUDE_TRANSACTIONS).orElse(false)));
+    }
+
+    /** 是否需要在报名读取后继续读取关联额度。 */
+    public boolean taskIncludeQuotas() {
+        return Boolean.parseBoolean(String.valueOf(value(TASK_INCLUDE_QUOTAS).orElse(false)));
+    }
+
+    /** 第一段读取的来源类型，值为 TaskReadTarget 名称。 */
+    public String taskSourceType() {
+        return value(TASK_SOURCE_TYPE, "");
+    }
+
+    /** 第一段读取命中的来源主键，供第二段关联查询使用。 */
+    public String taskSourceId() {
+        return value(TASK_SOURCE_ID, "");
+    }
+
+    /** 只读查询的完整业务行：每行是一个字段 Map，类型漂移时返回空列表。 */
+    public List<Map<String, Object>> taskData() {
+        return mapList(TASK_DATA);
     }
 
     /** 任务缺失槽位：只接受 List，逐项转字符串并过滤空白 */
