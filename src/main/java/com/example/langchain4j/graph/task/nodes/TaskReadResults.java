@@ -16,11 +16,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 固定只读链路的结果转换工具：把领域实体转换成节点轨迹和引用证据。
+ * 只读查询结果转换工具：固定链路和 ReAct 只读工具共用，把领域实体转换成轨迹和引用证据。
  *
  * 只负责格式转换，不访问数据库，也不做权限或业务判断。
  */
-final class TaskReadResults {
+public final class TaskReadResults {
 
     private static final int MAX_SNIPPET = 200;
 
@@ -28,7 +28,7 @@ final class TaskReadResults {
     }
 
     /** 报名记录转统一查询结果。 */
-    static ToolResult enrollment(List<Enrollment> records, long start) {
+    public static ToolResult enrollment(List<Enrollment> records, long start) {
         List<Map<String, Object>> rows = new ArrayList<>();
         List<ToolEvidence> evidence = new ArrayList<>();
         for (Enrollment record : records) {
@@ -60,7 +60,7 @@ final class TaskReadResults {
     }
 
     /** 额度记录转统一查询结果。 */
-    static ToolResult quota(List<Quota> records, long start) {
+    public static ToolResult quota(List<Quota> records, long start) {
         List<Map<String, Object>> rows = new ArrayList<>();
         List<ToolEvidence> evidence = new ArrayList<>();
         for (Quota quota : records) {
@@ -100,7 +100,7 @@ final class TaskReadResults {
     }
 
     /** 交易流水转统一查询结果。 */
-    static ToolResult transaction(List<QuotaTransaction> records, long start) {
+    public static ToolResult transaction(List<QuotaTransaction> records, long start) {
         List<Map<String, Object>> rows = new ArrayList<>();
         List<ToolEvidence> evidence = new ArrayList<>();
         for (QuotaTransaction transaction : records) {
@@ -133,8 +133,8 @@ final class TaskReadResults {
     }
 
     /** 构造单条节点轨迹，摘要按配置截断。 */
-    static Map<String, Object> traceItem(String tool, Map<String, Object> args, String purpose,
-                                         ToolResult result, AgentProperties properties) {
+    public static Map<String, Object> traceItem(String tool, Map<String, Object> args, String purpose,
+                                                ToolResult result, AgentProperties properties) {
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("tool", tool);
         item.put("args", args);
@@ -148,7 +148,7 @@ final class TaskReadResults {
     }
 
     /** 只保留成功结果中的证据，并按配置限制条数和片段长度。 */
-    static List<Map<String, Object>> evidence(ToolResult result, AgentProperties properties) {
+    public static List<Map<String, Object>> evidence(ToolResult result, AgentProperties properties) {
         List<Map<String, Object>> evidence = new ArrayList<>();
         if (!result.success()) {
             return evidence;
@@ -170,7 +170,7 @@ final class TaskReadResults {
     }
 
     /** 提取查询结果的完整业务行，只接受 Map 行并统一字符串键；失败结果返回空列表。 */
-    static List<Map<String, Object>> dataRows(ToolResult result) {
+    public static List<Map<String, Object>> dataRows(ToolResult result) {
         if (!result.success() || !(result.data() instanceof List<?> rows)) {
             return List.of();
         }
@@ -186,7 +186,7 @@ final class TaskReadResults {
     }
 
     /** 从查询结果第一行取业务主键，供第二段关联查询使用。 */
-    static String firstRowId(ToolResult result) {
+    public static String firstRowId(ToolResult result) {
         if (!result.success() || !(result.data() instanceof List<?> rows)) {
             return "";
         }

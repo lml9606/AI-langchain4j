@@ -16,6 +16,8 @@ import com.example.langchain4j.graph.state.WorkflowStateSerializer;
 import com.example.langchain4j.graph.task.nodes.TaskAnswerNode;
 import com.example.langchain4j.graph.task.nodes.TaskConfirmNode;
 import com.example.langchain4j.graph.task.nodes.TaskQuotaReadNode;
+import com.example.langchain4j.graph.task.nodes.ReactPlanNode;
+import com.example.langchain4j.graph.task.nodes.ReactToolNode;
 import com.example.langchain4j.graph.task.nodes.TaskReadNode;
 import com.example.langchain4j.graph.task.nodes.TaskResolveNode;
 import com.example.langchain4j.graph.task.nodes.TaskTransactionReadNode;
@@ -51,6 +53,8 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
  * 读链路 task_read → task_answer；报名关联额度时由 task_read_quota 读额度表，
  * 报名/额度关联交易时由 task_read_transaction 读交易表；写链路先 task_confirm 生成令牌并收尾，
  * 用户确认后由 TaskConfirmService 直接执行 task_write → task_answer → finalize。
+ * ReAct 只读诊断由 task_resolve 标记 REACT 后进入 react_plan → react_tool 循环，
+ * 只在白名单只读工具间选择，达到步数、重复调用、无数据或致命失败时停止并转到 task_answer。
  * finalize 统一收尾，把结果、完成标记和待确认动作写回最终状态。
  * <p>
  * 证据优先主链路：
@@ -81,6 +85,8 @@ public class AgentGraphBuilder {
     public static final String NODE_TASK_READ_QUOTA = "task_read_quota";
     public static final String NODE_TASK_READ_TRANSACTION = "task_read_transaction";
     public static final String NODE_TASK_ANSWER = "task_answer";
+    public static final String NODE_REACT_PLAN = "react_plan";
+    public static final String NODE_REACT_TOOL = "react_tool";
     public static final String NODE_FINALIZE = "finalize";
 
     private final StateSerializer<WorkflowState> stateSerializer;
@@ -99,6 +105,8 @@ public class AgentGraphBuilder {
     private final TaskQuotaReadNode taskQuotaReadNode;
     private final TaskTransactionReadNode taskTransactionReadNode;
     private final TaskAnswerNode taskAnswerNode;
+    private final ReactPlanNode reactPlanNode;
+    private final ReactToolNode reactToolNode;
     private final FinalizeNode finalizeNode;
     private final AgentProperties properties;
 
@@ -118,6 +126,8 @@ public class AgentGraphBuilder {
                              TaskQuotaReadNode taskQuotaReadNode,
                              TaskTransactionReadNode taskTransactionReadNode,
                              TaskAnswerNode taskAnswerNode,
+                             ReactPlanNode reactPlanNode,
+                             ReactToolNode reactToolNode,
                              FinalizeNode finalizeNode,
                              AgentProperties properties) {
         this.stateSerializer = stateSerializer;
@@ -136,6 +146,8 @@ public class AgentGraphBuilder {
         this.taskQuotaReadNode = taskQuotaReadNode;
         this.taskTransactionReadNode = taskTransactionReadNode;
         this.taskAnswerNode = taskAnswerNode;
+        this.reactPlanNode = reactPlanNode;
+        this.reactToolNode = reactToolNode;
         this.finalizeNode = finalizeNode;
         this.properties = properties;
     }
@@ -165,6 +177,9 @@ public class AgentGraphBuilder {
             graph.addNode(NODE_TASK_READ_QUOTA, node_async(taskQuotaReadNode));
             graph.addNode(NODE_TASK_READ_TRANSACTION, node_async(taskTransactionReadNode));
             graph.addNode(NODE_TASK_ANSWER, node_async(taskAnswerNode));
+            // ---- ReAct 只读诊断：规划 → 执行 → 路由回规划，直到 final/停止条件 ----
+            graph.addNode(NODE_REACT_PLAN, node_async(reactPlanNode));
+            graph.addNode(NODE_REACT_TOOL, node_async(reactToolNode));
             // ---- 统一收尾节点：所有正常/降级/转人工路径最终都汇合到这里 ----
             graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
 
@@ -199,11 +214,23 @@ public class AgentGraphBuilder {
                             Router.TO_RETRIEVAL_FULL, NODE_RETRIEVAL_FULL,
                             Router.TO_FALLBACK, NODE_FALLBACK));
 
-            // 任务解析后：缺参追问 -> 收尾；读 -> task_read；写 -> task_confirm；失败 -> 兜底
+            // 任务解析后：缺参追问 -> 收尾；读 -> task_read；写 -> task_confirm；
+            // 受控只读诊断 -> react_plan；失败 -> 兜底
             graph.addConditionalEdges(NODE_TASK_RESOLVE, edge_async(router.afterTaskResolve()),
                     Map.of(Router.TO_FINALIZE, NODE_FINALIZE,
                             Router.TO_TASK_READ, NODE_TASK_READ,
                             Router.TO_TASK_CONFIRM, NODE_TASK_CONFIRM,
+                            Router.TO_REACT_PLAN, NODE_REACT_PLAN,
+                            Router.TO_FALLBACK, NODE_FALLBACK));
+            // ReAct 规划后：调用白名单工具 -> react_tool；final/达到上限 -> 回答；配置错误 -> 兜底
+            graph.addConditionalEdges(NODE_REACT_PLAN, edge_async(router.afterReactPlan()),
+                    Map.of(Router.TO_REACT_TOOL, NODE_REACT_TOOL,
+                            Router.TO_TASK_ANSWER, NODE_TASK_ANSWER,
+                            Router.TO_FALLBACK, NODE_FALLBACK));
+            // ReAct 工具执行后：继续 -> react_plan；已有结论/停止 -> task_answer；前置错误 -> 兜底
+            graph.addConditionalEdges(NODE_REACT_TOOL, edge_async(router.afterReactTool()),
+                    Map.of(Router.TO_REACT_PLAN, NODE_REACT_PLAN,
+                            Router.TO_TASK_ANSWER, NODE_TASK_ANSWER,
                             Router.TO_FALLBACK, NODE_FALLBACK));
             // 确认令牌创建后：成功 -> 收尾并透出 pendingAction；失败 -> 兜底
             graph.addConditionalEdges(NODE_TASK_CONFIRM, edge_async(router.afterTaskConfirm()),
@@ -234,11 +261,13 @@ public class AgentGraphBuilder {
 
     /**
      * 递归上限：validate → generate/retrieval_full → validate 的重试环最多 maxRetries 轮，
-     * 每轮最多 4 个节点，再加固定余量覆盖主链路与任务分支。
+     * 每轮最多 4 个节点；ReAct 每步经过 react_plan + react_tool 两个节点，再预留一次
+     * 停止规划节点。最后加固定余量覆盖主链路与任务分支。
      */
     private int recursionLimit() {
         int maxRetries = Math.max(1, properties.getMaxValidateRetries());
-        return maxRetries * 4 + 14;
+        int maxReactSteps = Math.max(1, properties.getReact().getMaxSteps());
+        return maxRetries * 4 + maxReactSteps * 2 + 18;
     }
 
 }

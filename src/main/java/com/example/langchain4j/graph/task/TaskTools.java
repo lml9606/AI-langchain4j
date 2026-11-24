@@ -3,7 +3,8 @@ package com.example.langchain4j.graph.task;
 /**
  * 固定任务链路使用的操作标识：模型只能填参数，不能选择或替换操作。
  *
- * 读查询由节点直接调用领域 Service，这里的 READ_* 只用于轨迹和日志标识；
+ * 固定读查询由节点直接调用领域 Service，这里的 READ_* 同时作为轨迹标识和
+ * ReAct 白名单只读工具名；
  * WRITE 仍是注册到 ToolRegistry 的真实写工具，需要确认和幂等。
  */
 public final class TaskTools {

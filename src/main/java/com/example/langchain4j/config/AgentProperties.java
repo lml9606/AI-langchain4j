@@ -60,6 +60,9 @@ public class AgentProperties {
     /** 工具运行时配置（全局写开关、超时、限流、人工确认与执行线程池） */
     private Tool tool = new Tool();
 
+    /** 受控 ReAct 只读诊断配置 */
+    private React react = new React();
+
     /** 单次图执行整体超时（秒）；超时即中止本轮：取消后台任务并返回降级应答，一问一答照常闭环，用户可直接重发 */
     private int executionTimeoutSeconds = 240;
 
@@ -409,6 +412,20 @@ public class AgentProperties {
             /** 执行台账失联判定（秒）：RUNNING 超过该时长视为进程崩溃，允许接管重试 */
             private int staleSeconds = 60;
         }
+    }
+
+    /**
+     * 受控 ReAct 配置。
+     *
+     * ReAct 只用于固定链路无法覆盖的只读诊断：模型可以在白名单只读工具之间循环选择，
+     * 但步数、工具集合、用户隔离和写操作边界都由代码控制。
+     */
+    @Data
+    public static class React {
+        /** 是否开放 ReAct 只读诊断分支；关闭时任务解析遇到 REACT 直接报错 */
+        private boolean enabled = true;
+        /** 单轮最多执行的工具步数；达到上限后停止循环并基于已有证据回答 */
+        private int maxSteps = 5;
     }
 
 }

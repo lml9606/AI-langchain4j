@@ -84,7 +84,7 @@ public class WorkflowState extends AgentState {
     public static final String ANSWER_MODE = "answerMode";
     /** 检索可见范围（服务层归一后入图：all/private；private 仅检索本人库） */
     public static final String VISIBILITY = "visibility";
-    /** 任务操作类型（TaskResolveNode 写入：READ=只读查询，WRITE=需要确认的写操作，REACT=预留扩展） */
+    /** 任务操作类型（TaskResolveNode 写入：READ=固定只读查询，WRITE=需要确认的写操作，REACT=受控只读诊断） */
     public static final String TASK_OPERATION = "taskOperation";
     /** 任务解析理由（TaskResolveNode 写入，仅用于日志和排查，不参与路由） */
     public static final String TASK_RESOLVE_REASON = "taskResolveReason";
@@ -124,6 +124,16 @@ public class WorkflowState extends AgentState {
     public static final String TASK_APPROVED = "taskApproved";
     /** 写工具幂等键（确认执行链路入参，等于 confirmationId） */
     public static final String TASK_IDEMPOTENCY_KEY = "taskIdempotencyKey";
+    /** ReAct 已执行的工具步数（ReactToolNode 每执行一次 +1） */
+    public static final String REACT_STEP = "reactStep";
+    /** ReAct 当前计划动作（ReactPlanNode 写入：action/tool/args/reason） */
+    public static final String REACT_ACTION = "reactAction";
+    /** ReAct 观察历史（ReactToolNode 追加：step/tool/args/success/summary/errorCode/dataCount/reason） */
+    public static final String REACT_HISTORY = "reactHistory";
+    /** ReAct 是否停止循环（最终回答、达到步数、重复调用、无数据或致命失败时写入 true） */
+    public static final String REACT_DONE = "reactDone";
+    /** ReAct 停止原因（用于日志与回答阶段解释，不参与工具选择） */
+    public static final String REACT_STOP_REASON = "reactStopReason";
     // ---- 旧版平铺字段 key：仅用于升级前 checkpoint 的迁移与兼容读取，新数据一律写入嵌套子对象 ----
     private static final String LEGACY_VALIDATED = "validated";
     private static final String LEGACY_VALIDATION_ISSUE = "validationIssue";
@@ -313,6 +323,12 @@ public class WorkflowState extends AgentState {
         reset.put(TASK_CONFIRMATION_ID, "");
         reset.put(TASK_APPROVED, false);
         reset.put(TASK_IDEMPOTENCY_KEY, "");
+        // 步骤4：ReAct 循环状态归零，避免断点恢复或下一轮对话复用上一轮工具轨迹
+        reset.put(REACT_STEP, 0);
+        reset.put(REACT_ACTION, Map.of());
+        reset.put(REACT_HISTORY, List.of());
+        reset.put(REACT_DONE, false);
+        reset.put(REACT_STOP_REASON, "");
         return reset;
     }
 
@@ -584,7 +600,7 @@ public class WorkflowState extends AgentState {
         return ChatOptions.normalizeVisibility(scope, ChatOptions.VISIBILITY_ALL);
     }
 
-    /** 任务操作类型：READ/WRITE；未识别或 REACT 预留扩展时为空串或 REACT。 */
+    /** 任务操作类型：READ/WRITE/REACT；未识别时为空串。 */
     public String taskOperation() {
         return value(TASK_OPERATION, "");
     }
@@ -702,6 +718,37 @@ public class WorkflowState extends AgentState {
     /** 置信度说明；缺省空串 */
     public String taskConfidenceReason() {
         return value(TASK_CONFIDENCE_REASON, "");
+    }
+
+    /** ReAct 已执行工具步数；缺省 0。 */
+    public int reactStep() {
+        return intOf(value(REACT_STEP).orElse(0), 0);
+    }
+
+    /** ReAct 当前计划动作：只接受 Map，类型漂移时返回空 Map。 */
+    public Map<String, Object> reactAction() {
+        Object v = value(REACT_ACTION).orElse(null);
+        if (!(v instanceof Map<?, ?> m)) {
+            return Map.of();
+        }
+        Map<String, Object> result = new LinkedHashMap<>(m.size());
+        m.forEach((key, val) -> result.put(String.valueOf(key), val));
+        return result;
+    }
+
+    /** ReAct 观察历史；每项是一次工具执行的结构化摘要。 */
+    public List<Map<String, Object>> reactHistory() {
+        return mapList(REACT_HISTORY);
+    }
+
+    /** ReAct 是否已停止循环。 */
+    public boolean reactDone() {
+        return Boolean.parseBoolean(String.valueOf(value(REACT_DONE).orElse(false)));
+    }
+
+    /** ReAct 停止原因；缺省空串。 */
+    public String reactStopReason() {
+        return value(REACT_STOP_REASON, "");
     }
 
     /** 通用字符串列表读取：容忍 checkpoint 反序列化后的类型漂移 */

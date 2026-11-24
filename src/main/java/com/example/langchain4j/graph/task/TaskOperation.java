@@ -1,7 +1,7 @@
 package com.example.langchain4j.graph.task;
 
 /**
- * 任务操作类型：固定链路只执行 READ 和 WRITE，REACT 作为后续自由工具循环的扩展位保留。
+ * 任务操作类型：固定链路执行 READ 和 WRITE，REACT 走受控只读诊断分支。
  */
 public enum TaskOperation {
 
@@ -11,7 +11,7 @@ public enum TaskOperation {
     /** 写操作：必须经过人工确认并携带幂等键。 */
     WRITE,
 
-    /** 预留：ReAct 自由工具循环，当前版本不开放。 */
+    /** 受控 ReAct 只读诊断：只在白名单只读工具间循环，步数有上限。 */
     REACT;
 
     /** 解析模型输出；未知值返回 null，由调用方 fail-closed。 */

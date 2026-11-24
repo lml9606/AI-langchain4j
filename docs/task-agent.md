@@ -1,7 +1,8 @@
-# 固定读写任务 Agent
+# 固定读写 + 受控 ReAct Agent
 
-任务链路采用固定工作流，不由模型自由选择工具：模型只判断“查询还是修改”并抽取参数，
-工具名、权限、确认和幂等由代码控制。该模式适合边界明确、需要稳定执行记录的业务操作。
+任务链路以固定工作流为主：模型只判断“查询、修改还是多步诊断”并抽取参数，
+工具名、权限、确认和幂等由代码控制。固定查询与写操作保持确定性；
+只有明确需要多步只读诊断时才进入白名单 ReAct 循环。
 
 ## 1. 能力边界
 
@@ -17,9 +18,9 @@
 | 幂等 | 单写操作的 `confirmationId` 同时作为台账主键和幂等键 |
 | 证据回答 | 工具 `ToolEvidence` 透出 `citations`，回答节点生成 `toolTrace` 与置信度；完整查询明细由 `businessData` 透出 |
 | 输出安全 | 复用 `OutputGuardService` 敏感词门禁 |
-| 扩展位 | `TaskOperation.REACT` 已预留，当前不开放自由工具循环 |
+| 多步只读诊断 | `REACT` 进入受控 `react_plan → react_tool` 循环，只允许白名单只读工具，最多 5 步 |
 
-不做：SSE、任意 SQL、模型自由选工具、多步计划、批量确认、任务租约恢复。
+不做：SSE、任意 SQL、写工具进入 ReAct、批量确认、任务租约恢复。
 
 ## 2. 链路
 
@@ -29,7 +30,9 @@ START → entry → intent_plan ──task──→ task_resolve ──失败─
                                            ├─READ──→ task_read ──需要关联额度──→ task_read_quota
                                            │             ├──需要关联交易──→ task_read_transaction
                                            │             └──────────────→ task_answer → finalize → END
-                                           └─WRITE─→ task_confirm → finalize → END
+                                           ├─WRITE─→ task_confirm → finalize → END
+                                           └─REACT─→ react_plan ⇄ react_tool
+                                                         └─final/停止──→ task_answer → finalize → END
 
 用户确认后直接执行（不重新分类、不重新抽参）：
 task_write(approved=true, idempotencyKey=confirmationId) → task_answer → finalize
@@ -47,12 +50,32 @@ task_write(approved=true, idempotencyKey=confirmationId) → task_answer → fin
 | WRITE | `complete_demo_record` | `recordId` / `title` | 标记演示记录完成，必须人工确认 |
 | KNOWLEDGE | `search_knowledge` | `query`, `topK` | 知识问答工具，不属于固定读写任务 |
 
+### ReAct 只读诊断
+
+`REACT` 只用于固定节点无法覆盖的多步只读诊断，例如“先查报名，再查关联额度，再核对交易，
+解释额度为什么不对”。它不是通用自由工具循环，约束如下：
+
+| 约束 | 实现 |
+| --- | --- |
+| 工具白名单 | `ReactToolCatalog` 只暴露 `query_enrollment`、`query_quota`、`query_transaction`、`search_knowledge` |
+| 只读边界 | 写工具不进入目录；`ReactPlanNode` 和执行节点各校验一次副作用 |
+| 执行门禁 | `ReactToolNode` 必须经过 `ToolExecutor`，复用权限、Schema、限流和超时 |
+| 用户隔离 | `ToolContext.userId` 来自会话；领域 Service 的 SQL 仍强制带 `user_id` |
+| 步数上限 | `agent.react.max-steps`，默认 5；达到上限停止并回答 |
+| 重复调用 | 同工具同参数（对象字段排序后）再次出现时立即停止 |
+| 停止条件 | `final`、无数据、致命工具错误、重复调用、步数耗尽 |
+| 可观测 | `taskTrace`/`taskEvidence`/`businessData` 与普通任务共用；`REACT_HISTORY` 记录每步观察 |
+
+规划输出只保存一句 `reason`，不保存完整思维链。模型输出非法 JSON、越权工具或非对象参数时
+按停止处理，由 `task_answer` 基于已有证据回答，避免格式错误升级为整轮失败。
+
 权限校验顺序：
 
 ```text
 TaskResolveNode → 只做读写判断与参数抽取
 只读查询       → 节点直接调用领域 Service，由 SQL 的 user_id 条件做数据隔离
-ToolExecutor  → 只用于写工具和外部工具：注册表 + 角色 + 写确认 + 幂等键 + JSON Schema + 限流 + 超时
+ReAct 只读工具 → ReactToolCatalog 白名单 + ToolExecutor：注册表 + 角色 + JSON Schema + 限流 + 超时
+写工具         → ToolExecutor：注册表 + 角色 + 写开关 + 确认 + 幂等键 + JSON Schema + 限流 + 超时
 ```
 
 模型输出只能作为参数候选；即使 prompt injection 让模型输出其他工具名，固定节点也不会使用。
@@ -118,6 +141,8 @@ agent.tool.write-enabled=false
 agent.tool.confirmation.ttl-seconds=300
 agent.tool.timeout-ms=3000
 agent.tool.max-calls-per-minute=20
+agent.react.enabled=true
+agent.react.max-steps=5
 ```
 
 工具策略以 `ToolDefinition` 为唯一事实源；配置文件只保留全局应急开关和默认预算。
@@ -127,8 +152,9 @@ agent.tool.max-calls-per-minute=20
 
 ```text
 src/main/java/com/example/langchain4j
-├── graph/task/TaskOperation.java       READ/WRITE/REACT 扩展位
-├── graph/task/TaskTools.java           固定读写工具名
+├── graph/task/TaskOperation.java       READ/WRITE/REACT 操作类型
+├── graph/task/ReactToolCatalog.java    ReAct 只读工具白名单
+├── graph/task/TaskTools.java           固定读写与 ReAct 只读工具名
 ├── graph/task/nodes/                   路由、抽参、读、确认、写、回答节点
 ├── graph/qa/nodes/                     知识问答主图节点
 ├── graph/common/nodes/                 收尾节点

@@ -2,6 +2,7 @@ package com.example.langchain4j.graph.task.nodes;
 
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.util.JsonUtil;
+import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.dto.request.LlmRequest;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.graph.task.TaskOperation;
@@ -21,7 +22,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 任务解析节点：一次模型调用完成“判断读写、选择只读目标表、抽取参数”。
+ * 任务解析节点：一次模型调用完成“判断固定读写 / 受控只读诊断、选择只读目标表、抽取参数”。
  *
  * 本节点只产出业务动作候选，不执行工具，也不校验真实业务权限、状态或工具策略。
  * 真实执行约束由固定执行节点、工具执行器和领域服务负责。
@@ -32,10 +33,13 @@ public class TaskResolveNode implements NodeAction<WorkflowState> {
 
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
+    private final AgentProperties properties;
 
-    public TaskResolveNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService) {
+    public TaskResolveNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService,
+                           AgentProperties properties) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
+        this.properties = properties;
     }
 
     /**
@@ -59,17 +63,19 @@ public class TaskResolveNode implements NodeAction<WorkflowState> {
             }
 
             TaskOperation operation = TaskOperation.parse(node.path("operation").asText(""));
-            if (operation == TaskOperation.REACT) {
-                log.warn("[task-resolve] react reserved but disabled, queryLength={}",
-                        state.effectiveQuery().length());
-                return error("当前暂不支持自由工具调用，请明确说明要查询报名、额度、交易还是执行修改");
-            }
             if (operation == null) {
                 return error("无法判断是查询还是修改，请明确说明要做什么");
             }
+            if (operation == TaskOperation.REACT && !properties.getReact().isEnabled()) {
+                log.warn("[task-resolve] react disabled, queryLength={}",
+                        state.effectiveQuery().length());
+                return error("当前未启用多步诊断，请明确说明要查询报名、额度、交易还是执行修改");
+            }
 
-            Map<String, Object> args = parseArgs(node.get("args"));
-            List<String> missing = parseMissing(node.get("missing"));
+            Map<String, Object> args = operation == TaskOperation.REACT
+                    ? Map.of() : parseArgs(node.get("args"));
+            List<String> missing = operation == TaskOperation.REACT
+                    ? List.of() : parseMissing(node.get("missing"));
             TaskReadTarget readTarget = operation == TaskOperation.READ
                     ? TaskReadTarget.parse(node.path("readTarget").asText("")) : null;
             boolean includeTransactions = operation == TaskOperation.READ

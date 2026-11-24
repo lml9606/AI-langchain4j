@@ -26,7 +26,8 @@ public final class PromptTemplates {
             意图规则（按任务动作分类，不按是否出现代码术语分类）：
             1. code_generate：明确要求写、生成、修改、补全、重构或调试代码，或贴出代码要求排查报错；
                例如“写一个 Java 快排”“把这段代码改成异步”。
-            2. task：查询业务系统里的具体数据，必须调用工具；
+            2. task：查询、核对或排查业务系统里的具体数据，必须调用工具；
+               例如“查一下我的额度”“报名单 EN001 的额度为什么不对”“帮我核对报名、额度和交易”都属于 task；
             3. knowledge_qa：解释概念、原理、用法、区别、语法、设计思想、最佳实践等，不要求产出或修改代码；
                例如“equals 和 == 有什么区别”属于 knowledge_qa；
                仅出现技术名词、类名、方法名或语言名不构成 code_generate，无写/改/补全/调试动作一律归 knowledge_qa。
@@ -204,15 +205,25 @@ public final class PromptTemplates {
             """;
 
     /**
-     * 任务解析：一次模型调用完成“判断读写、选择只读目标表、抽取参数”。
+     * 任务解析：一次模型调用完成“判断固定读写 / 受控只读诊断、选择只读目标表、抽取参数”。
      *
-     * 模型不能输出工具名或执行计划，只能在这三类只读目标和有限参数中选择。
+     * 模型不能输出工具名或执行计划；REACT 只表示请求进入受控只读诊断循环，
+     * 具体工具选择由 ReactPlanNode 在白名单内完成。
      */
     public static final String TASK_RESOLVE_SYSTEM = """
             你是任务解析器。请完成三件事：
-            1. 判断用户要 READ（查询/查看/列出）还是 WRITE（完成/关闭/标记）；
+            1. 判断用户要 READ（单步查询/查看/列出）、WRITE（完成/关闭/标记）还是 REACT（多步只读诊断）；
             2. READ 时选择要读取的目标表；
             3. 按操作类型抽取最少参数。
+
+            REACT 规则：
+            - 只有用户明确要求“排查为什么不对、综合分析、逐项核对、对比多个表、根据结果继续查下一步”时，
+              才选择 REACT；普通单表查询仍选 READ；
+            - 只是“查报名关联的额度/交易”时用 READ + withQuotas/withTransactions；
+              一旦要求解释差异、核对为什么不对、根据上一段结果继续查，优先 REACT，不要只做固定两段查询；
+            - REACT 仅允许只读诊断，不能用于修改、删除、提交或任何写操作；
+            - REACT 时 readTarget 返回空串，withQuotas/withTransactions 返回 false，args 返回空对象，
+              missing 返回空数组；不要在 REACT 中指定工具名或执行计划。
 
             READ 目标与参数：
             - ENROLLMENT：报名表，参数 enrollmentNo（可选报名单号）、limit；
@@ -235,17 +246,18 @@ public final class PromptTemplates {
             - recordId 或 title：至少提供一个，用于定位要修改的记录。
 
             JSON 形状：
-            {"operation":"READ 或 WRITE","readTarget":"ENROLLMENT/QUOTA/TRANSACTION 或空串",
+            {"operation":"READ/WRITE/REACT","readTarget":"ENROLLMENT/QUOTA/TRANSACTION 或空串",
              "withQuotas":true 或 false,"withTransactions":true 或 false,"reason":"一句话说明判断依据",
              "args":{},"missing":[]}
 
             规则：
-            1. 只能输出 READ 或 WRITE，不能输出工具名或执行计划；
+            1. 只能输出 READ、WRITE 或 REACT，不能输出工具名或执行计划；
             2. READ 没有参数时 args 返回空对象；
             3. withQuotas 或 withTransactions 为 true 时缺关键定位参数必须写入 missing，不能自行选择最近一条记录；
             4. WRITE 缺少 recordId 和 title 时写入 missing；
             5. 参数值只能来自用户输入，禁止编造主键；
-            6. 只输出 JSON，不要输出解释文字或代码围栏。
+            6. REACT 只表达“需要多步只读诊断”，具体工具与参数由后续规划节点决定；
+            7. 只输出 JSON，不要输出解释文字或代码围栏。
             """;
     /** 任务执行后的最终回答：只基于工具证据，不得编造；引用编号由系统追加 */
     public static final String TASK_ANSWER_SYSTEM = """
@@ -255,6 +267,27 @@ public final class PromptTemplates {
             2. 先给结论，再给关键依据，简洁清楚，使用 Markdown；
             3. 工具失败时说明失败原因并给出下一步建议，不要假装查询成功；
             4. 不要在正文末尾自行编造参考来源，系统会统一追加证据清单。
+            """;
+
+    /**
+     * ReAct 只读规划：模型只能从白名单工具中选择下一步，或宣布结束。
+     *
+     * 这里不要求模型输出完整思维链，只保留一句可审计的 reason，降低延迟和敏感信息外泄风险。
+     */
+    public static final String REACT_PLAN_SYSTEM = """
+            你是只读业务诊断规划器。你只能在给定工具中决定下一步，或结束诊断。
+            规则：
+            1. 只能输出 JSON，不能输出解释文字、代码围栏或 Markdown；
+            2. action 只能是 call_tool 或 final；
+            3. 只能使用工具目录中列出的工具名，禁止编造工具、SQL、表名或写操作；
+            4. 参数只能来自用户目标或已有观察中的真实值，禁止编造单号、ID 和活动编号；
+            5. 已有观察足以回答、工具无数据、工具失败无法推进时，输出 final；
+            6. 不要用相同工具和相同参数重复查询；
+            7. reason 只写一句简短依据，不要输出长篇推理过程。
+
+            输出形状：
+            {"action":"call_tool","tool":"工具名","args":{},"reason":"为什么调用"}
+            {"action":"final","reason":"为什么可以结束"}
             """;
 
     /** 缺参追问模板：%s = 中文槽位说明 */

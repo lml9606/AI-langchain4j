@@ -49,22 +49,23 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
     public Map<String, Object> apply(WorkflowState state) {
         List<Map<String, Object>> evidence = state.taskEvidence();
         List<Map<String, Object>> trace = state.taskTrace();
+        String stopReason = state.reactStopReason();
         String answer;
         Integer tokenUsage = null;
         try {
             // 步骤1：优先让模型基于证据组织自然语言回答
             LlmResult result = llmGateway.generate(LlmRequest.of(state.model(),
                     promptTemplateService.resolve("TASK_ANSWER_SYSTEM", PromptTemplates.TASK_ANSWER_SYSTEM),
-                    buildUserPrompt(state, evidence, trace)).scene("task-answer"));
+                    buildUserPrompt(state, evidence, trace, stopReason)).scene("task-answer"));
             answer = result.text();
             tokenUsage = result.tokenUsage();
         } catch (BizException e) {
             // 步骤2：模型不可用时降级为确定性摘要，保证任务轮仍有可读结果
             log.warn("[task-answer] llm failed, use deterministic summary: {}", e.getMessage());
-            answer = deterministicAnswer(trace, evidence);
+            answer = deterministicAnswer(trace, evidence, stopReason);
         } catch (Exception e) {
             log.error("[task-answer] unexpected error, use deterministic summary", e);
-            answer = deterministicAnswer(trace, evidence);
+            answer = deterministicAnswer(trace, evidence, stopReason);
         }
         // 步骤3：输出侧安全审核（与主生成同一套敏感词门禁）
         if (outputGuardService.blocked(answer)) {
@@ -86,8 +87,8 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
         if (tokenUsage != null) {
             updates.put(WorkflowState.TOKEN_USAGE, tokenUsage);
         }
-        log.info("[task-answer] evidence={}, calls={}, confidence={}, resultLength={}, tokenUsage={}",
-                evidence.size(), trace.size(), confidence,
+        log.info("[task-answer] evidence={}, calls={}, confidence={}, stopReason={}, resultLength={}, tokenUsage={}",
+                evidence.size(), trace.size(), confidence, stopReason,
                 answer == null ? 0 : answer.length(), tokenUsage);
         return updates;
     }
@@ -95,7 +96,8 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
     /** 拼装用户问题、工具轨迹和证据清单，供回答模型参考。 */
     private String buildUserPrompt(WorkflowState state,
                                    List<Map<String, Object>> evidence,
-                                   List<Map<String, Object>> trace) {
+                                   List<Map<String, Object>> trace,
+                                   String stopReason) {
         StringBuilder builder = new StringBuilder();
         builder.append("用户问题：\n").append(state.effectiveQuery()).append("\n\n");
         builder.append("工具执行轨迹：\n");
@@ -129,13 +131,17 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
                         .append('\n');
             }
         }
+        if (stopReason != null && !stopReason.isBlank()) {
+            builder.append("\n诊断停止原因：").append(stopReason).append('\n');
+        }
         builder.append("\n请只基于以上证据回答，不要编造。");
         return builder.toString();
     }
 
     /** 模型不可用时的确定性答复：直接汇总工具结果，不编造 */
     private String deterministicAnswer(List<Map<String, Object>> trace,
-                                       List<Map<String, Object>> evidence) {
+                                       List<Map<String, Object>> evidence,
+                                       String stopReason) {
         if (!evidence.isEmpty()) {
             return "已查询到相关业务数据，关键结果如下：\n\n"
                     + Texts.truncate(String.valueOf(evidence.get(0).get("snippet")), maxSnippet());
@@ -143,6 +149,9 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
         if (!trace.isEmpty()) {
             return "本次查询未返回有效数据。\n\n"
                     + Texts.truncate(String.valueOf(trace.get(0).get("summary")), maxSnippet());
+        }
+        if (stopReason != null && !stopReason.isBlank()) {
+            return "本轮未能执行查询：" + stopReason + "。请补充更明确的查询条件后重试。";
         }
         return "未查询到相关业务数据，请确认查询条件或稍后重试。";
     }

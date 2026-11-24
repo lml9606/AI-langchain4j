@@ -15,6 +15,7 @@ import com.example.langchain4j.dto.response.BusinessResult;
 import com.example.langchain4j.dto.response.ChatResponse;
 import com.example.langchain4j.graph.qa.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
+import com.example.langchain4j.graph.task.TaskOperation;
 import com.example.langchain4j.guard.RateLimiter;
 import com.example.langchain4j.guard.SessionLock;
 import com.example.langchain4j.llm.ModelRegistry;
@@ -345,6 +346,22 @@ public class AgentService {
      * 台账转业务结果：成功、无台账、执行中、失败分别给出可消费的状态。
      */
     private BusinessResult taskBusinessResult(WorkflowState state) {
+        // ReAct 是只读诊断：个别工具失败但后续或其它工具成功时，整体业务动作仍算完成。
+        if (TaskOperation.parse(state.taskOperation()) == TaskOperation.REACT) {
+            List<Map<String, Object>> trace = state.taskTrace();
+            if (trace.isEmpty()) {
+                return BusinessResult.ok();
+            }
+            for (Map<String, Object> item : trace) {
+                if (Boolean.parseBoolean(String.valueOf(item.get("success")))) {
+                    return BusinessResult.ok();
+                }
+            }
+            Map<String, Object> first = trace.get(0);
+            return BusinessResult.failure(
+                    Texts.textOr(first.get("errorCode"), "TASK_FAILED"),
+                    Texts.textOr(first.get("summary"), "任务执行失败"));
+        }
         for (Map<String, Object> item : state.taskTrace()) {
             if (!Boolean.parseBoolean(String.valueOf(item.get("success")))) {
                 return BusinessResult.failure(

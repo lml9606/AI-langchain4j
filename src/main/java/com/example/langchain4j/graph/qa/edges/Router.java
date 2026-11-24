@@ -46,6 +46,10 @@ public class Router {
     public static final String TO_TASK_READ_QUOTA = "to_task_read_quota";
     /** 任务回答节点 */
     public static final String TO_TASK_ANSWER = "to_task_answer";
+    /** 任务为受控只读诊断 → ReAct 规划节点 */
+    public static final String TO_REACT_PLAN = "to_react_plan";
+    /** ReAct 规划决定调用工具 → ReAct 工具执行节点 */
+    public static final String TO_REACT_TOOL = "to_react_tool";
 
     private final AgentProperties properties;
 
@@ -117,7 +121,8 @@ public class Router {
 
     /**
      * 任务解析后：缺参 → 直接收尾(追问)；失败 → 兜底；
-     * READ → 只读节点；WRITE → 确认节点，绝不直接进入写节点。
+     * READ → 固定只读节点；WRITE → 确认节点，绝不直接进入写节点；
+     * REACT → 受控只读诊断循环，只能访问白名单只读工具。
      */
     public EdgeAction<WorkflowState> afterTaskResolve() {
         return state -> {
@@ -134,7 +139,38 @@ public class Router {
             if (operation == TaskOperation.WRITE) {
                 return route("task-resolve", state, TO_TASK_CONFIRM);
             }
+            if (operation == TaskOperation.REACT) {
+                return route("task-resolve", state, TO_REACT_PLAN);
+            }
             return route("task-resolve", state, TO_FALLBACK);
+        };
+    }
+
+    /** ReAct 规划后：错误 → 兜底；已结束 → 回答；有工具动作 → 执行工具。 */
+    public EdgeAction<WorkflowState> afterReactPlan() {
+        return state -> {
+            if (state.error() != null && !state.error().isBlank()) {
+                return route("react-plan", state, TO_FALLBACK);
+            }
+            if (state.reactDone()) {
+                return route("react-plan", state, TO_TASK_ANSWER);
+            }
+            Object action = state.reactAction().get("action");
+            if ("call_tool".equals(action == null ? "" : String.valueOf(action))) {
+                return route("react-plan", state, TO_REACT_TOOL);
+            }
+            return route("react-plan", state, TO_TASK_ANSWER);
+        };
+    }
+
+    /** ReAct 工具执行后：错误 → 兜底；停止 → 回答；否则继续规划下一步。 */
+    public EdgeAction<WorkflowState> afterReactTool() {
+        return state -> {
+            if (state.error() != null && !state.error().isBlank()) {
+                return route("react-tool", state, TO_FALLBACK);
+            }
+            return route("react-tool", state,
+                    state.reactDone() ? TO_TASK_ANSWER : TO_REACT_PLAN);
         };
     }
 
