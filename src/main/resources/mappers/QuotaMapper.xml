@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.QuotaMapper">
+
+    <resultMap id="QuotaMap" type="com.example.langchain4j.repository.entity.Quota">
+        <id property="id" column="id"/>
+        <result property="activityNo" column="activity_no"/>
+        <result property="userId" column="user_id"/>
+        <result property="month" column="month"/>
+        <result property="quotaType" column="quota_type"/>
+        <result property="totalAmount" column="total_amount"/>
+        <result property="usedAmount" column="used_amount"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <sql id="QuotaColumns">
+        id, activity_no, user_id, month, quota_type, total_amount, used_amount,
+        created_at, updated_at
+    </sql>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.Quota"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO quota
+            (activity_no, user_id, month, quota_type, total_amount, used_amount)
+        VALUES
+            (#{activityNo}, #{userId}, #{month}, #{quotaType}, #{totalAmount}, #{usedAmount})
+    </insert>
+
+    <select id="selectById" resultMap="QuotaMap">
+        SELECT <include refid="QuotaColumns"/>
+        FROM quota
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </select>
+
+    <select id="selectByUserId" resultMap="QuotaMap">
+        SELECT <include refid="QuotaColumns"/>
+        FROM quota
+        WHERE user_id = #{userId}
+        ORDER BY created_at DESC, id DESC
+        LIMIT #{limit}
+    </select>
+
+    <update id="update" parameterType="com.example.langchain4j.repository.entity.Quota">
+        UPDATE quota
+        SET activity_no  = #{activityNo},
+            month        = #{month},
+            quota_type   = #{quotaType},
+            total_amount = #{totalAmount},
+            used_amount  = #{usedAmount},
+            updated_at   = now()
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </update>
+
+    <delete id="delete">
+        DELETE FROM quota
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </delete>
+
+</mapper>

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.QuotaTransactionMapper">
+
+    <resultMap id="QuotaTransactionMap" type="com.example.langchain4j.repository.entity.QuotaTransaction">
+        <id property="id" column="id"/>
+        <result property="transactionNo" column="transaction_no"/>
+        <result property="userId" column="user_id"/>
+        <result property="quotaId" column="quota_id"/>
+        <result property="enrollmentId" column="enrollment_id"/>
+        <result property="transactionType" column="transaction_type"/>
+        <result property="amount" column="amount"/>
+        <result property="remark" column="remark"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <sql id="TransactionColumns">
+        id, transaction_no, user_id, quota_id, enrollment_id, transaction_type,
+        amount, remark, created_at, updated_at
+    </sql>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.QuotaTransaction"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO quota_transaction
+            (transaction_no, user_id, quota_id, enrollment_id, transaction_type,
+             amount, remark)
+        VALUES
+            (#{transactionNo}, #{userId}, #{quotaId}, #{enrollmentId}, #{transactionType},
+             #{amount}, #{remark})
+    </insert>
+
+    <select id="selectById" resultMap="QuotaTransactionMap">
+        SELECT <include refid="TransactionColumns"/>
+        FROM quota_transaction
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </select>
+
+    <select id="selectByUserId" resultMap="QuotaTransactionMap">
+        SELECT <include refid="TransactionColumns"/>
+        FROM quota_transaction
+        WHERE user_id = #{userId}
+        <if test="quotaId != null">
+            AND quota_id = #{quotaId}
+        </if>
+        ORDER BY created_at DESC, id DESC
+        LIMIT #{limit}
+    </select>
+
+    <update id="update" parameterType="com.example.langchain4j.repository.entity.QuotaTransaction">
+        UPDATE quota_transaction
+        SET quota_id         = #{quotaId},
+            enrollment_id    = #{enrollmentId},
+            transaction_type = #{transactionType},
+            amount           = #{amount},
+            remark           = #{remark},
+            updated_at       = now()
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </update>
+
+    <delete id="delete">
+        DELETE FROM quota_transaction
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </delete>
+
+</mapper>

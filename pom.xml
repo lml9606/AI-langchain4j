@@ -102,12 +102,6 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
-        <!-- Spring AOP：@AuditStep programmatic advisor，统一记录公开业务步骤的执行审计；
-             不引 aspectjweaver，避免为一个注解切面增加额外运行时依赖 -->
-        <dependency>
-            <groupId>org.springframework</groupId>
-            <artifactId>spring-aop</artifactId>
-        </dependency>
         <!-- JDBC 层：HikariCP 连接池 + DataSource（业务数据源与 PostgresSaver checkpoint 共用同一连接池） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

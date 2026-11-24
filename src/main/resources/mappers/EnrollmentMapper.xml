@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.repository.mapper.EnrollmentMapper">
+
+    <resultMap id="EnrollmentMap" type="com.example.langchain4j.repository.entity.Enrollment">
+        <id property="id" column="id"/>
+        <result property="enrollmentNo" column="enrollment_no"/>
+        <result property="userId" column="user_id"/>
+        <result property="applicantName" column="applicant_name"/>
+        <result property="phone" column="phone"/>
+        <result property="amount" column="amount"/>
+        <result property="remark" column="remark"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <sql id="EnrollmentColumns">
+        id, enrollment_no, user_id, applicant_name, phone, amount,
+        remark, created_at, updated_at
+    </sql>
+
+    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.Enrollment"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO enrollment
+            (enrollment_no, user_id, applicant_name, phone, amount, remark)
+        VALUES
+            (#{enrollmentNo}, #{userId}, #{applicantName}, #{phone}, #{amount}, #{remark})
+    </insert>
+
+    <select id="selectById" resultMap="EnrollmentMap">
+        SELECT <include refid="EnrollmentColumns"/>
+        FROM enrollment
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </select>
+
+    <select id="selectByUserId" resultMap="EnrollmentMap">
+        SELECT <include refid="EnrollmentColumns"/>
+        FROM enrollment
+        WHERE user_id = #{userId}
+        ORDER BY created_at DESC, id DESC
+        LIMIT #{limit}
+    </select>
+
+    <update id="update" parameterType="com.example.langchain4j.repository.entity.Enrollment">
+        UPDATE enrollment
+        SET applicant_name = #{applicantName},
+            phone          = #{phone},
+            amount         = #{amount},
+            remark         = #{remark},
+            updated_at     = now()
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </update>
+
+    <delete id="delete">
+        DELETE FROM enrollment
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </delete>
+
+</mapper>

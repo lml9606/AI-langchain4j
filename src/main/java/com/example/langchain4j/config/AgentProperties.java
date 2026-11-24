@@ -116,10 +116,6 @@ public class AgentProperties {
         private int defaultTicketLimit = 50;
         /** 工单列表最大返回条数 */
         private int maxTicketLimit = 200;
-        /** 审计载荷 JSON 最大长度（字符） */
-        private int auditJsonMaxLength = 4000;
-        /** 单个审计节点值最大长度（字符） */
-        private int auditNodeValueMaxLength = 400;
     }
 
     @Data
