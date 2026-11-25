@@ -1,7 +1,8 @@
 package com.example.langchain4j.llm;
 
 import com.example.langchain4j.common.util.JsonUtil;
-import com.example.langchain4j.dto.request.LlmRequest;
+import com.example.langchain4j.llm.model.LlmRequest;
+import com.example.langchain4j.llm.model.LlmResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.langchain4j.model.chat.request.ResponseFormat;
 import lombok.extern.slf4j.Slf4j;

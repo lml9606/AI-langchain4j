@@ -1,10 +1,10 @@
 package com.example.langchain4j.tool.runtime;
 
 import com.example.langchain4j.common.util.JsonUtil;
-import com.example.langchain4j.repository.entity.ToolExecution;
-import com.example.langchain4j.service.ToolExecutionService;
-import com.example.langchain4j.tool.api.ToolContext;
-import com.example.langchain4j.tool.api.ToolResult;
+import com.example.langchain4j.tool.api.model.ToolContext;
+import com.example.langchain4j.tool.api.model.ToolResult;
+import com.example.langchain4j.tool.execution.ToolExecution;
+import com.example.langchain4j.tool.execution.ToolExecutionService;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -13,9 +13,9 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.concurrent.Callable;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.concurrent.Callable;
 
 /**
  * 写工具执行模板：幂等台账与业务写入共用一个事务。

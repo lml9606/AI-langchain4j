@@ -1,16 +1,18 @@
 package com.example.langchain4j.tool.runtime;
 
-import com.example.langchain4j.common.auth.UserContext;
+import com.example.langchain4j.auth.security.UserContext;
 import com.example.langchain4j.common.concurrent.BoundedCall;
 import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.common.util.Throwables;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.guard.RateLimiter;
-import com.example.langchain4j.tool.api.ToolContext;
-import com.example.langchain4j.tool.api.ToolDefinition;
-import com.example.langchain4j.tool.api.ToolResult;
-import com.example.langchain4j.tool.api.ToolSideEffect;
+import com.example.langchain4j.tool.api.constant.ToolErrorCode;
+import com.example.langchain4j.tool.api.model.ToolContext;
+import com.example.langchain4j.tool.api.model.ToolDefinition;
+import com.example.langchain4j.tool.api.model.ToolResult;
+import com.example.langchain4j.tool.api.model.ToolSideEffect;
+import com.example.langchain4j.tool.execution.ToolExecutionRecorder;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;

@@ -96,7 +96,7 @@ ReAct 只读工具 → ReactToolCatalog 白名单 + ToolExecutor：注册表 + �
 1. 只读任务：在领域 Service 增加查询方法，扩展 `TaskReadTarget` 和 `TaskReadNode`；
 2. 只读任务：在 `AgentGraphBuilder` 增加目标路由或执行节点；
 3. 写任务：实现 `AgentTool` 并注册为 Spring Bean；
-4. 写任务：在 `TaskTools` 增加固定写工具名；
+4. 写任务：在 `ToolNames` 增加固定写工具名；
 5. 写操作必须经过确认节点，并在执行节点校验 `approved` 与幂等键。
 
 如果任务需要“先查询拿 ID，再修改”，在图上拆成只读节点 → 写节点，不把两个动作塞进一个模型计划。
@@ -143,6 +143,8 @@ agent.tool.timeout-ms=3000
 agent.tool.max-calls-per-minute=20
 agent.react.enabled=true
 agent.react.max-steps=5
+agent.react.reason-max-length=160
+agent.react.plan-max-output-tokens=512
 ```
 
 工具策略以 `ToolDefinition` 为唯一事实源；配置文件只保留全局应急开关和默认预算。
@@ -152,14 +154,34 @@ agent.react.max-steps=5
 
 ```text
 src/main/java/com/example/langchain4j
-├── graph/task/TaskOperation.java       READ/WRITE/REACT 操作类型
-├── graph/task/ReactToolCatalog.java    ReAct 只读工具白名单
-├── graph/task/TaskTools.java           固定读写与 ReAct 只读工具名
+├── agent/                              聊天接入、Agent 编排服务与聊天 DTO
+├── auth/                               认证、用户、JWT、角色与安全过滤器
+├── conversation/                       会话、消息、摘要、话题段与查询改写
+├── prompt/                             Prompt 管理接口、配置与默认模板
+├── sensitive/                          敏感词管理
+├── business/enrollment/                报名域：Controller、Service、Mapper、Entity、Request
+├── business/quota/                     额度域：Controller、Service、Mapper、Entity、Request
+├── business/transaction/               交易域：Controller、Service、Mapper、Entity、Request
+├── business/ticket/                    工单域：Controller、Service、Mapper、Entity、Request
+├── graph/builder/AgentGraphBuilder.java 主图构建入口
+├── graph/constant/GraphNodes.java      主图节点 ID 的唯一来源
+├── graph/task/model/TaskOperation.java READ/WRITE/REACT 操作类型
 ├── graph/task/nodes/                   路由、抽参、读、确认、写、回答节点
+├── graph/task/react/                   ReAct 协议、动作解析与只读工具白名单
+├── graph/task/support/                 只读结果、轨迹和证据转换
 ├── graph/qa/nodes/                     知识问答主图节点
 ├── graph/common/nodes/                 收尾节点
-├── service/TaskConfirmService.java     确认后写节点 → 回答 → 收尾
-├── tool/api/                           工具契约
-├── tool/runtime/                       注册表、执行器、确认令牌、写执行模板
+├── knowledge/                          知识库模块
+│   ├── controller/ service/ entity/ mapper/ typehandler/
+│   └── dto/ embedding/ model/ parser/ retrieval/
+├── tool/api/                           工具对外契约
+│   ├── contract/                       AgentTool 接口
+│   ├── model/                          ToolContext / ToolDefinition / ToolResult / ToolEvidence / ToolSideEffect
+│   └── constant/                       ToolNames / ToolErrorCode
+├── tool/controller/                    工具管理接口
+├── tool/demo/                          工具演示域：Controller、Service、Entity、Mapper、演示工具
+├── tool/runtime/                       注册表、执行器、权限、写执行模板
+├── tool/execution/                     工具执行台账、Mapper、Entity 与指标记录
+├── tool/confirmation/                  确认令牌、取消和确认后执行编排
 └── tool/provider/                      内置工具实现
 ```

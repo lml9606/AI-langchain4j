@@ -2,11 +2,11 @@ package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.common.constant.ChatOptions;
 import com.example.langchain4j.config.AgentProperties;
-import com.example.langchain4j.graph.qa.EvidenceAssessor;
-import com.example.langchain4j.graph.qa.QaIntent;
+import com.example.langchain4j.graph.qa.model.QaIntent;
+import com.example.langchain4j.graph.qa.support.EvidenceAssessor;
 import com.example.langchain4j.graph.state.WorkflowState;
-import com.example.langchain4j.knowledge.KnowledgeRetrievalResult;
-import com.example.langchain4j.knowledge.VectorSearchService;
+import com.example.langchain4j.knowledge.model.KnowledgeRetrievalResult;
+import com.example.langchain4j.knowledge.retrieval.VectorSearchService;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Component;

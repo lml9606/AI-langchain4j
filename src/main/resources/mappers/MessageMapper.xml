@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.example.langchain4j.repository.mapper.MessageMapper">
+<mapper namespace="com.example.langchain4j.conversation.MessageMapper">
 
-    <resultMap id="MessageMap" type="com.example.langchain4j.repository.entity.Message">
+    <resultMap id="MessageMap" type="com.example.langchain4j.conversation.Message">
         <id property="id" column="id"/>
         <result property="conversationId" column="conversation_id"/>
         <result property="role" column="role"/>
@@ -16,7 +16,7 @@
         <result property="createdAt" column="created_at"/>
     </resultMap>
 
-    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.Message"
+    <insert id="insert" parameterType="com.example.langchain4j.conversation.Message"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_message (conversation_id, role, content, model, token_usage, segment_id,
                                 context, dedupe_key)

@@ -1,18 +1,18 @@
 package com.example.langchain4j.config;
 
-import com.example.langchain4j.graph.AgentGraphBuilder;
+import com.example.langchain4j.graph.builder.AgentGraphBuilder;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.graph.state.WorkflowStateSerializer;
 import lombok.extern.slf4j.Slf4j;
-import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.checkpoint.BaseCheckpointSaver;
 import org.bsc.langgraph4j.checkpoint.MemorySaver;
 import org.bsc.langgraph4j.checkpoint.PostgresSaver;
+import org.bsc.langgraph4j.CompiledGraph;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import javax.sql.DataSource;
 import java.sql.SQLException;
+import javax.sql.DataSource;
 
 /**
  * 图与 Checkpoint 装配。

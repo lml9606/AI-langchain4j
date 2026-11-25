@@ -1,12 +1,12 @@
 package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.config.AgentProperties;
-import com.example.langchain4j.dto.request.LlmRequest;
-import com.example.langchain4j.graph.qa.QaIntent;
+import com.example.langchain4j.graph.qa.model.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.llm.LlmGateway;
-import com.example.langchain4j.llm.PromptTemplates;
-import com.example.langchain4j.service.PromptTemplateService;
+import com.example.langchain4j.llm.model.LlmRequest;
+import com.example.langchain4j.prompt.PromptTemplates;
+import com.example.langchain4j.prompt.PromptTemplateService;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;

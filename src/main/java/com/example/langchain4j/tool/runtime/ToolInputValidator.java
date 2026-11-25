@@ -1,7 +1,7 @@
 package com.example.langchain4j.tool.runtime;
 
 import com.example.langchain4j.common.util.JsonUtil;
-import com.example.langchain4j.tool.api.ToolDefinition;
+import com.example.langchain4j.tool.api.model.ToolDefinition;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 

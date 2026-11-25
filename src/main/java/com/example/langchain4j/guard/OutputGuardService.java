@@ -1,14 +1,14 @@
 package com.example.langchain4j.guard;
 
-import com.example.langchain4j.repository.entity.SensitiveWord;
-import com.example.langchain4j.repository.mapper.SensitiveWordMapper;
+import com.example.langchain4j.sensitive.SensitiveWord;
+import com.example.langchain4j.sensitive.SensitiveWordMapper;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
-import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.List;
 
 /**
  * 输出侧审核：生成答案命中敏感词即拦截，替换为统一拒答文案。

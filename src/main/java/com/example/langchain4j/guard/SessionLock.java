@@ -1,11 +1,12 @@
 package com.example.langchain4j.guard;
 
+import com.example.langchain4j.common.constant.RedisKeys;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.config.AgentProperties;
 import lombok.extern.slf4j.Slf4j;
-import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
+import org.redisson.api.RLock;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.TimeUnit;
@@ -26,7 +27,6 @@ import java.util.function.Supplier;
 @Component
 public class SessionLock {
 
-    private static final String KEY_PREFIX = "agent:lock:";
 
     private final RedissonClient redissonClient;
     private final long leaseSeconds;
@@ -45,7 +45,7 @@ public class SessionLock {
      * @return 任务返回值
      */
     public <T> T executeWithLock(String lockKey, Supplier<T> action) {
-        RLock lock = redissonClient.getLock(KEY_PREFIX + sanitize(lockKey));
+        RLock lock = redissonClient.getLock(RedisKeys.SESSION_LOCK_PREFIX + sanitize(lockKey));
         boolean locked = tryAcquire(lock);
         if (!locked) {
             log.warn("[session-lock] lock conflict, key={}", lock.getName());
@@ -68,7 +68,7 @@ public class SessionLock {
      * @return 任务返回值
      */
     public <T> T executeWithLockStrict(String lockKey, Supplier<T> action) {
-        RLock lock = redissonClient.getLock(KEY_PREFIX + sanitize(lockKey));
+        RLock lock = redissonClient.getLock(RedisKeys.SESSION_LOCK_PREFIX + sanitize(lockKey));
         boolean locked = tryAcquireStrict(lock);
         if (!locked) {
             log.warn("[session-lock] strict lock conflict, key={}", lock.getName());

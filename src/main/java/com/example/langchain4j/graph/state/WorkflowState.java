@@ -4,9 +4,11 @@ import com.example.langchain4j.common.constant.ChatOptions;
 import org.bsc.langgraph4j.state.AgentState;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * 工作流状态：LangGraph4j 图内共享的状态容器。
@@ -19,6 +21,14 @@ import java.util.Map;
 @SuppressWarnings({"removal"})
 public class WorkflowState extends AgentState {
 
+    /** 顶层领域状态：内部只保留这 6 个 key，具体字段收进对应领域 Map。 */
+    public static final String SESSION = "session";
+    public static final String INPUT = "input";
+    public static final String QA = "qa";
+    public static final String TASK = "task";
+    public static final String REACT = "react";
+    public static final String EXECUTION = "execution";
+
     // ---- 状态字段名常量：节点写入 Map 与访问器取值共用同一 key，避免字符串漂移 ----
     /** 用户原始输入（EntryNode 清洗后写入，作为全链路查询源头） */
     public static final String QUERY = "query";
@@ -28,6 +38,9 @@ public class WorkflowState extends AgentState {
     public static final String HISTORY = "history";
     /** 当前话题段摘要（服务层注入，生成节点拼入 system prompt 回忆窗口外的历史要点） */
     public static final String SUMMARY = "summary";
+
+    /** 用户级长期记忆（跨会话注入；空串表示本轮没有可用记忆） */
+    public static final String MEMORY = "memory";
     /** 本轮实际使用的模型名（入图时由服务层解析，节点调用 LLM 时按此路由） */
     public static final String MODEL = "model";
     /** 意图分类结果（IntentPlanNode 写入：code_generate/knowledge_qa/task/chitchat/reject） */
@@ -90,6 +103,9 @@ public class WorkflowState extends AgentState {
     public static final String TASK_RESOLVE_REASON = "taskResolveReason";
     /** 任务参数（TaskResolveNode 写入：模型根据用户请求抽取） */
     public static final String TASK_ARGS = "taskArgs";
+
+    /** 多步写计划：每步 {stepNo, tool, args, summary}；空列表表示单步/只读 */
+    public static final String TASK_PLAN = "taskPlan";
     /** 只读目标表（TaskResolveNode 写入：ENROLLMENT/QUOTA/TRANSACTION） */
     public static final String TASK_READ_TARGET = "taskReadTarget";
     /** 是否需要继续读取关联交易（TaskResolveNode 写入：报名/额度读取后是否再查交易表） */
@@ -141,6 +157,11 @@ public class WorkflowState extends AgentState {
     private static final String LEGACY_HOP_COUNT = "hopCount";
     private static final String LEGACY_PENDING_QUERY = "pendingQuery";
     private static final String LEGACY_HOP_SUFFICIENT = "hopSufficient";
+
+    /** 领域 -> 原平铺字段清单：用于旧状态迁移和新状态折叠。 */
+    private static final Map<String, List<String>> DOMAIN_FIELDS = domainFields();
+    /** 字段 -> 所属领域：访问器按字段自动定位嵌套 Map。 */
+    private static final Map<String, String> FIELD_DOMAIN = fieldDomains(DOMAIN_FIELDS);
 
     /**
      * 质检状态子对象（VALIDATION 嵌套值）：质检通过标记 + 失败类型 + 失败原因。
@@ -235,7 +256,7 @@ public class WorkflowState extends AgentState {
     }
 
     public WorkflowState(Map<String, Object> initData) {
-        super(migrateLegacyFields(initData));
+        super(normalizeDomains(migrateLegacyFields(initData)));
     }
 
     /**
@@ -280,6 +301,77 @@ public class WorkflowState extends AgentState {
     }
 
     /**
+     * 领域字段清单：新增状态字段时在这里登记归属领域。
+     *
+     * 平铺 key 仍保留为写入常量，构造状态时统一折叠到 SESSION/INPUT/QA/TASK/REACT/EXECUTION，
+     * 这样现有节点无需一次性改写，checkpoint 内部已经是收敛后的领域结构。
+     */
+    private static Map<String, List<String>> domainFields() {
+        Map<String, List<String>> domains = new LinkedHashMap<>();
+        domains.put(SESSION, List.of(
+                USER_ID, CONVERSATION_ID, MODEL, ANSWER_MODE, VISIBILITY));
+        domains.put(INPUT, List.of(
+                QUERY, REWRITTEN_QUERY, HISTORY, SUMMARY, MEMORY));
+        domains.put(QA, List.of(
+                INTENT, INTENT_REASON, CONTEXT, RESULT, RETRY_COUNT, VALIDATION,
+                SUB_QUERIES, HOP, CONTEXT_INCOMPLETE, QUERY_PLAN, RETRIEVAL_EVIDENCE,
+                RETRIEVAL_DEPTH, GROUNDING_CONFIDENCE, FINAL_CONFIDENCE, ROOT_CAUSE));
+        domains.put(TASK, List.of(
+                TASK_OPERATION, TASK_RESOLVE_REASON, TASK_ARGS, TASK_READ_TARGET,
+                TASK_INCLUDE_TRANSACTIONS, TASK_INCLUDE_QUOTAS, TASK_SOURCE_TYPE,
+                TASK_SOURCE_ID, TASK_DATA, TASK_MISSING, TASK_TRACE, TASK_EVIDENCE,
+                TASK_CONFIDENCE, TASK_CONFIDENCE_REASON, TASK_CLARIFY,
+                TASK_PENDING_ACTION, TASK_CONFIRMATION_REQUIRED, TASK_CONFIRMATION_ID,
+                TASK_APPROVED, TASK_IDEMPOTENCY_KEY, TASK_PLAN));
+        domains.put(REACT, List.of(
+                REACT_STEP, REACT_ACTION, REACT_HISTORY, REACT_DONE, REACT_STOP_REASON));
+        domains.put(EXECUTION, List.of(
+                ERROR, FALLBACK, HANDOFF, TOKEN_USAGE, DONE));
+        return Collections.unmodifiableMap(domains);
+    }
+
+    /** 建立字段到领域的反向索引，访问器据此从嵌套 Map 读值。 */
+    private static Map<String, String> fieldDomains(Map<String, List<String>> domains) {
+        Map<String, String> index = new LinkedHashMap<>();
+        domains.forEach((domain, fields) ->
+                fields.forEach(field -> index.put(field, domain)));
+        return Collections.unmodifiableMap(index);
+    }
+
+    /**
+     * 把旧平铺状态折叠为领域状态。
+     *
+     * 已存在的领域 Map 先保留，再用平铺 key 覆盖，保证节点刚刚返回的增量优先；
+     * 折叠后删除平铺 key，避免 checkpoint 同时保存两套结构。
+     */
+    private static Map<String, Object> normalizeDomains(Map<String, Object> initData) {
+        Map<String, Object> normalized = new LinkedHashMap<>();
+        if (initData != null) {
+            normalized.putAll(initData);
+        }
+        DOMAIN_FIELDS.forEach((domain, fields) -> {
+            Map<String, Object> domainData = domainCopy(normalized.get(domain));
+            for (String field : fields) {
+                if (normalized.containsKey(field)) {
+                    domainData.put(field, normalized.remove(field));
+                }
+            }
+            normalized.put(domain, domainData);
+        });
+        return normalized;
+    }
+
+    /** 领域值统一转字符串键 Map；旧 checkpoint 用 HashMap、新数据用 LinkedHashMap 都能兼容。 */
+    private static Map<String, Object> domainCopy(Object value) {
+        if (!(value instanceof Map<?, ?> map)) {
+            return new LinkedHashMap<>();
+        }
+        Map<String, Object> copy = new LinkedHashMap<>(map.size());
+        map.forEach((key, item) -> copy.put(String.valueOf(key), item));
+        return copy;
+    }
+
+    /**
      * 每轮重置的跨轮计数字段：EntryNode 在每轮入口调用（与自身更新合并返回），
      * 归零 retryCount/hop 子对象/rootCause，防断点恢复重入时上一轮残留影响本轮。
      *
@@ -306,6 +398,7 @@ public class WorkflowState extends AgentState {
         reset.put(TASK_OPERATION, "");
         reset.put(TASK_RESOLVE_REASON, "");
         reset.put(TASK_ARGS, Map.of());
+        reset.put(TASK_PLAN, List.of());
         reset.put(TASK_READ_TARGET, "");
         reset.put(TASK_INCLUDE_TRANSACTIONS, false);
         reset.put(TASK_INCLUDE_QUOTAS, false);
@@ -340,12 +433,12 @@ public class WorkflowState extends AgentState {
     // （如 checkpoint 反序列化后类型漂移）：字符串能解析则解析，失败才回退默认值。
 
     public String query() {
-        return value(QUERY, "");
+        return stateValue(QUERY, "");
     }
 
     /** 改写后的自包含 query（图外 QueryRewriter 写入，未改写时为空） */
     public String rewrittenQuery() {
-        return value(REWRITTEN_QUERY, "");
+        return stateValue(REWRITTEN_QUERY, "");
     }
 
     /**
@@ -363,7 +456,7 @@ public class WorkflowState extends AgentState {
      */
     @SuppressWarnings("unchecked")
     public List<Map<String, String>> history() {
-        Object v = value(HISTORY).orElse(null);
+        Object v = stateValue(HISTORY).orElse(null);
         if (!(v instanceof List<?> list)) {
             return List.of();
         }
@@ -383,29 +476,37 @@ public class WorkflowState extends AgentState {
      * 命中历史话题段时为该段摘要；新话题/无摘要时为空串。
      */
     public String summary() {
-        return value(SUMMARY, "");
+        return stateValue(SUMMARY, "");
+    }
+
+    /**
+     * 用户长期记忆文本（已按重要度筛选并格式化为条目）。
+     * 只作为生成参考，不参与检索命中判断；为空时生成节点不会追加记忆块。
+     */
+    public String memory() {
+        return stateValue(MEMORY, "");
     }
 
     /** 本轮实际使用的模型名（入图时由服务层解析，节点调用 LLM 时按此路由） */
     public String model() {
-        return value(MODEL, "");
+        return stateValue(MODEL, "");
     }
 
     public String intent() {
-        return value(INTENT, "");
+        return stateValue(INTENT, "");
     }
 
     public String context() {
-        return value(CONTEXT, "");
+        return stateValue(CONTEXT, "");
     }
 
     public String result() {
-        return value(RESULT, "");
+        return stateValue(RESULT, "");
     }
 
     public int retryCount() {
         // 步骤1：取出原始值（缺省 0）
-        Object v = value(RETRY_COUNT, 0);
+        Object v = stateValue(RETRY_COUNT, 0);
         // 步骤2：数字直接取值；字符串漂移（checkpoint 反序列化）尝试解析
         if (v instanceof Number number) {
             return number.intValue();
@@ -423,7 +524,7 @@ public class WorkflowState extends AgentState {
      * 旧版平铺字段回退（构造迁移已处理绝大多数路径，此处双保险）。
      */
     public Validation validation() {
-        Object v = value(VALIDATION).orElse(null);
+        Object v = stateValue(VALIDATION).orElse(null);
         // 步骤1：内存态（节点刚写入的 record）直接返回
         if (v instanceof Validation validation) {
             return validation;
@@ -437,9 +538,9 @@ public class WorkflowState extends AgentState {
         }
         // 步骤3：旧版平铺字段回退（升级前 checkpoint，未走构造迁移的路径）
         return Validation.of(
-                boolOf(value(LEGACY_VALIDATED).orElse(null), false),
-                strOf(value(LEGACY_VALIDATION_ISSUE).orElse(null)),
-                strOf(value(LEGACY_VALIDATION_REASON).orElse(null)));
+                boolOf(stateValue(LEGACY_VALIDATED).orElse(null), false),
+                strOf(stateValue(LEGACY_VALIDATION_ISSUE).orElse(null)),
+                strOf(stateValue(LEGACY_VALIDATION_REASON).orElse(null)));
     }
 
     /**
@@ -449,7 +550,7 @@ public class WorkflowState extends AgentState {
      */
     @SuppressWarnings("unchecked")
     public List<String> subQueries() {
-        Object v = value(SUB_QUERIES).orElse(null);
+        Object v = stateValue(SUB_QUERIES).orElse(null);
         if (!(v instanceof List<?> list)) {
             return List.of();
         }
@@ -467,7 +568,7 @@ public class WorkflowState extends AgentState {
      * 旧版平铺字段回退（构造迁移已处理绝大多数路径，此处双保险）。
      */
     public Hop hop() {
-        Object v = value(HOP).orElse(null);
+        Object v = stateValue(HOP).orElse(null);
         // 步骤1：内存态（节点刚写入的 record）直接返回
         if (v instanceof Hop hop) {
             return hop;
@@ -481,14 +582,14 @@ public class WorkflowState extends AgentState {
         }
         // 步骤3：旧版平铺字段回退（升级前 checkpoint，未走构造迁移的路径）
         return Hop.of(
-                intOf(value(LEGACY_HOP_COUNT).orElse(null), 0),
-                strOf(value(LEGACY_PENDING_QUERY).orElse(null)),
-                boolOf(value(LEGACY_HOP_SUFFICIENT).orElse(null), false));
+                intOf(stateValue(LEGACY_HOP_COUNT).orElse(null), 0),
+                strOf(stateValue(LEGACY_PENDING_QUERY).orElse(null)),
+                boolOf(stateValue(LEGACY_HOP_SUFFICIENT).orElse(null), false));
     }
 
     /** 本轮结构化查询规划；缺失时返回默认单查询计划。 */
     public QueryPlan queryPlan() {
-        Object v = value(QUERY_PLAN).orElse(null);
+        Object v = stateValue(QUERY_PLAN).orElse(null);
         if (v instanceof QueryPlan plan) {
             return plan;
         }
@@ -507,7 +608,7 @@ public class WorkflowState extends AgentState {
 
     /** 本轮检索证据评估；缺失时返回空证据。 */
     public RetrievalEvidence retrievalEvidence() {
-        Object v = value(RETRIEVAL_EVIDENCE).orElse(null);
+        Object v = stateValue(RETRIEVAL_EVIDENCE).orElse(null);
         if (v instanceof RetrievalEvidence evidence) {
             return evidence;
         }
@@ -525,49 +626,49 @@ public class WorkflowState extends AgentState {
 
     /** 检索阶段：retrieval_probe / retrieval_full / requery；缺省空串。 */
     public String retrievalDepth() {
-        return value(RETRIEVAL_DEPTH, "");
+        return stateValue(RETRIEVAL_DEPTH, "");
     }
 
     public double groundingConfidence() {
-        return doubleOf(value(GROUNDING_CONFIDENCE).orElse(null), 0.0);
+        return doubleOf(stateValue(GROUNDING_CONFIDENCE).orElse(null), 0.0);
     }
 
     public double finalConfidence() {
-        return doubleOf(value(FINAL_CONFIDENCE).orElse(null), 0.0);
+        return doubleOf(stateValue(FINAL_CONFIDENCE).orElse(null), 0.0);
     }
 
     /** 上下文不完整标记（证据不足时标记 true，生成端据此声明信息可能不全）；缺省 false */
     public boolean contextIncomplete() {
         // 步骤1：取出原始值（缺省 false）
         // 步骤2：统一转为字符串后解析布尔，防御类型漂移
-        return Boolean.parseBoolean(String.valueOf(value(CONTEXT_INCOMPLETE).orElse(false)));
+        return Boolean.parseBoolean(String.valueOf(stateValue(CONTEXT_INCOMPLETE).orElse(false)));
     }
 
     /** 检索根因（ROOT_CAUSE_* 常量之一）；正常命中无根因时为空串 */
     public String rootCause() {
-        return value(ROOT_CAUSE, "");
+        return stateValue(ROOT_CAUSE, "");
     }
 
     public String error() {
-        return value(ERROR, "");
+        return stateValue(ERROR, "");
     }
 
     public boolean fallback() {
         // 步骤1：取出原始值（缺省 false）
         // 步骤2：统一转为字符串后解析布尔，防御类型漂移
-        return Boolean.parseBoolean(String.valueOf(value(FALLBACK).orElse(false)));
+        return Boolean.parseBoolean(String.valueOf(stateValue(FALLBACK).orElse(false)));
     }
 
     /** 是否转人工（HandoffNode 写入 true；服务层据此自动建工单） */
     public boolean handoff() {
         // 步骤1：取出原始值（缺省 false）
         // 步骤2：统一转为字符串后解析布尔，防御类型漂移
-        return Boolean.parseBoolean(String.valueOf(value(HANDOFF).orElse(false)));
+        return Boolean.parseBoolean(String.valueOf(stateValue(HANDOFF).orElse(false)));
     }
 
     public Integer tokenUsage() {
         // 步骤1：取出原始值（可为空）
-        Object v = value(TOKEN_USAGE).orElse(null);
+        Object v = stateValue(TOKEN_USAGE).orElse(null);
         // 步骤2：防御类型漂移 —— 非数字一律返回 null
         return v instanceof Number number ? number.intValue() : null;
     }
@@ -575,44 +676,44 @@ public class WorkflowState extends AgentState {
     public boolean done() {
         // 步骤1：取出原始值（缺省 false）
         // 步骤2：统一转为字符串后解析布尔，防御类型漂移
-        return Boolean.parseBoolean(String.valueOf(value(DONE).orElse(false)));
+        return Boolean.parseBoolean(String.valueOf(stateValue(DONE).orElse(false)));
     }
 
     /** 当前用户 ID（服务层入图时注入）；缺省空串 */
     public String userId() {
-        return value(USER_ID, "");
+        return stateValue(USER_ID, "");
     }
 
     /** 当前会话 ID（服务层入图时注入）；缺省空串 */
     public String conversationId() {
-        return value(CONVERSATION_ID, "");
+        return stateValue(CONVERSATION_ID, "");
     }
 
     /** 回答模式：服务层归一后注入，非法值不会出现在图内；缺省 auto（旧 checkpoint 兼容） */
     public String answerMode() {
-        String mode = value(ANSWER_MODE, ChatOptions.ANSWER_MODE_AUTO);
+        String mode = stateValue(ANSWER_MODE, ChatOptions.ANSWER_MODE_AUTO);
         return ChatOptions.normalizeAnswerMode(mode, ChatOptions.ANSWER_MODE_AUTO);
     }
 
     /** 检索可见范围：服务层归一后注入；缺省 all（旧 checkpoint 兼容） */
     public String visibility() {
-        String scope = value(VISIBILITY, ChatOptions.VISIBILITY_ALL);
+        String scope = stateValue(VISIBILITY, ChatOptions.VISIBILITY_ALL);
         return ChatOptions.normalizeVisibility(scope, ChatOptions.VISIBILITY_ALL);
     }
 
     /** 任务操作类型：READ/WRITE/REACT；未识别时为空串。 */
     public String taskOperation() {
-        return value(TASK_OPERATION, "");
+        return stateValue(TASK_OPERATION, "");
     }
 
     /** 任务解析理由：只用于排查模型为何判定为读/写，不参与路由。 */
     public String taskResolveReason() {
-        return value(TASK_RESOLVE_REASON, "");
+        return stateValue(TASK_RESOLVE_REASON, "");
     }
 
     /** 任务工具参数：checkpoint 反序列化后可能为 Map，统一转成字符串键值对。 */
     public Map<String, Object> taskArgs() {
-        Object v = value(TASK_ARGS).orElse(null);
+        Object v = stateValue(TASK_ARGS).orElse(null);
         if (!(v instanceof Map<?, ?> m)) {
             return Map.of();
         }
@@ -623,32 +724,40 @@ public class WorkflowState extends AgentState {
 
     /** 只读目标表；未识别时为空串。 */
     public String taskReadTarget() {
-        return value(TASK_READ_TARGET, "");
+        return stateValue(TASK_READ_TARGET, "");
     }
 
     /** 是否需要在报名/额度读取后继续读取关联交易。 */
     public boolean taskIncludeTransactions() {
-        return Boolean.parseBoolean(String.valueOf(value(TASK_INCLUDE_TRANSACTIONS).orElse(false)));
+        return Boolean.parseBoolean(String.valueOf(stateValue(TASK_INCLUDE_TRANSACTIONS).orElse(false)));
     }
 
     /** 是否需要在报名读取后继续读取关联额度。 */
     public boolean taskIncludeQuotas() {
-        return Boolean.parseBoolean(String.valueOf(value(TASK_INCLUDE_QUOTAS).orElse(false)));
+        return Boolean.parseBoolean(String.valueOf(stateValue(TASK_INCLUDE_QUOTAS).orElse(false)));
     }
 
     /** 第一段读取的来源类型，值为 TaskReadTarget 名称。 */
     public String taskSourceType() {
-        return value(TASK_SOURCE_TYPE, "");
+        return stateValue(TASK_SOURCE_TYPE, "");
     }
 
     /** 第一段读取命中的来源主键，供第二段关联查询使用。 */
     public String taskSourceId() {
-        return value(TASK_SOURCE_ID, "");
+        return stateValue(TASK_SOURCE_ID, "");
     }
 
     /** 只读查询的完整业务行：每行是一个字段 Map，类型漂移时返回空列表。 */
     public List<Map<String, Object>> taskData() {
         return mapList(TASK_DATA);
+    }
+
+    /**
+     * 多步写计划：已按执行顺序排列的步骤列表。
+     * 空列表表示当前请求没有多步写计划（只读或单步兜底由调用方自行补齐）。
+     */
+    public List<Map<String, Object>> taskPlan() {
+        return mapList(TASK_PLAN);
     }
 
     /** 任务缺失槽位：只接受 List，逐项转字符串并过滤空白 */
@@ -668,12 +777,12 @@ public class WorkflowState extends AgentState {
 
     /** 本轮是否因缺参转为追问 */
     public boolean taskClarify() {
-        return Boolean.parseBoolean(String.valueOf(value(TASK_CLARIFY).orElse(false)));
+        return Boolean.parseBoolean(String.valueOf(stateValue(TASK_CLARIFY).orElse(false)));
     }
 
     /** 待确认写操作：只接受 Map，类型漂移时返回空 Map */
     public Map<String, Object> taskPendingAction() {
-        Object v = value(TASK_PENDING_ACTION).orElse(null);
+        Object v = stateValue(TASK_PENDING_ACTION).orElse(null);
         if (!(v instanceof Map<?, ?> m)) {
             return Map.of();
         }
@@ -684,27 +793,27 @@ public class WorkflowState extends AgentState {
 
     /** 是否需要用户确认写操作 */
     public boolean taskConfirmationRequired() {
-        return Boolean.parseBoolean(String.valueOf(value(TASK_CONFIRMATION_REQUIRED).orElse(false)));
+        return Boolean.parseBoolean(String.valueOf(stateValue(TASK_CONFIRMATION_REQUIRED).orElse(false)));
     }
 
     /** 确认令牌 ID；缺省空串 */
     public String taskConfirmationId() {
-        return value(TASK_CONFIRMATION_ID, "");
+        return stateValue(TASK_CONFIRMATION_ID, "");
     }
 
     /** 本次执行是否已获确认（确认执行链路入参） */
     public boolean taskApproved() {
-        return Boolean.parseBoolean(String.valueOf(value(TASK_APPROVED).orElse(false)));
+        return Boolean.parseBoolean(String.valueOf(stateValue(TASK_APPROVED).orElse(false)));
     }
 
     /** 写工具幂等键；缺省空串 */
     public String taskIdempotencyKey() {
-        return value(TASK_IDEMPOTENCY_KEY, "");
+        return stateValue(TASK_IDEMPOTENCY_KEY, "");
     }
 
     /** 本轮回答置信度（0~1）；缺省 0 */
     public double taskConfidence() {
-        Object v = value(TASK_CONFIDENCE).orElse(null);
+        Object v = stateValue(TASK_CONFIDENCE).orElse(null);
         if (v instanceof Number number) {
             return number.doubleValue();
         }
@@ -717,17 +826,17 @@ public class WorkflowState extends AgentState {
 
     /** 置信度说明；缺省空串 */
     public String taskConfidenceReason() {
-        return value(TASK_CONFIDENCE_REASON, "");
+        return stateValue(TASK_CONFIDENCE_REASON, "");
     }
 
     /** ReAct 已执行工具步数；缺省 0。 */
     public int reactStep() {
-        return intOf(value(REACT_STEP).orElse(0), 0);
+        return intOf(stateValue(REACT_STEP).orElse(0), 0);
     }
 
     /** ReAct 当前计划动作：只接受 Map，类型漂移时返回空 Map。 */
     public Map<String, Object> reactAction() {
-        Object v = value(REACT_ACTION).orElse(null);
+        Object v = stateValue(REACT_ACTION).orElse(null);
         if (!(v instanceof Map<?, ?> m)) {
             return Map.of();
         }
@@ -743,17 +852,42 @@ public class WorkflowState extends AgentState {
 
     /** ReAct 是否已停止循环。 */
     public boolean reactDone() {
-        return Boolean.parseBoolean(String.valueOf(value(REACT_DONE).orElse(false)));
+        return Boolean.parseBoolean(String.valueOf(stateValue(REACT_DONE).orElse(false)));
     }
 
     /** ReAct 停止原因；缺省空串。 */
     public String reactStopReason() {
-        return value(REACT_STOP_REASON, "");
+        return stateValue(REACT_STOP_REASON, "");
+    }
+
+    /**
+     * 按字段所属领域读取值：优先读嵌套领域 Map，其次回退旧平铺 key。
+     *
+     * 回退分支保证升级前 checkpoint 仍可读取；新状态经过 normalizeDomains 后只保留嵌套结构。
+     */
+    @SuppressWarnings("unchecked")
+    private <T> Optional<T> stateValue(String key) {
+        String domain = FIELD_DOMAIN.get(key);
+        if (domain != null) {
+            Object nested = super.value(domain).orElse(null);
+            if (nested instanceof Map<?, ?> map) {
+                Object value = map.get(key);
+                if (value != null) {
+                    return Optional.of((T) value);
+                }
+            }
+        }
+        return super.value(key);
+    }
+
+    /** 带默认值的领域读取，语义与原 AgentState.stateValue(key, default) 保持一致。 */
+    private <T> T stateValue(String key, T defaultValue) {
+        return (T) stateValue(key).orElse(defaultValue);
     }
 
     /** 通用字符串列表读取：容忍 checkpoint 反序列化后的类型漂移 */
     private List<String> stringList(String key) {
-        Object v = value(key).orElse(null);
+        Object v = stateValue(key).orElse(null);
         if (!(v instanceof List<?> list)) {
             return List.of();
         }
@@ -768,7 +902,7 @@ public class WorkflowState extends AgentState {
 
     /** 通用 Map 列表读取：只保留 Map 元素，键统一转字符串（嵌套值保持原样） */
     private List<Map<String, Object>> mapList(String key) {
-        Object v = value(key).orElse(null);
+        Object v = stateValue(key).orElse(null);
         if (!(v instanceof List<?> list)) {
             return List.of();
         }

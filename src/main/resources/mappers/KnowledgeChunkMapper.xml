@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.example.langchain4j.repository.mapper.KnowledgeChunkMapper">
+<mapper namespace="com.example.langchain4j.knowledge.mapper.KnowledgeChunkMapper">
 
-    <resultMap id="KnowledgeChunkMap" type="com.example.langchain4j.repository.entity.KnowledgeChunk">
+    <resultMap id="KnowledgeChunkMap" type="com.example.langchain4j.knowledge.entity.KnowledgeChunk">
         <id property="id" column="id"/>
         <result property="content" column="content"/>
         <result property="embedding" column="embedding"
-                typeHandler="com.example.langchain4j.repository.typehandler.VectorTypeHandler"/>
+                typeHandler="com.example.langchain4j.knowledge.typehandler.VectorTypeHandler"/>
         <result property="sparseVector" column="sparse_vector"/>
         <result property="metadata" column="metadata"/>
         <result property="userId" column="user_id"/>
@@ -20,13 +20,13 @@
         <result property="updatedAt" column="updated_at"/>
     </resultMap>
 
-    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.KnowledgeChunk"
+    <insert id="insert" parameterType="com.example.langchain4j.knowledge.entity.KnowledgeChunk"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_knowledge_chunk (content, embedding, sparse_vector, metadata, user_id, document_id, version,
                                         parent_id, chunk_type, title)
         VALUES (
             #{content},
-            #{embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
+            #{embedding, typeHandler=com.example.langchain4j.knowledge.typehandler.VectorTypeHandler}::vector,
             #{sparseVector}::sparsevec,
             CAST(#{metadata} AS jsonb),
             #{userId},
@@ -48,11 +48,11 @@
               AND d.user_id = c.user_id
         WHERE c.embedding IS NOT NULL
           AND c.chunk_type = 'CHILD'
-          AND (1 - (c.embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler})) &gt;= #{minScore}
+          AND (1 - (c.embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.knowledge.typehandler.VectorTypeHandler})) &gt;= #{minScore}
           AND (c.user_id = #{userId} OR (NOT #{privateOnly} AND c.user_id IS NULL))
           <!-- 文档只召回 active_version；document_id 为空或主表尚未回填的存量块不受影响 -->
           AND (c.document_id IS NULL OR d.id IS NULL OR c.version = d.active_version)
-        ORDER BY c.embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}
+        ORDER BY c.embedding &lt;=&gt; #{queryVector, typeHandler=com.example.langchain4j.knowledge.typehandler.VectorTypeHandler}
         LIMIT #{topK}
     </select>
 
@@ -94,7 +94,7 @@
         <foreach collection="chunks" item="chunk" separator=",">
             (
                 #{chunk.content},
-                #{chunk.embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
+                #{chunk.embedding, typeHandler=com.example.langchain4j.knowledge.typehandler.VectorTypeHandler}::vector,
                 #{chunk.sparseVector}::sparsevec,
                 CAST(#{chunk.metadata} AS jsonb),
                 #{chunk.userId},
@@ -194,7 +194,7 @@
     <update id="updateContent">
         UPDATE ai_knowledge_chunk
         SET content = #{content},
-            embedding = #{embedding, typeHandler=com.example.langchain4j.repository.typehandler.VectorTypeHandler}::vector,
+            embedding = #{embedding, typeHandler=com.example.langchain4j.knowledge.typehandler.VectorTypeHandler}::vector,
             sparse_vector = #{sparseVector}::sparsevec,
             metadata = CAST(#{metadata} AS jsonb),
             updated_at = now()
@@ -233,7 +233,7 @@
       父块按设计不嵌入，no_embedding 统计排除 PARENT 块避免误报。
       范围 = 当前用户可见（公共库 + 本人私有库），支撑个人知识库健康观测。
     -->
-    <select id="healthStats" resultType="com.example.langchain4j.repository.mapper.KnowledgeChunkMapper$HealthStats">
+    <select id="healthStats" resultType="com.example.langchain4j.knowledge.mapper.KnowledgeChunkMapper$HealthStats">
         SELECT count(*)                                                                       AS total_chunks,
                count(*) FILTER (WHERE c.user_id IS NOT NULL)                                  AS private_chunks,
                count(*) FILTER (WHERE c.user_id IS NULL)                                      AS public_chunks,

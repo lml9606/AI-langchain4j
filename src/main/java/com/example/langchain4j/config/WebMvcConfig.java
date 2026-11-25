@@ -1,6 +1,6 @@
 package com.example.langchain4j.config;
 
-import com.example.langchain4j.common.auth.RoleInterceptor;
+import com.example.langchain4j.auth.security.RoleInterceptor;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;

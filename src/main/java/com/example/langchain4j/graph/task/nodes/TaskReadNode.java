@@ -1,15 +1,17 @@
 package com.example.langchain4j.graph.task.nodes;
 
+import com.example.langchain4j.business.enrollment.Enrollment;
+import com.example.langchain4j.business.enrollment.EnrollmentService;
+import com.example.langchain4j.business.quota.QuotaService;
+import com.example.langchain4j.business.transaction.QuotaTransactionService;
+import com.example.langchain4j.common.constant.QueryLimits;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.state.WorkflowState;
-import com.example.langchain4j.graph.task.TaskOperation;
-import com.example.langchain4j.graph.task.TaskReadTarget;
-import com.example.langchain4j.graph.task.TaskTools;
-import com.example.langchain4j.repository.entity.Enrollment;
-import com.example.langchain4j.service.EnrollmentService;
-import com.example.langchain4j.service.QuotaService;
-import com.example.langchain4j.service.QuotaTransactionService;
-import com.example.langchain4j.tool.api.ToolResult;
+import com.example.langchain4j.graph.task.model.TaskOperation;
+import com.example.langchain4j.graph.task.model.TaskReadTarget;
+import com.example.langchain4j.graph.task.support.TaskReadResults;
+import com.example.langchain4j.tool.api.constant.ToolNames;
+import com.example.langchain4j.tool.api.model.ToolResult;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Component;
@@ -17,6 +19,9 @@ import org.springframework.stereotype.Component;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
+import static com.example.langchain4j.common.constant.QueryLimits.DEFAULT_ROW_LIMIT;
+import static com.example.langchain4j.common.constant.QueryLimits.MAX_ROW_LIMIT;
 
 /**
  * 固定只读节点：按 TaskResolveNode 选定的目标表直接调用领域 Service。
@@ -28,14 +33,12 @@ import java.util.Map;
 @Component
 public class TaskReadNode implements NodeAction<WorkflowState> {
 
-    private static final int DEFAULT_LIMIT = 5;
-    private static final int MAX_LIMIT = 20;
-
     private final EnrollmentService enrollmentService;
     private final QuotaService quotaService;
     private final QuotaTransactionService transactionService;
     private final AgentProperties properties;
 
+    /** 注入三个只读领域服务和图配置；节点不直接访问 Mapper。 */
     public TaskReadNode(EnrollmentService enrollmentService,
                         QuotaService quotaService,
                         QuotaTransactionService transactionService,
@@ -150,14 +153,16 @@ public class TaskReadNode implements NodeAction<WorkflowState> {
                 limit(args)), start);
     }
 
+    /** 把目标表映射为轨迹中展示的工具名，仅用于可观测性，不参与权限判断。 */
     private String toolFor(TaskReadTarget target) {
         return switch (target) {
-            case ENROLLMENT -> TaskTools.READ_ENROLLMENT;
-            case QUOTA -> TaskTools.READ_QUOTA;
-            case TRANSACTION -> TaskTools.READ_TRANSACTION;
+            case ENROLLMENT -> ToolNames.QUERY_ENROLLMENT;
+            case QUOTA -> ToolNames.QUERY_QUOTA;
+            case TRANSACTION -> ToolNames.QUERY_TRANSACTION;
         };
     }
 
+    /** 给轨迹生成人类可读的查询目的，便于回答节点解释证据来源。 */
     private String purposeFor(TaskReadTarget target) {
         return switch (target) {
             case ENROLLMENT -> "查询当前用户的报名记录";
@@ -166,27 +171,31 @@ public class TaskReadNode implements NodeAction<WorkflowState> {
         };
     }
 
+    /** 读取并裁剪模型传入的 limit；缺失或非数字时回退默认值。 */
     private int limit(Map<String, Object> args) {
         Object value = args.get("limit");
         if (value == null) {
-            return DEFAULT_LIMIT;
+            return DEFAULT_ROW_LIMIT;
         }
         try {
-            return Math.max(1, Math.min(MAX_LIMIT, Integer.parseInt(String.valueOf(value))));
+            return Math.max(1, Math.min(MAX_ROW_LIMIT, Integer.parseInt(String.valueOf(value))));
         } catch (NumberFormatException e) {
-            return DEFAULT_LIMIT;
+            return DEFAULT_ROW_LIMIT;
         }
     }
 
+    /** 把可选参数转成去空白字符串；缺失参数统一返回空串。 */
     private String text(Map<String, Object> args, String key) {
         Object value = args.get(key);
         return value == null ? "" : String.valueOf(value).trim();
     }
 
+    /** 判断参数是否“传了且非空白”，用于区分缺省和非法输入。 */
     private boolean hasValue(Map<String, Object> args, String key) {
         return args.get(key) != null && !String.valueOf(args.get(key)).isBlank();
     }
 
+    /** 解析正整数 ID；非法或非正数返回 null，由调用方生成明确的参数错误。 */
     private Long positiveLong(Map<String, Object> args, String key) {
         Object value = args.get(key);
         if (value == null) {
@@ -200,6 +209,7 @@ public class TaskReadNode implements NodeAction<WorkflowState> {
         }
     }
 
+    /** 构造只包含 error 的失败增量，图路由据此进入兜底。 */
     private Map<String, Object> fail(String message) {
         Map<String, Object> updates = new LinkedHashMap<>();
         updates.put(WorkflowState.ERROR, message);

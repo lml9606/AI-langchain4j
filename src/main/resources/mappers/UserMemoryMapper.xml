@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.memory.UserMemoryMapper">
+
+    <resultMap id="UserMemoryMap" type="com.example.langchain4j.memory.UserMemory">
+        <id property="id" column="id"/>
+        <result property="userId" column="user_id"/>
+        <result property="memoryType" column="memory_type"/>
+        <result property="memoryKey" column="memory_key"/>
+        <result property="content" column="content"/>
+        <result property="importance" column="importance"/>
+        <result property="sourceConversationId" column="source_conversation_id"/>
+        <result property="expiresAt" column="expires_at"/>
+        <result property="lastUsedAt" column="last_used_at"/>
+        <result property="hitCount" column="hit_count"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <!-- 同一用户 + 类型 + key 唯一：重复抽取只更新内容，重要度取历史最大值 -->
+    <insert id="upsert" parameterType="com.example.langchain4j.memory.UserMemory">
+        INSERT INTO ai_user_memory
+            (user_id, memory_type, memory_key, content, importance, source_conversation_id, expires_at)
+        VALUES
+            (#{userId}, #{memoryType}, #{memoryKey}, #{content}, #{importance},
+             #{sourceConversationId}, #{expiresAt})
+        ON CONFLICT (user_id, memory_type, memory_key) DO UPDATE SET
+            content = EXCLUDED.content,
+            importance = GREATEST(ai_user_memory.importance, EXCLUDED.importance),
+            source_conversation_id = EXCLUDED.source_conversation_id,
+            expires_at = EXCLUDED.expires_at,
+            updated_at = now()
+    </insert>
+
+    <select id="selectTop" resultMap="UserMemoryMap">
+        SELECT id, user_id, memory_type, memory_key, content, importance,
+               source_conversation_id, expires_at, last_used_at, hit_count, created_at, updated_at
+        FROM ai_user_memory
+        WHERE user_id = #{userId}
+          AND importance &gt;= #{minImportance}
+          AND (expires_at IS NULL OR expires_at &gt; now())
+        ORDER BY importance DESC, updated_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectByUser" resultMap="UserMemoryMap">
+        SELECT id, user_id, memory_type, memory_key, content, importance,
+               source_conversation_id, expires_at, last_used_at, hit_count, created_at, updated_at
+        FROM ai_user_memory
+        WHERE user_id = #{userId}
+        ORDER BY updated_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectByKey" resultMap="UserMemoryMap">
+        SELECT id, user_id, memory_type, memory_key, content, importance,
+               source_conversation_id, expires_at, last_used_at, hit_count, created_at, updated_at
+        FROM ai_user_memory
+        WHERE user_id = #{userId}
+          AND memory_type = #{memoryType}
+          AND memory_key = #{memoryKey}
+    </select>
+
+    <delete id="deleteById">
+        DELETE FROM ai_user_memory
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </delete>
+
+    <update id="markUsed">
+        UPDATE ai_user_memory
+        SET last_used_at = now(), hit_count = hit_count + 1
+        WHERE user_id = #{userId}
+          AND id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </update>
+
+</mapper>

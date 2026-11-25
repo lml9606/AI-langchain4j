@@ -1,17 +1,17 @@
 package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.common.exception.BizException;
-import com.example.langchain4j.dto.request.LlmRequest;
-import com.example.langchain4j.guard.OutputGuardService;
-import com.example.langchain4j.graph.qa.AnswerBudget;
-import com.example.langchain4j.graph.qa.AnswerBudgetResolver;
-import com.example.langchain4j.graph.qa.QaIntent;
+import com.example.langchain4j.conversation.Message;
+import com.example.langchain4j.graph.qa.model.AnswerBudget;
+import com.example.langchain4j.graph.qa.model.QaIntent;
+import com.example.langchain4j.graph.qa.support.AnswerBudgetResolver;
 import com.example.langchain4j.graph.state.WorkflowState;
+import com.example.langchain4j.guard.OutputGuardService;
 import com.example.langchain4j.llm.LlmGateway;
-import com.example.langchain4j.llm.LlmResult;
-import com.example.langchain4j.llm.PromptTemplates;
-import com.example.langchain4j.repository.entity.Message;
-import com.example.langchain4j.service.PromptTemplateService;
+import com.example.langchain4j.llm.model.LlmRequest;
+import com.example.langchain4j.llm.model.LlmResult;
+import com.example.langchain4j.prompt.PromptTemplates;
+import com.example.langchain4j.prompt.PromptTemplateService;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
@@ -65,6 +65,12 @@ public class GenerateNode implements NodeAction<WorkflowState> {
             // 提示词走配置化解析：DB 有覆盖用 DB 版（含字面 % 等非法格式时兜底默认模板），否则兜底代码默认值
             systemPrompt = systemPrompt + promptTemplateService.resolveFormatted(
                     "SUMMARY_BLOCK", PromptTemplates.SUMMARY_BLOCK, summary);
+        }
+        // 步骤2.2：用户长期记忆单独成块；与检索资料冲突时提示词要求以当前信息为准
+        String memory = state.memory();
+        if (memory != null && !memory.isBlank()) {
+            systemPrompt = systemPrompt + promptTemplateService.resolveFormatted(
+                    "MEMORY_BLOCK", PromptTemplates.MEMORY_BLOCK, memory);
         }
         // 步骤2.5：按意图 + 复杂度 + 回答模式选择动态预算；复杂问题多答、简单问题短答。
         AnswerBudget budget = answerBudgetResolver.resolve(state);

@@ -1,8 +1,8 @@
 package com.example.langchain4j.tool.runtime;
 
 import com.example.langchain4j.config.AgentProperties;
-import com.example.langchain4j.tool.api.ToolDefinition;
-import com.example.langchain4j.tool.api.ToolSideEffect;
+import com.example.langchain4j.tool.api.model.ToolDefinition;
+import com.example.langchain4j.tool.api.model.ToolSideEffect;
 import org.springframework.stereotype.Component;
 
 /**

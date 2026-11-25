@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.example.langchain4j.repository.mapper.QuotaTransactionMapper">
+<mapper namespace="com.example.langchain4j.business.transaction.QuotaTransactionMapper">
 
-    <resultMap id="QuotaTransactionMap" type="com.example.langchain4j.repository.entity.QuotaTransaction">
+    <resultMap id="QuotaTransactionMap" type="com.example.langchain4j.business.transaction.QuotaTransaction">
         <id property="id" column="id"/>
         <result property="transactionNo" column="transaction_no"/>
         <result property="userId" column="user_id"/>
@@ -21,7 +21,7 @@
         amount, remark, created_at, updated_at
     </sql>
 
-    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.QuotaTransaction"
+    <insert id="insert" parameterType="com.example.langchain4j.business.transaction.QuotaTransaction"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO quota_transaction
             (transaction_no, user_id, quota_id, enrollment_id, transaction_type,
@@ -52,7 +52,7 @@
         LIMIT #{limit}
     </select>
 
-    <update id="update" parameterType="com.example.langchain4j.repository.entity.QuotaTransaction">
+    <update id="update" parameterType="com.example.langchain4j.business.transaction.QuotaTransaction">
         UPDATE quota_transaction
         SET quota_id         = #{quotaId},
             enrollment_id    = #{enrollmentId},

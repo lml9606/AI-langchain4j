@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.example.langchain4j.repository.mapper.SummaryMapper">
+<mapper namespace="com.example.langchain4j.conversation.SummaryMapper">
 
-    <resultMap id="SummaryMap" type="com.example.langchain4j.repository.entity.ConversationSummary">
+    <resultMap id="SummaryMap" type="com.example.langchain4j.conversation.ConversationSummary">
         <id property="id" column="id"/>
         <result property="conversationId" column="conversation_id"/>
         <result property="segmentId" column="segment_id"/>
@@ -15,7 +15,7 @@
         <result property="updatedAt" column="updated_at"/>
     </resultMap>
 
-    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.ConversationSummary"
+    <insert id="insert" parameterType="com.example.langchain4j.conversation.ConversationSummary"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_conversation_summary
             (conversation_id, segment_id, topic, content, start_message_id, covered_message_id)
@@ -25,7 +25,7 @@
     </insert>
 
     <!-- 增量覆盖：只更新 content/锚点，不碰 topic（补名走 updateTopic，防异步摘要用旧 topic 覆盖新名） -->
-    <insert id="upsertIncrement" parameterType="com.example.langchain4j.repository.entity.ConversationSummary">
+    <insert id="upsertIncrement" parameterType="com.example.langchain4j.conversation.ConversationSummary">
         INSERT INTO ai_conversation_summary
             (conversation_id, segment_id, topic, content, start_message_id, covered_message_id)
         VALUES

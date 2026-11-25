@@ -1,12 +1,13 @@
 package com.example.langchain4j.guard;
 
+import com.example.langchain4j.common.constant.RedisKeys;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.config.AgentProperties;
 import lombok.extern.slf4j.Slf4j;
-import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
+import org.redisson.api.RScript;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -23,7 +24,6 @@ import java.util.List;
 @Component
 public class RateLimiter {
 
-    private static final String KEY_PREFIX = "agent:rl:";
     private static final Duration WINDOW = Duration.ofMinutes(1);
 
     /** Lua：INCR 并仅在首次设置过期时间（原子） */
@@ -63,7 +63,7 @@ public class RateLimiter {
         if (!properties.getRateLimit().isEnabled() || limit <= 0) {
             return true;
         }
-        String key = KEY_PREFIX + sanitize(dimension);
+        String key = RedisKeys.RATE_LIMIT_PREFIX + sanitize(dimension);
         try {
             // EVAL 原子执行：KEYS[1]=计数键，ARGV[1]=窗口秒数（Codec 由全局配置 StringCodec 兜底）
             Long count = redissonClient.getScript().eval(

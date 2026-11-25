@@ -1,14 +1,15 @@
 package com.example.langchain4j.llm;
 
+import com.example.langchain4j.common.constant.RedisKeys;
 import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.config.AgentProperties;
 import lombok.extern.slf4j.Slf4j;
-import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
+import org.redisson.api.RScript;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.List;
 
 /**
  * 按模型隔离的 Redis 熔断器。
@@ -20,8 +21,6 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class LlmCircuitBreaker {
 
-    private static final String FAILURES_PREFIX = "agent:llm:cb:failures:";
-    private static final String OPEN_PREFIX = "agent:llm:cb:open:";
 
     /** INCR 并保证计数 key 有 TTL：首次创建或历史 key 无 TTL 时补上窗口过期。 */
     private static final String INCR_WITH_TTL_SCRIPT =
@@ -92,11 +91,11 @@ public class LlmCircuitBreaker {
     }
 
     private String failuresKey(String modelName) {
-        return FAILURES_PREFIX + safeModel(modelName);
+        return RedisKeys.LLM_CIRCUIT_FAILURES_PREFIX + safeModel(modelName);
     }
 
     private String openKey(String modelName) {
-        return OPEN_PREFIX + safeModel(modelName);
+        return RedisKeys.LLM_CIRCUIT_OPEN_PREFIX + safeModel(modelName);
     }
 
     private String safeModel(String modelName) {

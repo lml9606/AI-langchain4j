@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.tool.run.TaskRunMapper">
+
+    <resultMap id="TaskRunMap" type="com.example.langchain4j.tool.run.TaskRun">
+        <id property="runId" column="run_id"/>
+        <result property="userId" column="user_id"/>
+        <result property="conversationId" column="conversation_id"/>
+        <result property="status" column="status"/>
+        <result property="currentStep" column="current_step"/>
+        <result property="totalSteps" column="total_steps"/>
+        <result property="planJson" column="plan_json"/>
+        <result property="result" column="result"/>
+        <result property="errorCode" column="error_code"/>
+        <result property="errorMessage" column="error_message"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <insert id="insertPending" parameterType="com.example.langchain4j.tool.run.TaskRun">
+        INSERT INTO ai_task_run
+            (run_id, user_id, conversation_id, status, current_step, total_steps, plan_json)
+        VALUES
+            (#{runId}, #{userId}, #{conversationId}, 'PENDING', 0, #{totalSteps}, #{planJson})
+        ON CONFLICT (run_id) DO NOTHING
+    </insert>
+
+    <select id="selectByRunId" resultMap="TaskRunMap">
+        SELECT run_id, user_id, conversation_id, status, current_step, total_steps,
+               plan_json, result, error_code, error_message, created_at, updated_at
+        FROM ai_task_run
+        WHERE user_id = #{userId}
+          AND run_id = #{runId}
+    </select>
+
+    <update id="markRunning">
+        UPDATE ai_task_run
+        SET status = 'RUNNING', updated_at = now(), error_code = NULL, error_message = NULL
+        WHERE user_id = #{userId}
+          AND run_id = #{runId}
+          AND (
+              status IN ('PENDING', 'FAILED', 'PARTIAL_FAILED')
+              OR (status = 'RUNNING'
+                  AND updated_at &lt; now() - make_interval(secs =&gt; #{staleSeconds}))
+          )
+    </update>
+
+    <update id="markSucceeded">
+        UPDATE ai_task_run
+        SET status = 'SUCCEEDED', current_step = total_steps, result = #{result},
+            error_code = NULL, error_message = NULL, updated_at = now()
+        WHERE user_id = #{userId}
+          AND run_id = #{runId}
+          AND status IN ('RUNNING', 'PENDING', 'PARTIAL_FAILED', 'FAILED')
+    </update>
+
+    <update id="markFailed">
+        UPDATE ai_task_run
+        SET status = #{status}, current_step = #{currentStep}, error_code = #{errorCode},
+            error_message = #{errorMessage}, result = #{result}, updated_at = now()
+        WHERE user_id = #{userId}
+          AND run_id = #{runId}
+          AND status IN ('RUNNING', 'PENDING', 'PARTIAL_FAILED', 'FAILED')
+    </update>
+
+    <update id="markCancelled">
+        UPDATE ai_task_run
+        SET status = 'CANCELLED', updated_at = now()
+        WHERE user_id = #{userId}
+          AND run_id = #{runId}
+          AND status IN ('PENDING', 'FAILED', 'PARTIAL_FAILED')
+    </update>
+
+    <update id="markCancelledByConversation">
+        UPDATE ai_task_run
+        SET status = 'CANCELLED', updated_at = now()
+        WHERE user_id = #{userId}
+          AND conversation_id = #{conversationId}
+          AND status = 'PENDING'
+    </update>
+
+</mapper>

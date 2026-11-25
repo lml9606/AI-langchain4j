@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.example.langchain4j.repository.mapper.KnowledgeDocumentMapper">
+<mapper namespace="com.example.langchain4j.knowledge.mapper.KnowledgeDocumentMapper">
 
-    <resultMap id="KnowledgeDocumentMap" type="com.example.langchain4j.repository.entity.KnowledgeDocument">
+    <resultMap id="KnowledgeDocumentMap" type="com.example.langchain4j.knowledge.entity.KnowledgeDocument">
         <id property="id" column="id"/>
         <result property="documentId" column="document_id"/>
         <result property="userId" column="user_id"/>
@@ -26,7 +26,7 @@
     </select>
 
     <!-- 并发首次导入：唯一约束保证只有一个赢家，输家随后 select 到同一行 -->
-    <insert id="insertIfAbsent" parameterType="com.example.langchain4j.repository.entity.KnowledgeDocument">
+    <insert id="insertIfAbsent" parameterType="com.example.langchain4j.knowledge.entity.KnowledgeDocument">
         INSERT INTO ai_document (document_id, user_id, active_version, status)
         VALUES (#{documentId}, #{userId}, #{activeVersion}, #{status})
         ON CONFLICT (document_id, user_id) DO NOTHING

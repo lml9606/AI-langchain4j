@@ -1,8 +1,8 @@
 package com.example.langchain4j.tool.runtime;
 
 import com.example.langchain4j.common.util.JsonUtil;
-import com.example.langchain4j.tool.api.AgentTool;
-import com.example.langchain4j.tool.api.ToolDefinition;
+import com.example.langchain4j.tool.api.contract.AgentTool;
+import com.example.langchain4j.tool.api.model.ToolDefinition;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;

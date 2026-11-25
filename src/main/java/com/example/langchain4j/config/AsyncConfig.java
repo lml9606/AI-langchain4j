@@ -1,6 +1,6 @@
 package com.example.langchain4j.config;
 
-import com.example.langchain4j.common.auth.UserContext;
+import com.example.langchain4j.auth.security.UserContext;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
@@ -10,10 +10,10 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.TaskDecorator;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
-import java.util.Map;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.Map;
 
 /**
  * 线程池配置：按用途隔离 agentExecutor、llmExecutor、knowledgeImportExecutor、
@@ -178,6 +178,28 @@ public class AsyncConfig {
         executor.setThreadNamePrefix("summary-exec-");
         executor.setRejectedExecutionHandler((r, e) ->
                 log.warn("[summary] executor overloaded, drop summary task, retry next round"));
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(30);
+        executor.initialize();
+        return executor;
+    }
+
+    /**
+     * 长期记忆抽取线程池：与摘要任务分开，避免两类后台 LLM 调用互相排队。
+     *
+     * 抽取是可丢弃任务：失败或队列满只影响“这一轮没沉淀记忆”，不影响对话结果，
+     * 因此单线程 + 有界队列 + 静默丢弃即可。
+     */
+    @Bean("memoryExecutor")
+    public ThreadPoolTaskExecutor memoryExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(1);
+        executor.setMaxPoolSize(1);
+        executor.setQueueCapacity(200);
+        executor.setThreadNamePrefix("memory-exec-");
+        executor.setTaskDecorator(contextTaskDecorator());
+        executor.setRejectedExecutionHandler((r, e) ->
+                log.warn("[memory] executor overloaded, drop extraction task"));
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(30);
         executor.initialize();

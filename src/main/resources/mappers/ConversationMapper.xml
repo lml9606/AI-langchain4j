@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.example.langchain4j.repository.mapper.ConversationMapper">
+<mapper namespace="com.example.langchain4j.conversation.ConversationMapper">
 
-    <resultMap id="ConversationMap" type="com.example.langchain4j.repository.entity.Conversation">
+    <resultMap id="ConversationMap" type="com.example.langchain4j.conversation.Conversation">
         <id property="id" column="id"/>
         <result property="conversationId" column="conversation_id"/>
         <result property="userId" column="user_id"/>
@@ -13,7 +13,7 @@
         <result property="updatedAt" column="updated_at"/>
     </resultMap>
 
-    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.Conversation"
+    <insert id="insert" parameterType="com.example.langchain4j.conversation.Conversation"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_conversation (conversation_id, user_id, title, status)
         VALUES (#{conversationId}, #{userId}, #{title}, #{status})

@@ -1,14 +1,15 @@
 package com.example.langchain4j.tool.provider;
 
 import com.example.langchain4j.common.util.JsonUtil;
-import com.example.langchain4j.knowledge.VectorSearchService;
-import com.example.langchain4j.repository.entity.KnowledgeChunk;
-import com.example.langchain4j.tool.api.AgentTool;
-import com.example.langchain4j.tool.api.ToolContext;
-import com.example.langchain4j.tool.api.ToolDefinition;
-import com.example.langchain4j.tool.api.ToolEvidence;
-import com.example.langchain4j.tool.api.ToolResult;
-import com.example.langchain4j.tool.api.ToolSideEffect;
+import com.example.langchain4j.knowledge.entity.KnowledgeChunk;
+import com.example.langchain4j.knowledge.retrieval.VectorSearchService;
+import com.example.langchain4j.tool.api.constant.ToolNames;
+import com.example.langchain4j.tool.api.contract.AgentTool;
+import com.example.langchain4j.tool.api.model.ToolContext;
+import com.example.langchain4j.tool.api.model.ToolDefinition;
+import com.example.langchain4j.tool.api.model.ToolEvidence;
+import com.example.langchain4j.tool.api.model.ToolResult;
+import com.example.langchain4j.tool.api.model.ToolSideEffect;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.stereotype.Component;
 
@@ -37,7 +38,7 @@ public class KnowledgeSearchTool implements AgentTool {
     @Override
     public ToolDefinition definition() {
         return new ToolDefinition(
-                "search_knowledge",
+                ToolNames.SEARCH_KNOWLEDGE,
                 "检索知识库文档，返回与问题相关的资料片段",
                 "{\"type\":\"object\",\"additionalProperties\":false,"
                         + "\"required\":[\"query\"],\"properties\":{"

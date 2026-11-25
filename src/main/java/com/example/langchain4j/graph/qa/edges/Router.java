@@ -2,17 +2,18 @@ package com.example.langchain4j.graph.qa.edges;
 
 import com.example.langchain4j.common.constant.ChatOptions;
 import com.example.langchain4j.config.AgentProperties;
-import com.example.langchain4j.graph.qa.QaIntent;
+import com.example.langchain4j.graph.qa.model.QaIntent;
 import com.example.langchain4j.graph.qa.nodes.ValidateNode;
 import com.example.langchain4j.graph.state.WorkflowState;
-import com.example.langchain4j.graph.task.TaskOperation;
+import com.example.langchain4j.graph.task.model.TaskOperation;
+import com.example.langchain4j.graph.task.react.ReactProtocol;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.EdgeAction;
 import org.springframework.stereotype.Component;
 
 /**
  * 条件路由：决定节点执行后的下一跳。
- * 路由 key 与 {@link com.example.langchain4j.graph.AgentGraphBuilder} 中的 mapping 对应。
+ * 路由 key 与 {@link com.example.langchain4j.graph.builder.AgentGraphBuilder} 中的 mapping 对应。
  */
 @Slf4j
 @Component
@@ -53,6 +54,7 @@ public class Router {
 
     private final AgentProperties properties;
 
+    /** 注入图配置，用于判断 ReAct 等可选分支是否启用；路由本身不持有会话状态。 */
     public Router(AgentProperties properties) {
         this.properties = properties;
     }
@@ -126,12 +128,14 @@ public class Router {
      */
     public EdgeAction<WorkflowState> afterTaskResolve() {
         return state -> {
+            // 缺参已经生成追问文案，直接收尾，不再进入任何执行节点。
             if (state.taskClarify()) {
                 return route("task-resolve", state, TO_FINALIZE);
             }
             if (state.error() != null && !state.error().isBlank()) {
                 return route("task-resolve", state, TO_FALLBACK);
             }
+            // 操作类型决定后续分支：READ/WRITE 保持固定链路，REACT 才进入受控循环。
             TaskOperation operation = TaskOperation.parse(state.taskOperation());
             if (operation == TaskOperation.READ) {
                 return route("task-resolve", state, TO_TASK_READ);
@@ -149,14 +153,17 @@ public class Router {
     /** ReAct 规划后：错误 → 兜底；已结束 → 回答；有工具动作 → 执行工具。 */
     public EdgeAction<WorkflowState> afterReactPlan() {
         return state -> {
+            // error 表示配置或前置状态错误，已有证据无法解释，统一交给兜底节点。
             if (state.error() != null && !state.error().isBlank()) {
                 return route("react-plan", state, TO_FALLBACK);
             }
+            // final、步数耗尽、模型格式错误等都会置 done=true，统一进入回答节点。
             if (state.reactDone()) {
                 return route("react-plan", state, TO_TASK_ANSWER);
             }
-            Object action = state.reactAction().get("action");
-            if ("call_tool".equals(action == null ? "" : String.valueOf(action))) {
+            // 只有明确产生 call_tool 动作才进入执行节点，其他动作 fail-closed。
+            Object action = state.reactAction().get(ReactProtocol.FIELD_ACTION);
+            if (ReactProtocol.isCallTool(action == null ? "" : String.valueOf(action))) {
                 return route("react-plan", state, TO_REACT_TOOL);
             }
             return route("react-plan", state, TO_TASK_ANSWER);
@@ -166,9 +173,11 @@ public class Router {
     /** ReAct 工具执行后：错误 → 兜底；停止 → 回答；否则继续规划下一步。 */
     public EdgeAction<WorkflowState> afterReactTool() {
         return state -> {
+            // 工具节点只在用户身份缺失、操作类型错误等图级问题上写 error。
             if (state.error() != null && !state.error().isBlank()) {
                 return route("react-tool", state, TO_FALLBACK);
             }
+            // 工具失败、无数据、致命错误都会置 done=true；否则回到规划节点继续下一步。
             return route("react-tool", state,
                     state.reactDone() ? TO_TASK_ANSWER : TO_REACT_PLAN);
         };

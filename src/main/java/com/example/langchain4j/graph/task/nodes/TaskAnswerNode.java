@@ -3,13 +3,13 @@ package com.example.langchain4j.graph.task.nodes;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.util.Texts;
 import com.example.langchain4j.config.AgentProperties;
-import com.example.langchain4j.dto.request.LlmRequest;
-import com.example.langchain4j.guard.OutputGuardService;
 import com.example.langchain4j.graph.state.WorkflowState;
+import com.example.langchain4j.guard.OutputGuardService;
 import com.example.langchain4j.llm.LlmGateway;
-import com.example.langchain4j.llm.LlmResult;
-import com.example.langchain4j.llm.PromptTemplates;
-import com.example.langchain4j.service.PromptTemplateService;
+import com.example.langchain4j.llm.model.LlmRequest;
+import com.example.langchain4j.llm.model.LlmResult;
+import com.example.langchain4j.prompt.PromptTemplates;
+import com.example.langchain4j.prompt.PromptTemplateService;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Component;
@@ -100,13 +100,24 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
                                    String stopReason) {
         StringBuilder builder = new StringBuilder();
         builder.append("用户问题：\n").append(state.effectiveQuery()).append("\n\n");
+        // 长期记忆只作参考：业务数据必须以工具结果为准，避免旧偏好覆盖当前事实
+        String memory = state.memory();
+        if (memory != null && !memory.isBlank()) {
+            builder.append("用户长期记忆（仅供参考，与工具结果冲突时以工具结果为准）：\n")
+                    .append(memory).append("\n\n");
+        }
         builder.append("工具执行轨迹：\n");
         if (trace.isEmpty()) {
             builder.append("（无）\n");
         } else {
             int index = 1;
             for (Map<String, Object> item : trace) {
-                builder.append(index++).append(". 工具=").append(item.get("tool"))
+                builder.append(index++);
+                Object stepNo = item.get("stepNo");
+                if (stepNo != null && !"0".equals(String.valueOf(stepNo))) {
+                    builder.append(" [步骤").append(stepNo).append("]");
+                }
+                builder.append(". 工具=").append(item.get("tool"))
                         .append("，成功=").append(item.get("success"))
                         .append("，结果=").append(item.get("summary"));
                 Object errorCode = item.get("errorCode");

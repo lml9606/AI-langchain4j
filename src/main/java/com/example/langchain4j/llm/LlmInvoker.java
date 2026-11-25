@@ -1,12 +1,13 @@
 package com.example.langchain4j.llm;
 
+import com.example.langchain4j.common.concurrent.BoundedCall;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
-import com.example.langchain4j.common.concurrent.BoundedCall;
 import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.common.util.Throwables;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.guard.RateLimiter;
+import com.example.langchain4j.llm.model.LlmResult;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
@@ -18,10 +19,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.List;
 
 /**
  * LLM 单次逻辑调用执行器：模型路由 → 熔断检查 → 模型级限流 → 超时调用 → 重试 → 熔断计数。

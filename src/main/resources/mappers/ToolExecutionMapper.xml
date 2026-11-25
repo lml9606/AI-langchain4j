@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.example.langchain4j.repository.mapper.ToolExecutionMapper">
+<mapper namespace="com.example.langchain4j.tool.execution.ToolExecutionMapper">
 
-    <resultMap id="ToolExecutionMap" type="com.example.langchain4j.repository.entity.ToolExecution">
+    <resultMap id="ToolExecutionMap" type="com.example.langchain4j.tool.execution.ToolExecution">
         <id property="id" column="id"/>
         <result property="executionId" column="execution_id"/>
         <result property="userId" column="user_id"/>
         <result property="conversationId" column="conversation_id"/>
+        <result property="runId" column="run_id"/>
+        <result property="stepNo" column="step_no"/>
         <result property="tool" column="tool"/>
         <result property="argsHash" column="args_hash"/>
         <result property="argsJson" column="args_json"/>
@@ -26,29 +28,29 @@
     </resultMap>
 
     <!-- 幂等闸门：唯一键 (user_id, execution_id) 冲突即返回 0，由调用方走重放/冲突分支 -->
-    <insert id="insertRunning" parameterType="com.example.langchain4j.repository.entity.ToolExecution">
+    <insert id="insertRunning" parameterType="com.example.langchain4j.tool.execution.ToolExecution">
         INSERT INTO ai_tool_execution
-            (execution_id, user_id, conversation_id, tool, args_hash, args_json, status,
+            (execution_id, user_id, conversation_id, run_id, step_no, tool, args_hash, args_json, status,
              attempt_count, started_at)
         VALUES
-            (#{executionId}, #{userId}, #{conversationId}, #{tool}, #{argsHash}, #{argsJson},
+            (#{executionId}, #{userId}, #{conversationId}, #{runId}, #{stepNo}, #{tool}, #{argsHash}, #{argsJson},
              'RUNNING', 1, now())
         ON CONFLICT (user_id, execution_id) DO NOTHING
     </insert>
 
     <!-- 创建待确认动作：先落 PENDING，保证用户看到确认卡片时数据库已有记录 -->
-    <insert id="insertPending" parameterType="com.example.langchain4j.repository.entity.ToolExecution">
+    <insert id="insertPending" parameterType="com.example.langchain4j.tool.execution.ToolExecution">
         INSERT INTO ai_tool_execution
-            (execution_id, user_id, conversation_id, tool, args_hash, args_json,
+            (execution_id, user_id, conversation_id, run_id, step_no, tool, args_hash, args_json,
              summary, risk, expires_at, status)
         VALUES
-            (#{executionId}, #{userId}, #{conversationId}, #{tool}, #{argsHash}, #{argsJson},
+            (#{executionId}, #{userId}, #{conversationId}, #{runId}, #{stepNo}, #{tool}, #{argsHash}, #{argsJson},
              #{summary}, #{risk}, #{expiresAt}, 'PENDING')
         ON CONFLICT (user_id, execution_id) DO NOTHING
     </insert>
 
     <select id="selectByExecutionId" resultMap="ToolExecutionMap">
-        SELECT id, execution_id, user_id, conversation_id, tool, args_hash, args_json,
+        SELECT id, execution_id, user_id, conversation_id, run_id, step_no, tool, args_hash, args_json,
                summary, risk, expires_at, status, attempt_count, started_at, finished_at, result,
                error_code, error_message, created_at, updated_at
         FROM ai_tool_execution
@@ -89,6 +91,14 @@
         WHERE user_id = #{userId}
           AND conversation_id = #{conversationId}
           AND status IN ('PENDING', 'APPROVED')
+    </update>
+
+    <update id="markCancelledByRun">
+        UPDATE ai_tool_execution
+        SET status = 'CANCELLED', finished_at = now(), updated_at = now()
+        WHERE user_id = #{userId}
+          AND run_id = #{runId}
+          AND status IN ('PENDING', 'APPROVED', 'FAILED')
     </update>
 
     <!--

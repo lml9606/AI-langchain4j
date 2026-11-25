@@ -7,6 +7,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 
+
 /**
  * Agent 运行参数（application.properties 中 agent.* 前缀）。
  */
@@ -62,6 +63,9 @@ public class AgentProperties {
 
     /** 受控 ReAct 只读诊断配置 */
     private React react = new React();
+
+    /** 用户级长期记忆（跨会话偏好/事实沉淀） */
+    private Memory memory = new Memory();
 
     /** 单次图执行整体超时（秒）；超时即中止本轮：取消后台任务并返回降级应答，一问一答照常闭环，用户可直接重发 */
     private int executionTimeoutSeconds = 240;
@@ -390,6 +394,8 @@ public class AgentProperties {
         private boolean writeEnabled = false;
         /** 工具默认超时（毫秒），工具定义未显式配置时使用 */
         private int timeoutMs = 3000;
+        /** 单次确认最多允许的写步骤数；防止模型把一句话拆成过多写操作 */
+        private int maxWriteSteps = 5;
         /** 单用户单工具每分钟调用上限（Redis 固定窗口，多实例共享计数） */
         private int maxCallsPerMinute = 20;
         /** 工具执行线程池 */
@@ -426,6 +432,34 @@ public class AgentProperties {
         private boolean enabled = true;
         /** 单轮最多执行的工具步数；达到上限后停止循环并基于已有证据回答 */
         private int maxSteps = 5;
+        /** 单次规划 reason 的最大字符数；只保留可审计的一句话，不保存完整思维链 */
+        private int reasonMaxLength = 160;
+        /** 单次 ReAct 规划调用的输出 token 上限；规划只输出短 JSON，默认低于普通生成 */
+        private int planMaxOutputTokens = 512;
+    }
+
+    /**
+     * 用户长期记忆配置。
+     *
+     * 记忆是跨会话的稳定信息，不是对话历史；召回按重要度取 Top N 注入生成提示词，
+     * 抽取异步执行且失败不影响主链路。
+     */
+    @Data
+    public static class Memory {
+        /** 总开关；关闭后不召回也不抽取，但已有记忆仍可通过接口查看/删除 */
+        private boolean enabled = true;
+        /** 单轮最多注入多少条记忆 */
+        private int recallLimit = 5;
+        /** 注入提示词的最大字符数，防止记忆过多挤占检索上下文 */
+        private int maxPromptChars = 800;
+        /** 低重要度记忆不注入（0~1） */
+        private double minImportance = 0.35;
+        /** 记忆默认有效期（天，<=0 表示永久） */
+        private int ttlDays = 180;
+        /** 抽取调用使用的模型；空 = 全局默认模型 */
+        private String model = "";
+        /** 抽取调用输出 token 上限 */
+        private int extractMaxOutputTokens = 512;
     }
 
 }

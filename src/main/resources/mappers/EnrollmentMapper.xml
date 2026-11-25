@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.example.langchain4j.repository.mapper.EnrollmentMapper">
+<mapper namespace="com.example.langchain4j.business.enrollment.EnrollmentMapper">
 
-    <resultMap id="EnrollmentMap" type="com.example.langchain4j.repository.entity.Enrollment">
+    <resultMap id="EnrollmentMap" type="com.example.langchain4j.business.enrollment.Enrollment">
         <id property="id" column="id"/>
         <result property="enrollmentNo" column="enrollment_no"/>
         <result property="userId" column="user_id"/>
@@ -20,7 +20,7 @@
         remark, created_at, updated_at
     </sql>
 
-    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.Enrollment"
+    <insert id="insert" parameterType="com.example.langchain4j.business.enrollment.Enrollment"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO enrollment
             (enrollment_no, user_id, applicant_name, phone, amount, remark)
@@ -50,7 +50,7 @@
         LIMIT #{limit}
     </select>
 
-    <update id="update" parameterType="com.example.langchain4j.repository.entity.Enrollment">
+    <update id="update" parameterType="com.example.langchain4j.business.enrollment.Enrollment">
         UPDATE enrollment
         SET applicant_name = #{applicantName},
             phone          = #{phone},

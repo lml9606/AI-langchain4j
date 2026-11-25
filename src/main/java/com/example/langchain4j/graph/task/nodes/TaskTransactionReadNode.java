@@ -1,12 +1,14 @@
 package com.example.langchain4j.graph.task.nodes;
 
+import com.example.langchain4j.business.transaction.QuotaTransaction;
+import com.example.langchain4j.business.transaction.QuotaTransactionService;
+import com.example.langchain4j.common.constant.QueryLimits;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.state.WorkflowState;
-import com.example.langchain4j.graph.task.TaskReadTarget;
-import com.example.langchain4j.graph.task.TaskTools;
-import com.example.langchain4j.repository.entity.QuotaTransaction;
-import com.example.langchain4j.service.QuotaTransactionService;
-import com.example.langchain4j.tool.api.ToolResult;
+import com.example.langchain4j.graph.task.model.TaskReadTarget;
+import com.example.langchain4j.graph.task.support.TaskReadResults;
+import com.example.langchain4j.tool.api.constant.ToolNames;
+import com.example.langchain4j.tool.api.model.ToolResult;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Component;
@@ -15,6 +17,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
+import static com.example.langchain4j.common.constant.QueryLimits.DEFAULT_ROW_LIMIT;
+import static com.example.langchain4j.common.constant.QueryLimits.MAX_ROW_LIMIT;
 
 /**
  * 第二段只读节点：用报名或额度查询命中的主键直接查询关联交易流水。
@@ -26,12 +31,10 @@ import java.util.Map;
 @Component
 public class TaskTransactionReadNode implements NodeAction<WorkflowState> {
 
-    private static final int DEFAULT_LIMIT = 5;
-    private static final int MAX_LIMIT = 20;
-
     private final QuotaTransactionService transactionService;
     private final AgentProperties properties;
 
+    /** 注入交易流水领域服务和证据/轨迹上限配置。 */
     public TaskTransactionReadNode(QuotaTransactionService transactionService,
                                     AgentProperties properties) {
         this.transactionService = transactionService;
@@ -59,7 +62,7 @@ public class TaskTransactionReadNode implements NodeAction<WorkflowState> {
         ToolResult result = query(state.userId(), sourceTarget, sourceId, limit(args));
 
         List<Map<String, Object>> trace = new ArrayList<>(state.taskTrace());
-        trace.add(TaskReadResults.traceItem(TaskTools.READ_TRANSACTION, args,
+        trace.add(TaskReadResults.traceItem(ToolNames.QUERY_TRANSACTION, args,
                 "查询报名或额度关联的额度交易流水", result, properties));
         List<Map<String, Object>> evidence = new ArrayList<>(state.taskEvidence());
         evidence.addAll(TaskReadResults.evidence(result, properties));
@@ -96,28 +99,32 @@ public class TaskTransactionReadNode implements NodeAction<WorkflowState> {
         }
     }
 
+    /** 读取并裁剪模型传入的 limit；缺失或非数字时回退默认值。 */
     private int limit(Map<String, Object> args) {
         Object value = args.get("limit");
         if (value == null) {
-            return DEFAULT_LIMIT;
+            return DEFAULT_ROW_LIMIT;
         }
         try {
-            return Math.max(1, Math.min(MAX_LIMIT, Integer.parseInt(String.valueOf(value))));
+            return Math.max(1, Math.min(MAX_ROW_LIMIT, Integer.parseInt(String.valueOf(value))));
         } catch (NumberFormatException e) {
-            return DEFAULT_LIMIT;
+            return DEFAULT_ROW_LIMIT;
         }
     }
 
+    /** 按配置截断证据条数，防止第二段查询把状态体积放大。 */
     private List<Map<String, Object>> limitEvidence(List<Map<String, Object>> evidence) {
         int max = properties.getLimits().getTaskEvidenceMaxEntries();
         return evidence.size() <= max ? evidence : new ArrayList<>(evidence.subList(0, max));
     }
 
+    /** 按配置截断轨迹条数，只保留最早的关键步骤。 */
     private List<Map<String, Object>> limitTrace(List<Map<String, Object>> trace) {
         int max = properties.getLimits().getTaskTraceMaxEntries();
         return trace.size() <= max ? trace : new ArrayList<>(trace.subList(0, max));
     }
 
+    /** 解析正整数字符串；非法或非正数返回 null。 */
     private Long positiveLong(String value) {
         if (value == null || value.isBlank()) {
             return null;
@@ -130,6 +137,7 @@ public class TaskTransactionReadNode implements NodeAction<WorkflowState> {
         }
     }
 
+    /** 构造只包含 error 的失败增量，图路由据此进入兜底。 */
     private Map<String, Object> fail(String message) {
         Map<String, Object> updates = new LinkedHashMap<>();
         updates.put(WorkflowState.ERROR, message);

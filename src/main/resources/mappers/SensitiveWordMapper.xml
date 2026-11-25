@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.example.langchain4j.repository.mapper.SensitiveWordMapper">
+<mapper namespace="com.example.langchain4j.sensitive.SensitiveWordMapper">
 
-    <resultMap id="SensitiveWordMap" type="com.example.langchain4j.repository.entity.SensitiveWord">
+    <resultMap id="SensitiveWordMap" type="com.example.langchain4j.sensitive.SensitiveWord">
         <id property="id" column="id"/>
         <result property="word" column="word"/>
         <result property="enabled" column="enabled"/>
         <result property="createdAt" column="created_at"/>
     </resultMap>
 
-    <insert id="insert" parameterType="com.example.langchain4j.repository.entity.SensitiveWord"
+    <insert id="insert" parameterType="com.example.langchain4j.sensitive.SensitiveWord"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO ai_sensitive_word (word, enabled)
         VALUES (#{word}, COALESCE(#{enabled}, TRUE))
