@@ -1,5 +1,10 @@
 package com.example.langchain4j.graph.qa.nodes;
 
+import com.example.langchain4j.common.context.Allocation;
+import com.example.langchain4j.common.context.BlockType;
+import com.example.langchain4j.common.context.ContextAssembler;
+import com.example.langchain4j.common.context.ContextBlock;
+import com.example.langchain4j.common.context.ContextScene;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.qa.model.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
@@ -33,12 +38,14 @@ public class IntentPlanNode implements NodeAction<WorkflowState> {
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
     private final AgentProperties properties;
+    private final ContextAssembler contextAssembler;
 
     public IntentPlanNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService,
-                          AgentProperties properties) {
+                          AgentProperties properties, ContextAssembler contextAssembler) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
         this.properties = properties;
+        this.contextAssembler = contextAssembler;
     }
 
     @Override
@@ -52,8 +59,13 @@ public class IntentPlanNode implements NodeAction<WorkflowState> {
             int maxSubQueries = Math.max(1, properties.getMaxSubQueries());
             String systemPrompt = promptTemplateService.resolveFormatted(
                     "INTENT_PLAN_SYSTEM", PromptTemplates.INTENT_PLAN_SYSTEM, maxSubQueries);
-            JsonNode node = llmGateway.generateJson(LlmRequest.of(state.model(), systemPrompt,
-                    buildUserPrompt(state, effectiveQuery)).scene("intent-plan"));
+            // 意图规划只有 system 和本轮查询两块，强制块不裁剪，预算只用于拦住异常超长输入
+            Allocation allocation = contextAssembler.allocate(ContextScene.INTENT_PLAN, List.of(
+                    ContextBlock.single(BlockType.SYSTEM, systemPrompt),
+                    ContextBlock.single(BlockType.QUERY, buildUserPrompt(state, effectiveQuery))));
+            JsonNode node = llmGateway.generateJson(LlmRequest.of(state.model(),
+                    allocation.content(BlockType.SYSTEM),
+                    allocation.content(BlockType.QUERY)).scene("intent-plan"));
             if (node == null) {
                 return degradedPlan(state, "输出截断或解析失败");
             }

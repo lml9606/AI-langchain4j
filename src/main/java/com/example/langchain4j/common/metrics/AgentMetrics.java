@@ -24,6 +24,13 @@ import java.util.Map;
  * - llm_circuit_open{model} —— 熔断器状态（1=打开，0=关闭）；
  * - tool_calls_total{tool,outcome} —— 工具调用次数；
  * - tool_call_duration_seconds{tool} —— 工具单次调用耗时。
+ * - agent_node_calls_total{node,outcome} —— 图节点调用次数（按节点、成功/失败）；
+ * - agent_node_duration_seconds{node} —— 图节点执行耗时；
+ * - retrieval_queries_total{outcome} —— 检索轮次（hit/empty）；
+ * - retrieval_hits_total{channel} —— 稠密/稀疏/融合命中条数；
+ * - retrieval_top_score —— 每轮融合最高分分布；
+ * - retrieval_duration_seconds —— 检索整体耗时；
+ * - llm_tokens_total{model,kind} —— LLM 输入/输出 token 用量。
  * - memory_extract_total{outcome} —— 长期记忆抽取结果（saved/skipped/failed）；
  * - memory_extract_saved_total —— 实际入库的记忆条数；
  * - memory_merge_total —— 同义合并命中次数；
@@ -163,6 +170,92 @@ public class AgentMetrics {
             registry.counter("memory.recall.total",
                             "description", "长期记忆召回注入条数")
                     .increment(count);
+        }
+    }
+
+    /**
+     * 记录一次图节点执行结果与耗时。
+     *
+     * 节点名来自固定常量集合，标签基数可控；成功/失败表示节点是否抛出异常，
+     * 不表达业务结果，业务上的兜底仍由 agent.fallback.total 等指标观察。
+     *
+     * @param node    图节点名
+     * @param success 节点是否正常返回
+     * @param costMs  节点执行耗时（毫秒）
+     */
+    public void recordNodeExecution(String node, boolean success, long costMs) {
+        String label = safeLabel(node);
+        registry.counter("agent.node.calls.total",
+                        "node", label,
+                        "outcome", success ? "success" : "failure",
+                        "description", "图节点调用次数")
+                .increment();
+        registry.timer("agent.node.duration",
+                        "node", label,
+                        "description", "图节点执行耗时")
+                .record(costMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 记录一轮混合检索的召回规模和最高融合分。
+     *
+     * 这些指标只描述检索质量信号，不参与业务判断；空结果单独计数，
+     * 便于区分“确实没有数据”和“检索链路异常降级”。
+     *
+     * @param denseHits  稠密通道命中数
+     * @param sparseHits 稀疏通道命中数
+     * @param fusedHits  融合后最终命中数
+     * @param topScore   融合最高分
+     * @param costMs     检索总耗时（毫秒）
+     */
+    public void recordRetrieval(int denseHits, int sparseHits, int fusedHits,
+                                double topScore, long costMs) {
+        registry.counter("retrieval.queries.total",
+                        "outcome", fusedHits > 0 ? "hit" : "empty",
+                        "description", "检索轮次")
+                .increment();
+        incrementCounter("retrieval.hits.total", "channel", "dense", denseHits);
+        incrementCounter("retrieval.hits.total", "channel", "sparse", sparseHits);
+        incrementCounter("retrieval.hits.total", "channel", "fused", fusedHits);
+        registry.summary("retrieval.top.score",
+                        "description", "每轮融合最高分分布")
+                .record(Math.max(0.0, topScore));
+        registry.timer("retrieval.duration",
+                        "description", "检索整体耗时")
+                .record(costMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 记录 LLM 输入/输出 token 用量；供应商未返回 tokenUsage 时静默跳过。
+     *
+     * token 指标用于成本观察，不参与预算控制；控制逻辑仍在 LlmInvoker 与回答预算中。
+     *
+     * @param model        模型名
+     * @param inputTokens  输入 token 数，可为空
+     * @param outputTokens 输出 token 数，可为空
+     */
+    public void recordLlmTokens(String model, Integer inputTokens, Integer outputTokens) {
+        String label = safeLabel(model);
+        if (inputTokens != null && inputTokens > 0) {
+            registry.counter("llm.tokens.total",
+                            "model", label,
+                            "kind", "input",
+                            "description", "LLM token 用量")
+                    .increment(inputTokens);
+        }
+        if (outputTokens != null && outputTokens > 0) {
+            registry.counter("llm.tokens.total",
+                            "model", label,
+                            "kind", "output",
+                            "description", "LLM token 用量")
+                    .increment(outputTokens);
+        }
+    }
+
+    /** 命中数计数器统一入口：非正数不自增，避免无意义时间序列。 */
+    private void incrementCounter(String name, String tagKey, String tagValue, int count) {
+        if (count > 0) {
+            registry.counter(name, tagKey, tagValue).increment(count);
         }
     }
 

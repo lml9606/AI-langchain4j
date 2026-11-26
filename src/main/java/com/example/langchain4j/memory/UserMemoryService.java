@@ -1,5 +1,10 @@
 package com.example.langchain4j.memory;
 
+import com.example.langchain4j.common.context.Allocation;
+import com.example.langchain4j.common.context.BlockType;
+import com.example.langchain4j.common.context.ContextAssembler;
+import com.example.langchain4j.common.context.ContextBlock;
+import com.example.langchain4j.common.context.ContextScene;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.metrics.AgentMetrics;
@@ -60,6 +65,7 @@ public class UserMemoryService {
     private final EmbeddingService embeddingService;
     private final ThreadPoolTaskExecutor memoryExecutor;
     private final AgentMetrics metrics;
+    private final ContextAssembler contextAssembler;
 
     /**
      * 注入 Mapper、LLM、提示词、向量服务与记忆专用线程池；服务本身无本地状态。
@@ -72,7 +78,8 @@ public class UserMemoryService {
                              PromptTemplateService promptTemplateService,
                              EmbeddingService embeddingService,
                              @Qualifier("memoryExecutor") ThreadPoolTaskExecutor memoryExecutor,
-                             AgentMetrics metrics) {
+                             AgentMetrics metrics,
+                             ContextAssembler contextAssembler) {
         this.memoryMapper = memoryMapper;
         this.memoryStore = memoryStore;
         this.extractTaskMapper = extractTaskMapper;
@@ -82,6 +89,7 @@ public class UserMemoryService {
         this.embeddingService = embeddingService;
         this.memoryExecutor = memoryExecutor;
         this.metrics = metrics;
+        this.contextAssembler = contextAssembler;
     }
 
     /**
@@ -251,14 +259,17 @@ public class UserMemoryService {
     private void extract(String userId, String conversationId, Long messageId,
                          String taskKey, String query, String answer) {
         try {
-            String userPrompt = "用户：\n" + truncate(query)
-                    + "\n\n助手：\n" + truncate(answer);
             String systemPrompt = promptTemplateService.resolveFormatted(
                     "MEMORY_EXTRACT_SYSTEM", PromptTemplates.MEMORY_EXTRACT_SYSTEM,
                     keyList(properties.getMemory().getPreferenceKeys()),
                     keyList(properties.getMemory().getConstraintKeys()));
+            // 抽取输入只有本轮问答，两块都属于强制内容；超预算说明单条消息异常，直接失败由任务表记录
+            Allocation allocation = contextAssembler.allocate(ContextScene.MEMORY_EXTRACT, List.of(
+                    ContextBlock.single(BlockType.SYSTEM, systemPrompt),
+                    ContextBlock.single(BlockType.QUERY, "用户：\n" + truncate(query)
+                            + "\n\n助手：\n" + truncate(answer))));
             JsonNode node = llmGateway.generateJson(LlmRequest.of(resolveModel(),
-                            systemPrompt, userPrompt)
+                            allocation.content(BlockType.SYSTEM), allocation.content(BlockType.QUERY))
                     .maxOutputTokens(Math.max(128, properties.getMemory().getExtractMaxOutputTokens()))
                     .scene("memory-extract"));
             if (node == null || !node.path("memories").isArray()) {

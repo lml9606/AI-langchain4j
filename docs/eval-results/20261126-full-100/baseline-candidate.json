@@ -1,0 +1,8 @@
+{
+  "passRate" : 1.0,
+  "avgCoverage" : 1.0,
+  "caseCount" : 25,
+  "suite" : "full",
+  "createdAt" : "2026-11-26T21:29:54.804385500",
+  "commit" : "cfded224dbc7ef50a87f9c2de11858b88ffd29e4"
+}

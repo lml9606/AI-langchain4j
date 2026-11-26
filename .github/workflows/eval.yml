@@ -1,0 +1,83 @@
+name: Eval Pipeline
+
+# 评测需要已有知识库的测试/预发环境，不在 PR 里跑；每天凌晨对指定环境做一次回归，
+# 也可以手动选择 smoke（前 10 条）或 full（全量）。
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: '评测套件：smoke=前 10 条，full=全量'
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - full
+  schedule:
+    # UTC 18:00 = 北京时间次日 02:00
+    - cron: '0 18 * * *'
+
+concurrency:
+  group: eval-pipeline
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    name: Retrieval Eval (author -> run -> review)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Grant execute permission for mvnw
+        run: chmod +x mvnw
+
+      # 缺配置时明确失败，避免定时任务静默“通过”造成虚假安心
+      - name: Check required secrets
+        env:
+          EVAL_BASE_URL: ${{ secrets.EVAL_BASE_URL }}
+          EVAL_TOKEN: ${{ secrets.EVAL_TOKEN }}
+          EVAL_USERNAME: ${{ secrets.EVAL_USERNAME }}
+          EVAL_PASSWORD: ${{ secrets.EVAL_PASSWORD }}
+        run: |
+          missing=""
+          [ -z "$EVAL_BASE_URL" ] && missing="$missing EVAL_BASE_URL"
+          if [ -z "$EVAL_TOKEN" ] && { [ -z "$EVAL_USERNAME" ] || [ -z "$EVAL_PASSWORD" ]; }; then
+            missing="$missing EVAL_TOKEN(或 EVAL_USERNAME+EVAL_PASSWORD)"
+          fi
+          if [ -n "$missing" ]; then
+            echo "缺少仓库 secrets:$missing" >&2
+            exit 1
+          fi
+
+      - name: Run eval pipeline
+        env:
+          EVAL_ENABLED: 'true'
+          EVAL_BASE_URL: ${{ secrets.EVAL_BASE_URL }}
+          EVAL_TOKEN: ${{ secrets.EVAL_TOKEN }}
+          EVAL_USERNAME: ${{ secrets.EVAL_USERNAME }}
+          EVAL_PASSWORD: ${{ secrets.EVAL_PASSWORD }}
+          EVAL_SUITE: ${{ inputs.suite || 'smoke' }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: >
+          ./mvnw -B --no-transfer-progress
+          -Dtest=RetrievalEvalPipelineTest
+          -Deval.enabled=true
+          -Deval.suite=${{ inputs.suite || 'smoke' }}
+          test
+
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: target/eval
+          if-no-files-found: warn

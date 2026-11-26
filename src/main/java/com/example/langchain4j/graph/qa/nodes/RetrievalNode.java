@@ -1,6 +1,11 @@
 package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.common.constant.ChatOptions;
+import com.example.langchain4j.common.context.Allocation;
+import com.example.langchain4j.common.context.BlockType;
+import com.example.langchain4j.common.context.ContextAssembler;
+import com.example.langchain4j.common.context.ContextBlock;
+import com.example.langchain4j.common.context.ContextScene;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.qa.support.EvidenceAssessor;
 import com.example.langchain4j.graph.state.WorkflowState;
@@ -36,16 +41,19 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
     private final PromptTemplateService promptTemplateService;
     private final EvidenceAssessor evidenceAssessor;
     private final AgentProperties properties;
+    private final ContextAssembler contextAssembler;
 
     public RetrievalNode(VectorSearchService vectorSearchService, LlmGateway llmGateway,
                          PromptTemplateService promptTemplateService,
                          EvidenceAssessor evidenceAssessor,
-                         AgentProperties properties) {
+                         AgentProperties properties,
+                         ContextAssembler contextAssembler) {
         this.vectorSearchService = vectorSearchService;
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
         this.evidenceAssessor = evidenceAssessor;
         this.properties = properties;
+        this.contextAssembler = contextAssembler;
     }
 
     @Override
@@ -164,8 +172,13 @@ public class RetrievalNode implements NodeAction<WorkflowState> {
      * 纠错重查查询：根据质检失败原因让 LLM 改写，失败时回退有效查询。
      */
     private String resolveSearchQuery(WorkflowState state) {
-        String userPrompt = "原查询：\n" + state.effectiveQuery()
-                + "\n\n质检失败原因：\n" + state.validation().reason();
+        // 原查询和失败原因都属于本轮输入，放在强制块里，不参与裁剪
+        Allocation allocation = contextAssembler.allocate(ContextScene.REQUERY, List.of(
+                ContextBlock.of(BlockType.QUERY, List.of(
+                        "原查询：\n" + state.effectiveQuery(),
+                        "质检失败原因：\n" + (state.validation().reason() == null
+                                ? "" : state.validation().reason())))));
+        String userPrompt = allocation.content(BlockType.QUERY);
         try {
             String refined = llmGateway.generate(LlmRequest.of(state.model(),
                     promptTemplateService.resolve("REQUERY_SYSTEM", PromptTemplates.REQUERY_SYSTEM),

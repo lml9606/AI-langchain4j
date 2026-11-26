@@ -1,5 +1,10 @@
 package com.example.langchain4j.graph.task.nodes;
 
+import com.example.langchain4j.common.context.Allocation;
+import com.example.langchain4j.common.context.BlockType;
+import com.example.langchain4j.common.context.ContextAssembler;
+import com.example.langchain4j.common.context.ContextBlock;
+import com.example.langchain4j.common.context.ContextScene;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.util.Texts;
 import com.example.langchain4j.config.AgentProperties;
@@ -32,16 +37,19 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
     private final OutputGuardService outputGuardService;
     private final PromptTemplateService promptTemplateService;
     private final AgentProperties properties;
+    private final ContextAssembler contextAssembler;
 
-    /** 注入 LLM、输出安全审核与提示词服务。 */
+    /** 注入 LLM、输出安全审核、提示词服务与上下文预算装配器。 */
     public TaskAnswerNode(LlmGateway llmGateway,
                           OutputGuardService outputGuardService,
                           PromptTemplateService promptTemplateService,
-                          AgentProperties properties) {
+                          AgentProperties properties,
+                          ContextAssembler contextAssembler) {
         this.llmGateway = llmGateway;
         this.outputGuardService = outputGuardService;
         this.promptTemplateService = promptTemplateService;
         this.properties = properties;
+        this.contextAssembler = contextAssembler;
     }
 
     /** 基于工具轨迹和证据生成回答，计算置信度并统一追加参考依据。 */
@@ -146,7 +154,11 @@ public class TaskAnswerNode implements NodeAction<WorkflowState> {
             builder.append("\n诊断停止原因：").append(stopReason).append('\n');
         }
         builder.append("\n请只基于以上证据回答，不要编造。");
-        return builder.toString();
+        // 证据、轨迹和记忆都依赖工具结果，整体作为一个强制输入块统一过预算：
+        // 任务回答不允许丢证据，超限时直接失败提示用户缩小查询范围，而不是悄悄少答
+        Allocation allocation = contextAssembler.allocate(ContextScene.TASK_ANSWER,
+                List.of(ContextBlock.single(BlockType.QUERY, builder.toString())));
+        return allocation.content(BlockType.QUERY);
     }
 
     /** 模型不可用时的确定性答复：直接汇总工具结果，不编造 */

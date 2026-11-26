@@ -1,5 +1,6 @@
 package com.example.langchain4j.graph.builder;
 
+import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.common.nodes.FinalizeNode;
 import com.example.langchain4j.graph.constant.GraphNodes;
@@ -23,6 +24,8 @@ import com.example.langchain4j.graph.task.nodes.TaskReadNode;
 import com.example.langchain4j.graph.task.nodes.TaskResolveNode;
 import com.example.langchain4j.graph.task.nodes.TaskTransactionReadNode;
 import lombok.extern.slf4j.Slf4j;
+import org.bsc.langgraph4j.action.AsyncNodeAction;
+import org.bsc.langgraph4j.action.NodeAction;
 import org.bsc.langgraph4j.checkpoint.BaseCheckpointSaver;
 import org.bsc.langgraph4j.CompileConfig;
 import org.bsc.langgraph4j.CompiledGraph;
@@ -109,6 +112,7 @@ public class AgentGraphBuilder {
     private final ReactToolNode reactToolNode;
     private final FinalizeNode finalizeNode;
     private final AgentProperties properties;
+    private final AgentMetrics metrics;
 
     public AgentGraphBuilder(WorkflowStateSerializer stateSerializer,
                              Router router,
@@ -129,7 +133,8 @@ public class AgentGraphBuilder {
                              ReactPlanNode reactPlanNode,
                              ReactToolNode reactToolNode,
                              FinalizeNode finalizeNode,
-                             AgentProperties properties) {
+                             AgentProperties properties,
+                             AgentMetrics metrics) {
         this.stateSerializer = stateSerializer;
         this.router = router;
         this.entryNode = entryNode;
@@ -150,6 +155,7 @@ public class AgentGraphBuilder {
         this.reactToolNode = reactToolNode;
         this.finalizeNode = finalizeNode;
         this.properties = properties;
+        this.metrics = metrics;
     }
 
     /**
@@ -162,26 +168,26 @@ public class AgentGraphBuilder {
         StateGraph<WorkflowState> graph = new StateGraph<>(stateSerializer);
         try {
             // ---- 主链路节点：问答、检索、生成、质检、兜底、转人工 ----
-            graph.addNode(NODE_ENTRY, node_async(entryNode));
-            graph.addNode(NODE_INTENT_PLAN, node_async(intentPlanNode));
-            graph.addNode(NODE_RETRIEVAL_PROBE, node_async(retrievalProbeNode));
-            graph.addNode(NODE_RETRIEVAL_FULL, node_async(retrievalNode));
-            graph.addNode(NODE_GENERATE, node_async(generateNode));
-            graph.addNode(NODE_VALIDATE, node_async(validateNode));
-            graph.addNode(NODE_FALLBACK, node_async(fallbackNode));
-            graph.addNode(NODE_HANDOFF, node_async(handoffNode));
+            graph.addNode(NODE_ENTRY, timed(NODE_ENTRY, entryNode));
+            graph.addNode(NODE_INTENT_PLAN, timed(NODE_INTENT_PLAN, intentPlanNode));
+            graph.addNode(NODE_RETRIEVAL_PROBE, timed(NODE_RETRIEVAL_PROBE, retrievalProbeNode));
+            graph.addNode(NODE_RETRIEVAL_FULL, timed(NODE_RETRIEVAL_FULL, retrievalNode));
+            graph.addNode(NODE_GENERATE, timed(NODE_GENERATE, generateNode));
+            graph.addNode(NODE_VALIDATE, timed(NODE_VALIDATE, validateNode));
+            graph.addNode(NODE_FALLBACK, timed(NODE_FALLBACK, fallbackNode));
+            graph.addNode(NODE_HANDOFF, timed(NODE_HANDOFF, handoffNode));
             // ---- 任务分支节点：解析读写与参数 → 读执行/写确认 → 证据回答 ----
-            graph.addNode(NODE_TASK_RESOLVE, node_async(taskResolveNode));
-            graph.addNode(NODE_TASK_CONFIRM, node_async(taskConfirmNode));
-            graph.addNode(NODE_TASK_READ, node_async(taskReadNode));
-            graph.addNode(NODE_TASK_READ_QUOTA, node_async(taskQuotaReadNode));
-            graph.addNode(NODE_TASK_READ_TRANSACTION, node_async(taskTransactionReadNode));
-            graph.addNode(NODE_TASK_ANSWER, node_async(taskAnswerNode));
+            graph.addNode(NODE_TASK_RESOLVE, timed(NODE_TASK_RESOLVE, taskResolveNode));
+            graph.addNode(NODE_TASK_CONFIRM, timed(NODE_TASK_CONFIRM, taskConfirmNode));
+            graph.addNode(NODE_TASK_READ, timed(NODE_TASK_READ, taskReadNode));
+            graph.addNode(NODE_TASK_READ_QUOTA, timed(NODE_TASK_READ_QUOTA, taskQuotaReadNode));
+            graph.addNode(NODE_TASK_READ_TRANSACTION, timed(NODE_TASK_READ_TRANSACTION, taskTransactionReadNode));
+            graph.addNode(NODE_TASK_ANSWER, timed(NODE_TASK_ANSWER, taskAnswerNode));
             // ---- ReAct 只读诊断：规划 → 执行 → 路由回规划，直到 final/停止条件 ----
-            graph.addNode(NODE_REACT_PLAN, node_async(reactPlanNode));
-            graph.addNode(NODE_REACT_TOOL, node_async(reactToolNode));
+            graph.addNode(NODE_REACT_PLAN, timed(NODE_REACT_PLAN, reactPlanNode));
+            graph.addNode(NODE_REACT_TOOL, timed(NODE_REACT_TOOL, reactToolNode));
             // ---- 统一收尾节点：所有正常/降级/转人工路径最终都汇合到这里 ----
-            graph.addNode(NODE_FINALIZE, node_async(finalizeNode));
+            graph.addNode(NODE_FINALIZE, timed(NODE_FINALIZE, finalizeNode));
 
             // 入口守卫：空输入/清洗失败 -> fallback；正常 -> 意图与规划
             graph.addEdge(START, NODE_ENTRY);
@@ -257,6 +263,30 @@ public class AgentGraphBuilder {
         } catch (GraphStateException e) {
             throw new IllegalStateException("Agent graph assembly failed", e);
         }
+    }
+
+    /**
+     * 给图节点统一加指标埋点：记录节点耗时和是否抛出异常。
+     *
+     * 埋点放在图装配层而不是每个节点内部，避免每个节点重复写计时模板；
+     * 节点内部仍保留业务日志，两者职责不同：这里回答“哪个节点慢”，业务日志回答“为什么慢”。
+     *
+     * @param node   节点名
+     * @param action 原节点动作
+     * @return 带耗时统计的异步节点动作
+     */
+    private AsyncNodeAction<WorkflowState> timed(String node, NodeAction<WorkflowState> action) {
+        return node_async(state -> {
+            long start = System.currentTimeMillis();
+            boolean success = false;
+            try {
+                Map<String, Object> updates = action.apply(state);
+                success = true;
+                return updates;
+            } finally {
+                metrics.recordNodeExecution(node, success, System.currentTimeMillis() - start);
+            }
+        });
     }
 
     /**

@@ -1,5 +1,10 @@
 package com.example.langchain4j.graph.task.nodes;
 
+import com.example.langchain4j.common.context.Allocation;
+import com.example.langchain4j.common.context.BlockType;
+import com.example.langchain4j.common.context.ContextAssembler;
+import com.example.langchain4j.common.context.ContextBlock;
+import com.example.langchain4j.common.context.ContextScene;
 import com.example.langchain4j.common.exception.BizException;
 import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.common.util.Texts;
@@ -19,6 +24,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,16 +43,19 @@ public class ReactPlanNode implements NodeAction<WorkflowState> {
     private final PromptTemplateService promptTemplateService;
     private final ReactToolCatalog toolCatalog;
     private final AgentProperties properties;
+    private final ContextAssembler contextAssembler;
 
-    /** 注入模型网关、提示词服务、ReAct 白名单和步数配置；规划节点本身无状态。 */
+    /** 注入模型网关、提示词服务、ReAct 白名单、步数配置和上下文预算装配器；规划节点本身无状态。 */
     public ReactPlanNode(LlmGateway llmGateway,
                          PromptTemplateService promptTemplateService,
                          ReactToolCatalog toolCatalog,
-                         AgentProperties properties) {
+                         AgentProperties properties,
+                         ContextAssembler contextAssembler) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
         this.toolCatalog = toolCatalog;
         this.properties = properties;
+        this.contextAssembler = contextAssembler;
     }
 
     /**
@@ -154,39 +163,43 @@ public class ReactPlanNode implements NodeAction<WorkflowState> {
 
     /** 拼装用户目标、工具目录和已有观察；不注入长篇历史，避免规划上下文膨胀。 */
     private String buildUserPrompt(WorkflowState state, List<ToolDefinition> tools, int maxSteps) {
-        StringBuilder builder = new StringBuilder();
-        // 目标必须原样带给模型，避免规划阶段丢失用户约束。
-        builder.append("用户目标：\n").append(state.effectiveQuery()).append("\n\n");
-        // 工具目录只展示名称、描述和 Schema，让模型知道能做什么以及参数边界。
-        builder.append("可用只读工具：\n");
+        // 工具目录只展示名称、描述和 Schema，让模型知道能做什么以及参数边界
+        StringBuilder catalog = new StringBuilder();
         for (ToolDefinition tool : tools) {
-            builder.append("- ").append(tool.name()).append("：")
+            catalog.append("- ").append(tool.name()).append("：")
                     .append(tool.description()).append("\n")
                     .append("  参数 Schema：").append(tool.inputSchema()).append("\n");
         }
-        builder.append("\n已执行步数：").append(state.reactStep())
-                .append("，最多允许：").append(maxSteps).append("\n");
-        // 历史只放执行摘要和状态，不放完整业务数据，控制 prompt 长度和敏感信息暴露。
-        builder.append("已有观察：\n");
-        List<Map<String, Object>> history = state.reactHistory();
-        if (history.isEmpty()) {
-            builder.append("（无）\n");
-        } else {
-            int index = 1;
-            for (Map<String, Object> item : history) {
-                builder.append(index++).append(". 工具=")
-                        .append(item.get(ReactProtocol.FIELD_TOOL))
-                        .append("，参数=").append(JsonUtil.toJson(item.get(ReactProtocol.FIELD_ARGS)))
-                        .append("，成功=").append(item.get("success"))
-                        .append("，数据条数=").append(item.get("dataCount"));
-                Object errorCode = item.get("errorCode");
-                if (errorCode != null && !String.valueOf(errorCode).isBlank()) {
-                    builder.append("，错误码=").append(errorCode);
-                }
-                builder.append("\n   结果=").append(item.get("summary")).append('\n');
+        // 观察历史只放执行摘要和状态，不放完整业务数据，控制长度和敏感信息暴露
+        List<String> observations = new ArrayList<>();
+        int index = 1;
+        for (Map<String, Object> item : state.reactHistory()) {
+            StringBuilder line = new StringBuilder();
+            line.append(index++).append(". 工具=")
+                    .append(item.get(ReactProtocol.FIELD_TOOL))
+                    .append("，参数=").append(JsonUtil.toJson(item.get(ReactProtocol.FIELD_ARGS)))
+                    .append("，成功=").append(item.get("success"))
+                    .append("，数据条数=").append(item.get("dataCount"));
+            Object errorCode = item.get("errorCode");
+            if (errorCode != null && !String.valueOf(errorCode).isBlank()) {
+                line.append("，错误码=").append(errorCode);
             }
+            line.append("\n   结果=").append(item.get("summary"));
+            observations.add(line.toString());
         }
-        return builder.toString();
+        // 目标与步数是规划前提（强制块），工具目录可截断，观察历史超预算时丢弃最旧步骤
+        Allocation allocation = contextAssembler.allocate(ContextScene.REACT_PLAN, List.of(
+                ContextBlock.single(BlockType.QUERY,
+                        "用户目标：\n" + state.effectiveQuery()
+                                + "\n\n已执行步数：" + state.reactStep()
+                                + "，最多允许：" + maxSteps),
+                ContextBlock.single(BlockType.TOOLS, catalog.toString()),
+                ContextBlock.of(BlockType.HISTORY, observations)));
+        return allocation.content(BlockType.QUERY)
+                + "\n\n可用只读工具：\n" + allocation.content(BlockType.TOOLS)
+                + "\n已有观察：\n"
+                + (observations.isEmpty() ? "（无）"
+                        : String.join("\n", allocation.segments(BlockType.HISTORY)));
     }
 
     /** 参数只接受 JSON 对象；空对象或缺失都视为无参数。 */

@@ -131,11 +131,73 @@ public class KnowledgeService {
     /** 语义检索（topK 有界防御），检索失败降级为空列表由上游处理 */
     public KnowledgeSearchResponse search(String query, int topK) {
         int bounded = Math.min(Math.max(topK, 1), MAX_TOP_K);
-        List<KnowledgeChunk> chunks = vectorSearchService.search(query, bounded);
-        List<KnowledgeSearchResponse.Chunk> result = chunks.stream()
+        // 重叠块或重复导入可能产生多条同内容结果；先扩大候选池再去重，避免重复片段占满 topK。
+        int candidateLimit = Math.min(MAX_TOP_K, Math.max(bounded, bounded * 2));
+        List<KnowledgeChunk> chunks = vectorSearchService.search(query, candidateLimit);
+        List<KnowledgeSearchResponse.Chunk> result = distinctByContent(chunks, bounded).stream()
                 .map(c -> new KnowledgeSearchResponse.Chunk(c.getContent(), c.getMetadata()))
                 .toList();
         return KnowledgeSearchResponse.of(result);
+    }
+
+    /**
+     * 语义检索并返回父子装配后的上下文。
+     *
+     * 与原始子块搜索的区别：命中子块后恢复整个父章节，适合 RAG 生成和端到端质量测评；
+     * 原始搜索接口继续返回子块，保持已有调用方兼容。
+     */
+    public KnowledgeSearchResponse searchContext(String query, int topK) {
+        int bounded = Math.min(Math.max(topK, 1), MAX_TOP_K);
+        int candidateLimit = Math.min(MAX_TOP_K, Math.max(bounded, bounded * 2));
+        List<KnowledgeChunk> hits = vectorSearchService.search(query, candidateLimit);
+        List<KnowledgeChunk> contexts = vectorSearchService.assemble(
+                hits, properties.getRetrieval().getContextBudget());
+        List<KnowledgeSearchResponse.Chunk> result = distinctByContent(contexts, bounded).stream()
+                .map(c -> new KnowledgeSearchResponse.Chunk(c.getContent(), c.getMetadata()))
+                .toList();
+        return KnowledgeSearchResponse.of(result);
+    }
+
+    /**
+     * 语义检索并返回父子装配后的上下文。
+     *
+     * 与原始子块搜索的区别：命中子块后恢复整个父章节，适合 RAG 生成和端到端质量测评；
+     * 原始搜索接口继续返回子块，保持已有调用方兼容。
+     */
+    public KnowledgeSearchResponse searchContext(String query, int topK) {
+        int bounded = Math.min(Math.max(topK, 1), MAX_TOP_K);
+        int candidateLimit = Math.min(MAX_TOP_K, Math.max(bounded, bounded * 2));
+        List<KnowledgeChunk> hits = vectorSearchService.search(query, candidateLimit);
+        List<KnowledgeChunk> contexts = vectorSearchService.assemble(
+                hits, properties.getRetrieval().getContextBudget());
+        List<KnowledgeSearchResponse.Chunk> result = distinctByContent(contexts, bounded).stream()
+                .map(c -> new KnowledgeSearchResponse.Chunk(c.getContent(), c.getMetadata()))
+                .toList();
+        return KnowledgeSearchResponse.of(result);
+    }
+
+    /**
+     * 按规范化内容去重并限制返回条数。
+     *
+     * 空白差异不影响正文语义，因此统一压缩空白后作为去重键；保留融合排序中的首次出现，
+     * 让接口的 topK 表示 topK 个不同证据，而不是 topK 条可能重复的数据库行。
+     */
+    static List<KnowledgeChunk> distinctByContent(List<KnowledgeChunk> chunks, int limit) {
+        if (chunks == null || chunks.isEmpty() || limit <= 0) {
+            return List.of();
+        }
+        Map<String, KnowledgeChunk> unique = new LinkedHashMap<>();
+        for (KnowledgeChunk chunk : chunks) {
+            if (chunk == null || chunk.getContent() == null || chunk.getContent().isBlank()) {
+                continue;
+            }
+            String key = chunk.getContent().replaceAll("\\s+", " ").trim();
+            unique.putIfAbsent(key, chunk);
+            if (unique.size() >= limit) {
+                break;
+            }
+        }
+        return List.copyOf(unique.values());
     }
 
     /** 使用默认 topK 执行知识检索。 */

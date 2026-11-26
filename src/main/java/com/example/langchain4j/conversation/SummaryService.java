@@ -1,5 +1,10 @@
 package com.example.langchain4j.conversation;
 
+import com.example.langchain4j.common.context.Allocation;
+import com.example.langchain4j.common.context.BlockType;
+import com.example.langchain4j.common.context.ContextAssembler;
+import com.example.langchain4j.common.context.ContextBlock;
+import com.example.langchain4j.common.context.ContextScene;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.llm.LlmGateway;
 import com.example.langchain4j.llm.model.LlmRequest;
@@ -9,6 +14,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -33,19 +39,22 @@ public class SummaryService {
     private final AgentProperties properties;
     private final ThreadPoolTaskExecutor summaryExecutor;
     private final PromptTemplateService promptTemplateService;
+    private final ContextAssembler contextAssembler;
 
     public SummaryService(SummaryMapper summaryMapper,
                           MessageMapper messageMapper,
                           LlmGateway llmGateway,
                           AgentProperties properties,
                           ThreadPoolTaskExecutor summaryExecutor,
-                          PromptTemplateService promptTemplateService) {
+                          PromptTemplateService promptTemplateService,
+                          ContextAssembler contextAssembler) {
         this.summaryMapper = summaryMapper;
         this.messageMapper = messageMapper;
         this.llmGateway = llmGateway;
         this.properties = properties;
         this.summaryExecutor = summaryExecutor;
         this.promptTemplateService = promptTemplateService;
+        this.contextAssembler = contextAssembler;
     }
 
     /**
@@ -142,7 +151,7 @@ public class SummaryService {
      * @return 重写后的完整摘要文本（控制字符已清洗）；LLM 失败时返回空串
      */
     private String generateRefined(ConversationSummary segment, List<Message> messages) {
-        StringBuilder sb = new StringBuilder("新增对话：\n");
+        List<String> messageSegments = new ArrayList<>();
         for (Message m : messages) {
             if (m == null || m.getContent() == null) {
                 continue;
@@ -152,19 +161,27 @@ public class SummaryService {
             if (content.length() > maxItemLength) {
                 content = content.substring(0, maxItemLength) + "...[截断]";
             }
-            sb.append(Message.ROLE_USER.equals(m.getRole()) ? "[用户] " : "[助手] ")
-              .append(content).append('\n');
+            messageSegments.add((Message.ROLE_USER.equals(m.getRole()) ? "[用户] " : "[助手] ") + content);
         }
-        String userPrompt = "已有摘要：\n" + (segment.getContent().isBlank() ? "（无）" : segment.getContent())
-                + "\n\n" + sb;
         // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兜底代码默认值
+        String systemPrompt = promptTemplateService.resolve(
+                "SUMMARY_SYSTEM", PromptTemplates.SUMMARY_SYSTEM);
+        // 摘要场景只有两块可压缩内容：旧摘要（重写底稿）和本批新增对话；
+        // 旧摘要必须保留，新增对话超出预算时从最旧消息开始丢弃
+        Allocation allocation = contextAssembler.allocate(ContextScene.SUMMARY, List.of(
+                ContextBlock.single(BlockType.SYSTEM, systemPrompt),
+                ContextBlock.single(BlockType.SUMMARY,
+                        "已有摘要：\n" + (segment.getContent().isBlank() ? "（无）" : segment.getContent())),
+                ContextBlock.of(BlockType.HISTORY, messageSegments)));
+        String userPrompt = allocation.content(BlockType.SUMMARY)
+                + "\n\n新增对话：\n"
+                + String.join("\n", allocation.segments(BlockType.HISTORY));
         String summaryModel = properties.getHistory().getSummaryModel();
         if (summaryModel == null || summaryModel.isBlank()) {
             summaryModel = properties.getLlm().getDefaultModel();
         }
         String output = llmGateway.generate(LlmRequest.of(summaryModel,
-                promptTemplateService.resolve("SUMMARY_SYSTEM", PromptTemplates.SUMMARY_SYSTEM),
-                userPrompt).scene("summary")).text();
+                allocation.content(BlockType.SYSTEM), userPrompt).scene("summary")).text();
         if (output == null) {
             return "";
         }

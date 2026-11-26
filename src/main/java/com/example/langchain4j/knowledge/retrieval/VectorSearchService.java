@@ -1,6 +1,7 @@
 package com.example.langchain4j.knowledge.retrieval;
 
 import com.example.langchain4j.auth.security.UserContext;
+import com.example.langchain4j.common.metrics.AgentMetrics;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.knowledge.embedding.EmbeddingService;
 import com.example.langchain4j.knowledge.embedding.SparseEmbeddingService;
@@ -32,14 +33,17 @@ public class VectorSearchService {
     private final EmbeddingService embeddingService;
     private final SparseEmbeddingService sparseEmbeddingService;
     private final AgentProperties properties;
+    private final AgentMetrics metrics;
 
-    /** 注入知识块查询、稠密/稀疏嵌入服务与 Agent 配置。 */
+    /** 注入知识块查询、稠密/稀疏嵌入服务、Agent 配置与指标采集器。 */
     public VectorSearchService(KnowledgeChunkMapper knowledgeChunkMapper, EmbeddingService embeddingService,
-                               SparseEmbeddingService sparseEmbeddingService, AgentProperties properties) {
+                               SparseEmbeddingService sparseEmbeddingService, AgentProperties properties,
+                               AgentMetrics metrics) {
         this.knowledgeChunkMapper = knowledgeChunkMapper;
         this.embeddingService = embeddingService;
         this.sparseEmbeddingService = sparseEmbeddingService;
         this.properties = properties;
+        this.metrics = metrics;
     }
 
     /** 使用默认可见范围检索指定条数的知识块。 */
@@ -101,9 +105,12 @@ public class VectorSearchService {
         List<KnowledgeChunk> sparse = sparseSearch(query, userId, privateOnly);
         // 步骤2：RRF 融合去重排序并截断返回
         List<ScoredChunk> fused = fuse(dense, sparse, k);
+        long costMs = System.currentTimeMillis() - start;
+        double topScore = fused.isEmpty() ? 0.0 : fused.get(0).score();
+        metrics.recordRetrieval(dense.size(), sparse.size(), fused.size(), topScore, costMs);
         log.info("[vector] search done, queryLength={}, topK={}, privateOnly={}, dense={}, sparse={}, fused={}, costMs={}",
                 query.length(), k, privateOnly, dense.size(), sparse.size(), fused.size(),
-                System.currentTimeMillis() - start);
+                costMs);
         return fused;
     }
 

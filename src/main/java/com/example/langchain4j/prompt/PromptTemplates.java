@@ -158,6 +158,17 @@ public final class PromptTemplates {
             请严格基于已有资料回答；对资料未覆盖的部分，明确说明"根据现有资料无法确定"，不得编造。
             """;
 
+    /** 生成消息布局：参考资料块标题。资料在前可以避免长文档把问题挤到上下文中部。 */
+    public static final String CONTEXT_BLOCK_HEADER = """
+            【参考资料】
+            """;
+
+    /** 生成消息布局：用户问题块标题。问题放在最后，让模型注意力落在真正要回答的内容上。 */
+    public static final String QUESTION_BLOCK_HEADER = """
+
+            【用户问题】
+            """;
+
 
     /** 多轮对话改写：话题归属判断 + 指代消解一次完成，输出严格 JSON */
     public static final String REWRITE_SYSTEM = """

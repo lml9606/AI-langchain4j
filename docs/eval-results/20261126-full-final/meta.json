@@ -1,0 +1,28 @@
+{
+  "timestamp" : "2026-11-26T21:16:44.596325500",
+  "suite" : "full",
+  "caseCount" : 25,
+  "baseUrl" : "http://localhost:8082",
+  "model" : "rule-only",
+  "commit" : "cfded224dbc7ef50a87f9c2de11858b88ffd29e4",
+  "passed" : false,
+  "stats" : {
+    "total" : 25,
+    "passed" : 19,
+    "errors" : 0,
+    "passRate" : 0.76,
+    "avgCoverage" : 0.8266666666666667,
+    "p95LatencyMs" : 324
+  },
+  "baseline" : null,
+  "regression" : {
+    "regressed" : false,
+    "detail" : "无基线，首次运行只生成候选基线"
+  },
+  "thresholds" : {
+    "maxRegression" : 0.05,
+    "minPassRate" : 0.8,
+    "minCoverage" : 0.67,
+    "minAvgCoverage" : 0.7
+  }
+}

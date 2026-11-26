@@ -1,11 +1,15 @@
 package com.example.langchain4j.config;
 
 import com.example.langchain4j.common.constant.ChatOptions;
+import com.example.langchain4j.common.context.BlockType;
+import com.example.langchain4j.common.context.ContextScene;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 
 
 /**
@@ -57,6 +61,9 @@ public class AgentProperties {
 
     /** 多轮上下文（短期记忆）配置 */
     private History history = new History();
+
+    /** 上下文预算配置（按调用场景分配 token） */
+    private Context context = new Context();
 
     /** 工具运行时配置（全局写开关、超时、限流、人工确认与执行线程池） */
     private Tool tool = new Tool();
@@ -486,6 +493,33 @@ public class AgentProperties {
         private String model = "";
         /** 抽取调用输出 token 上限 */
         private int extractMaxOutputTokens = 512;
+    }
+
+    /**
+     * 上下文预算配置：每个 LLM 调用场景一份档位。
+     *
+     * 未单独配置的场景使用 default-total-tokens；
+     * 出问题时优先调低对应场景的 total-tokens 或调整保底与权重，不需要改代码。
+     */
+    @Data
+    public static class Context {
+        /** 未配置场景的默认可用输入 token 上限 */
+        private int defaultTotalTokens = 8000;
+        /** 生成链路布局开关：true 表示参考资料在前、用户问题在最后 */
+        private boolean questionLast = true;
+        /** 按场景覆盖；key 为 ContextScene 枚举名，如 GENERATE / REWRITE */
+        private Map<ContextScene, Scene> scenes = new EnumMap<>(ContextScene.class);
+
+        /** 单个场景的档位：总预算 + 块权重 + 块保底 */
+        @Data
+        public static class Scene {
+            /** 可用输入 token 上限；<=0 时回退到 default-total-tokens */
+            private int totalTokens = 0;
+            /** 剩余预算的分配权重，key 为 BlockType 枚举名 */
+            private Map<BlockType, Integer> weights = new EnumMap<>(BlockType.class);
+            /** 各块保底 token 数，key 为 BlockType 枚举名 */
+            private Map<BlockType, Integer> minimums = new EnumMap<>(BlockType.class);
+        }
     }
 
 }

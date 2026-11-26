@@ -1,5 +1,10 @@
 package com.example.langchain4j.conversation;
 
+import com.example.langchain4j.common.context.Allocation;
+import com.example.langchain4j.common.context.BlockType;
+import com.example.langchain4j.common.context.ContextAssembler;
+import com.example.langchain4j.common.context.ContextBlock;
+import com.example.langchain4j.common.context.ContextScene;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.conversation.model.RewriteResult;
 import com.example.langchain4j.llm.LlmGateway;
@@ -31,13 +36,15 @@ public class QueryRewriter {
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
     private final AgentProperties properties;
+    private final ContextAssembler contextAssembler;
 
     /** 注入 LLM 网关与提示词服务。 */
     public QueryRewriter(LlmGateway llmGateway, PromptTemplateService promptTemplateService,
-                         AgentProperties properties) {
+                         AgentProperties properties, ContextAssembler contextAssembler) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
         this.properties = properties;
+        this.contextAssembler = contextAssembler;
     }
 
     /**
@@ -66,9 +73,18 @@ public class QueryRewriter {
         try {
             // 步骤3：LLM 话题归属 + 改写一步完成（网关封装：json_object 约束 + 截断感知 + 提取解析，不可用返回 null）
             // 提示词走配置化解析：DB 有覆盖用 DB 版，否则兜底代码默认值
+            String systemPrompt = promptTemplateService.resolve(
+                    "REWRITE_SYSTEM", PromptTemplates.REWRITE_SYSTEM);
+            // 改写只需要最近两轮：历史作为弹性块，预算不足时丢弃更早的消息；
+            // 话题列表和最新输入是判断依据，放进强制/保底块
+            Allocation allocation = contextAssembler.allocate(ContextScene.REWRITE, List.of(
+                    ContextBlock.single(BlockType.SYSTEM, systemPrompt),
+                    ContextBlock.single(BlockType.SUMMARY, topicsLine(topics)),
+                    ContextBlock.of(BlockType.HISTORY, historySegments(history)),
+                    ContextBlock.single(BlockType.QUERY, "用户最新输入：" + cleaned)));
             JsonNode node = llmGateway.generateJson(LlmRequest.of(model,
-                    promptTemplateService.resolve("REWRITE_SYSTEM", PromptTemplates.REWRITE_SYSTEM),
-                    buildUserPrompt(cleaned, history, topics)).scene("rewrite"));
+                    allocation.content(BlockType.SYSTEM),
+                    renderUserPrompt(allocation)).scene("rewrite"));
             // 截断/解析失败 → 降级返回原句（宁可失忆不可失败）
             if (node == null) {
                 log.warn("[rewrite] degraded, reason=parse, queryLength={}, history={}, costMs={}",
@@ -101,25 +117,34 @@ public class QueryRewriter {
     }
 
     /** 拼装改写 user prompt：已有话题列表 + 历史（角色标注）+ 最新输入 */
-    private String buildUserPrompt(String query, List<Map<String, String>> history, List<String> topics) {
-        StringBuilder sb = new StringBuilder("已有话题列表：");
-        if (topics == null || topics.isEmpty()) {
-            sb.append("（无）");
-        } else {
-            sb.append(String.join("、", topics));
+    /** 话题列表行：空列表显式标注“（无）”，避免模型把缺失当成信息。 */
+    private String topicsLine(List<String> topics) {
+        return "已有话题列表："
+                + (topics == null || topics.isEmpty() ? "（无）" : String.join("、", topics));
+    }
+
+    /** 把历史消息渲染成带角色的片段，顺序保持正序，装配器会按尾部保留。 */
+    private List<String> historySegments(List<Map<String, String>> history) {
+        if (history == null) {
+            return List.of();
         }
-        sb.append("\n对话历史：\n");
+        List<String> segments = new java.util.ArrayList<>(history.size());
         for (Map<String, String> item : history) {
-            String content = item.get("content");
+            String content = item == null ? null : item.get("content");
             if (content == null || content.isBlank()) {
                 continue;
             }
-            String role = item.get("role");
-            sb.append(Message.ROLE_USER.equals(role) ? "[用户] " : "[助手] ")
-              .append(content).append('\n');
+            segments.add((Message.ROLE_USER.equals(item.get("role")) ? "[用户] " : "[助手] ") + content);
         }
-        sb.append("\n用户最新输入：").append(query);
-        return sb.toString();
+        return segments;
+    }
+
+    /** 按“话题列表 → 对话历史 → 最新输入”的固定顺序渲染 user prompt。 */
+    private String renderUserPrompt(Allocation allocation) {
+        return allocation.content(BlockType.SUMMARY)
+                + "\n对话历史：\n"
+                + String.join("\n", allocation.segments(BlockType.HISTORY))
+                + "\n\n" + allocation.content(BlockType.QUERY);
     }
 
     /** 控制字符清洗 + 首尾空白去除（与 entry 节点清洗规则一致） */

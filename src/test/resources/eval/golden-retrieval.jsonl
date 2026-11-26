@@ -1,0 +1,25 @@
+{"id":"hashmap-structure","category":"java-basic","query":"HashMap 的底层数据结构是什么？","expectedKeywords":["数组","链表","红黑树"],"topK":5}
+{"id":"concurrenthashmap-thread-safe","category":"java-concurrent","query":"ConcurrentHashMap 是怎么保证线程安全的？","expectedKeywords":["分段","CAS","synchronized"],"topK":5}
+{"id":"arraylist-linkedlist","category":"java-collection","query":"ArrayList 和 LinkedList 有什么区别？","expectedKeywords":["数组","链表","随机访问"],"topK":5}
+{"id":"string-builder-buffer","category":"java-basic","query":"String、StringBuilder、StringBuffer 有什么区别？","expectedKeywords":["改不了","线程安全","StringBuilder"],"topK":5}
+{"id":"equals-reference","category":"java-basic","query":"Java 中 == 和 equals 的区别是什么？","expectedKeywords":["引用","内容"],"topK":5}
+{"id":"hashcode-equals-contract","category":"java-basic","query":"为什么重写 equals 还要重写 hashCode？","expectedKeywords":["相等","hashCode","HashMap"],"topK":5}
+{"id":"abstract-interface","category":"java-oop","query":"抽象类和接口有什么区别？","expectedKeywords":["多继承","构造器","默认方法"],"topK":5}
+{"id":"overload-override","category":"java-oop","query":"方法重载和方法重写有什么区别？","expectedKeywords":["参数列表","运行时","编译时"],"topK":5}
+{"id":"static-instance","category":"java-basic","query":"static 修饰的成员和实例成员有什么区别？","expectedKeywords":["类","实例"],"topK":5}
+{"id":"final-finally-finalize","category":"java-basic","query":"final、finally、finalize 有什么区别？","expectedKeywords":["常量","释放","垃圾回收"],"topK":5}
+{"id":"checked-unchecked-exception","category":"java-exception","query":"受检异常和非受检异常有什么区别？","expectedKeywords":["编译","非受检","IOException"],"topK":5}
+{"id":"jvm-memory-area","category":"jvm","query":"JVM 运行时数据区包括哪些区域？","expectedKeywords":["堆","栈","方法区"],"topK":5}
+{"id":"gc-reachability","category":"jvm","query":"JVM 如何判断对象可以被回收？","expectedKeywords":["可达性分析","引用链","根对象"],"topK":5}
+{"id":"classloader-parent-delegation","category":"jvm","query":"类加载器的双亲委派机制是什么？","expectedKeywords":["双亲委派","加载","类加载器"],"topK":5}
+{"id":"thread-lifecycle","category":"java-concurrent","query":"Java 线程的生命周期有哪些状态？","expectedKeywords":["新建","就绪","终止"],"topK":5}
+{"id":"synchronized-lock","category":"java-concurrent","query":"synchronized 和 Lock 有什么区别？","expectedKeywords":["对象锁","可中断","Condition"],"topK":5}
+{"id":"volatile-feature","category":"java-concurrent","query":"volatile 关键字有什么作用？","expectedKeywords":["可见性","重排","原子性"],"topK":5}
+{"id":"thread-pool-parameters","category":"java-concurrent","query":"线程池的核心参数有哪些？","expectedKeywords":["核心线程","队列","拒绝策略"],"topK":5}
+{"id":"mysql-leftmost-prefix","category":"mysql","query":"MySQL 联合索引的最左前缀原则是什么？","expectedKeywords":["最左前缀","联合索引","范围查询"],"topK":5}
+{"id":"transaction-isolation","category":"mysql","query":"MySQL 的事务隔离级别有哪些？","expectedKeywords":["读未提交","可重复读","幻读"],"topK":5}
+{"id":"redis-cache-penetration","category":"redis","query":"缓存穿透、缓存击穿和缓存雪崩有什么区别？","expectedKeywords":["布隆过滤器","空值","穿透"],"topK":5}
+{"id":"redis-lock-safety","category":"redis","query":"Redis 分布式锁如何避免误删别人的锁？","expectedKeywords":["过期","误删","Lua"],"topK":5}
+{"id":"spring-bean-lifecycle","category":"spring","query":"Spring Bean 的生命周期是怎样的？","expectedKeywords":["实例化","初始化","BeanPostProcessor"],"topK":5}
+{"id":"spring-transaction-failure","category":"spring","query":"Spring 事务在什么情况下会失效？","expectedKeywords":["自调用","同类","代理"],"topK":5}
+{"id":"mq-idempotency","category":"mq","query":"消息队列如何保证消费幂等？","expectedKeywords":["去重","幂等","消费"],"topK":5}

@@ -1,6 +1,11 @@
 package com.example.langchain4j.graph.task.nodes;
 
 import com.example.langchain4j.common.exception.BizException;
+import com.example.langchain4j.common.context.Allocation;
+import com.example.langchain4j.common.context.BlockType;
+import com.example.langchain4j.common.context.ContextAssembler;
+import com.example.langchain4j.common.context.ContextBlock;
+import com.example.langchain4j.common.context.ContextScene;
 import com.example.langchain4j.common.util.JsonUtil;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.state.WorkflowState;
@@ -37,13 +42,15 @@ public class TaskResolveNode implements NodeAction<WorkflowState> {
     private final LlmGateway llmGateway;
     private final PromptTemplateService promptTemplateService;
     private final AgentProperties properties;
+    private final ContextAssembler contextAssembler;
 
     /** 注入模型网关、提示词服务和 ReAct 配置；节点本身无本地状态，可安全复用。 */
     public TaskResolveNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService,
-                           AgentProperties properties) {
+                           AgentProperties properties, ContextAssembler contextAssembler) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
         this.properties = properties;
+        this.contextAssembler = contextAssembler;
     }
 
     /**
@@ -55,7 +62,12 @@ public class TaskResolveNode implements NodeAction<WorkflowState> {
         long start = System.currentTimeMillis();
         String systemPrompt = promptTemplateService.resolve(
                 "TASK_RESOLVE_SYSTEM", PromptTemplates.TASK_RESOLVE_SYSTEM);
-        String userPrompt = "用户请求：\n" + state.effectiveQuery();
+        // 任务解析只需要 system + 本轮请求，两块都是强制块，预算只用来兜住异常超长输入
+        Allocation allocation = contextAssembler.allocate(ContextScene.TASK_RESOLVE, List.of(
+                ContextBlock.single(BlockType.SYSTEM, systemPrompt),
+                ContextBlock.single(BlockType.QUERY, "用户请求：\n" + state.effectiveQuery())));
+        systemPrompt = allocation.content(BlockType.SYSTEM);
+        String userPrompt = allocation.content(BlockType.QUERY);
         log.info("[task-resolve] start, queryLength={}, model={}", state.effectiveQuery().length(),
                 state.model());
 

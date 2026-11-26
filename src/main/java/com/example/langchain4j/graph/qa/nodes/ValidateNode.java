@@ -1,6 +1,11 @@
 package com.example.langchain4j.graph.qa.nodes;
 
 import com.example.langchain4j.common.constant.ChatOptions;
+import com.example.langchain4j.common.context.Allocation;
+import com.example.langchain4j.common.context.BlockType;
+import com.example.langchain4j.common.context.ContextAssembler;
+import com.example.langchain4j.common.context.ContextBlock;
+import com.example.langchain4j.common.context.ContextScene;
 import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.graph.qa.model.QaIntent;
 import com.example.langchain4j.graph.qa.support.EvidenceAssessor;
@@ -15,6 +20,7 @@ import org.bsc.langgraph4j.action.NodeAction;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -36,13 +42,16 @@ public class ValidateNode implements NodeAction<WorkflowState> {
     private final PromptTemplateService promptTemplateService;
     private final EvidenceAssessor evidenceAssessor;
     private final AgentProperties properties;
+    private final ContextAssembler contextAssembler;
 
     public ValidateNode(LlmGateway llmGateway, PromptTemplateService promptTemplateService,
-                        EvidenceAssessor evidenceAssessor, AgentProperties properties) {
+                        EvidenceAssessor evidenceAssessor, AgentProperties properties,
+                        ContextAssembler contextAssembler) {
         this.llmGateway = llmGateway;
         this.promptTemplateService = promptTemplateService;
         this.evidenceAssessor = evidenceAssessor;
         this.properties = properties;
+        this.contextAssembler = contextAssembler;
     }
 
     @Override
@@ -106,9 +115,14 @@ public class ValidateNode implements NodeAction<WorkflowState> {
     }
 
     private QaResult llmCheck(WorkflowState state) {
-        String userPrompt = "用户需求：\n" + state.effectiveQuery()
-                + "\n\n参考资料：\n" + state.context()
-                + "\n\n候选回答：\n" + state.result();
+        // 问题和候选回答必须完整参与判断，参考资料超出预算时按段落边界截断
+        Allocation allocation = contextAssembler.allocate(ContextScene.VALIDATE, List.of(
+                ContextBlock.single(BlockType.QUERY, "用户需求：\n" + nullSafe(state.effectiveQuery())),
+                ContextBlock.single(BlockType.RETRIEVAL, "参考资料：\n" + nullSafe(state.context())),
+                ContextBlock.single(BlockType.ANSWER, "候选回答：\n" + nullSafe(state.result()))));
+        String userPrompt = allocation.content(BlockType.QUERY)
+                + "\n\n" + allocation.content(BlockType.RETRIEVAL)
+                + "\n\n" + allocation.content(BlockType.ANSWER);
         try {
             JsonNode node = llmGateway.generateJson(LlmRequest.of(state.model(),
                     promptTemplateService.resolve("VALIDATE_LLM_SYSTEM", PromptTemplates.VALIDATE_LLM_SYSTEM),
@@ -152,6 +166,11 @@ public class ValidateNode implements NodeAction<WorkflowState> {
         // 不做“致歉短语”黑名单：正常回答也可能礼貌表达不确定。
         // 真正的模型失败由生成节点抛错并走 fallback，不能靠关键词猜测。
         return true;
+    }
+
+    /** 空值转空串，避免模板拼接出现字面 null。 */
+    private String nullSafe(String text) {
+        return text == null ? "" : text;
     }
 
     private record QaResult(boolean valid, String issue, String reason) {

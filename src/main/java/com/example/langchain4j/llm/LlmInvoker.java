@@ -138,6 +138,8 @@ public class LlmInvoker {
         Integer tokens = response.tokenUsage() != null ? response.tokenUsage().totalTokenCount() : null;
         Integer inputTokens = response.tokenUsage() != null ? response.tokenUsage().inputTokenCount() : null;
         Integer outputTokens = response.tokenUsage() != null ? response.tokenUsage().outputTokenCount() : null;
+        // token 用量只做成本观测：供应商不返回时留空，不影响本次生成结果
+        metrics.recordLlmTokens(modelName, inputTokens, outputTokens);
         FinishReason finishReason = response.finishReason();
         if (FinishReason.LENGTH.equals(finishReason)) {
             log.warn("[llm] output truncated by maxOutputTokens, model={}", modelName);

@@ -1,0 +1,35 @@
+{
+  "timestamp" : "2026-11-26T21:34:36.949464900",
+  "suite" : "full",
+  "caseCount" : 25,
+  "baseUrl" : "http://localhost:8082",
+  "model" : "rule-only",
+  "commit" : "cfded224dbc7ef50a87f9c2de11858b88ffd29e4",
+  "passed" : true,
+  "stats" : {
+    "total" : 25,
+    "passed" : 25,
+    "errors" : 0,
+    "passRate" : 1.0,
+    "avgCoverage" : 1.0,
+    "p95LatencyMs" : 227
+  },
+  "baseline" : {
+    "passRate" : 1.0,
+    "avgCoverage" : 1.0,
+    "caseCount" : 25,
+    "suite" : "full",
+    "createdAt" : "2026-11-26T21:29:54.804385500",
+    "commit" : "cfded224dbc7ef50a87f9c2de11858b88ffd29e4"
+  },
+  "regression" : {
+    "regressed" : false,
+    "detail" : "基线通过率 100.00%，本次 100.00%；基线平均覆盖率 100.00%，本次 100.00%；允许回退 5.00%"
+  },
+  "thresholds" : {
+    "minAvgCoverage" : 0.7,
+    "maxRegression" : 0.05,
+    "minPassRate" : 0.8,
+    "minCoverage" : 0.67
+  }
+}
