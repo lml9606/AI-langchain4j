@@ -19,10 +19,17 @@ public class UserMemory {
     public static final String TYPE_FACT = "FACT";
     /** 持续生效的任务约束（篇幅、口径、流程要求等） */
     public static final String TYPE_TASK_CONSTRAINT = "TASK_CONSTRAINT";
+    /** 临时事实（行程、短期状态等）：只短期保留，默认不参与常规召回 */
+    public static final String TYPE_TEMPORARY = "TEMPORARY";
+
+    /** 候选状态：已抽取但还没达到晋升条件，不参与召回 */
+    public static final String STATUS_CANDIDATE = "CANDIDATE";
+    /** 生效状态：允许被召回注入提示词 */
+    public static final String STATUS_ACTIVE = "ACTIVE";
 
     private Long id;
     private String userId;
-    /** PREFERENCE / FACT / TASK_CONSTRAINT */
+    /** PREFERENCE / FACT / TASK_CONSTRAINT / TEMPORARY */
     private String memoryType;
     /** 稳定短标签：同一含义必须复用同一 key（如 answer_style） */
     private String memoryKey;
@@ -30,7 +37,21 @@ public class UserMemory {
     private String content;
     /** 0~1，召回排序用 */
     private Double importance;
+    /** 0~1，抽取模型对本条记忆的置信度 */
+    private Double confidence;
+    /** CANDIDATE / ACTIVE；只有 ACTIVE 参与召回 */
+    private String status;
+    /** 同一 key 被抽取到的次数，第二次出现自动晋升 ACTIVE */
+    private Integer seenCount;
+    /** 当前内容开始生效的时间 */
+    private OffsetDateTime validFrom;
     private String sourceConversationId;
+    /** 来源消息 ID，用于抽取幂等和问题追溯 */
+    private String sourceMessageId;
+    /** 用户原话片段，便于纠错和审计 */
+    private String sourceQuote;
+    /** 抽取规则/提示词版本，便于灰度与回滚 */
+    private String extractorVersion;
     /** null 表示永久有效 */
     private OffsetDateTime expiresAt;
     private OffsetDateTime lastUsedAt;

@@ -454,8 +454,34 @@ public class AgentProperties {
         private int maxPromptChars = 800;
         /** 低重要度记忆不注入（0~1） */
         private double minImportance = 0.35;
-        /** 记忆默认有效期（天，<=0 表示永久） */
+        /** 记忆默认有效期（天，<=0 表示永久）；按类型未配置时兜底使用 */
         private int ttlDays = 180;
+        /** 偏好类记忆有效期（天） */
+        private int ttlDaysPreference = 365;
+        /** 任务约束类记忆有效期（天） */
+        private int ttlDaysConstraint = 365;
+        /** 稳定事实类记忆有效期（天） */
+        private int ttlDaysFact = 90;
+        /** 临时事实有效期（天），默认不参与常规召回 */
+        private int ttlDaysTemporary = 7;
+        /** 候选记忆未晋升时的有效期（天） */
+        private int candidateTtlDays = 30;
+        /** 偏好类允许的 key 字典：模型只能从这些 key 里选，防止同义 key 堆积 */
+        private List<String> preferenceKeys = List.of(
+                "answer_style", "answer_length", "amount_unit", "report_dimension",
+                "language", "tone", "display_format");
+        /** 任务约束类允许的 key 字典 */
+        private List<String> constraintKeys = List.of(
+                "answer_length", "answer_style", "data_scope", "submit_policy",
+                "report_dimension", "display_format");
+        /** 同义合并时最多比较多少条已有记忆 */
+        private int mergeCandidateLimit = 20;
+        /** 关键词相似度阈值：低于该值直接判定为不同记忆 */
+        private double mergeSimilarity = 0.82;
+        /** 向量相似度阈值：关键词命中后再用 embedding 复核 */
+        private double mergeEmbeddingSimilarity = 0.85;
+        /** 抽取规则/提示词版本，写入记忆表用于灰度对比 */
+        private String extractorVersion = "memory-v2";
         /** 抽取调用使用的模型；空 = 全局默认模型 */
         private String model = "";
         /** 抽取调用输出 token 上限 */

@@ -19,10 +19,10 @@ import com.example.langchain4j.config.AgentProperties;
 import com.example.langchain4j.conversation.ConversationService;
 import com.example.langchain4j.conversation.ConversationSummary;
 import com.example.langchain4j.conversation.Message;
-import com.example.langchain4j.conversation.model.RewriteResult;
 import com.example.langchain4j.conversation.QueryRewriter;
 import com.example.langchain4j.conversation.SegmentService;
 import com.example.langchain4j.conversation.SummaryService;
+import com.example.langchain4j.conversation.model.RewriteResult;
 import com.example.langchain4j.graph.qa.model.QaIntent;
 import com.example.langchain4j.graph.state.WorkflowState;
 import com.example.langchain4j.graph.task.model.TaskOperation;
@@ -30,8 +30,8 @@ import com.example.langchain4j.guard.RateLimiter;
 import com.example.langchain4j.guard.SessionLock;
 import com.example.langchain4j.llm.ModelRegistry;
 import com.example.langchain4j.memory.UserMemoryService;
-import com.example.langchain4j.prompt.PromptTemplates;
 import com.example.langchain4j.prompt.PromptTemplateService;
+import com.example.langchain4j.prompt.PromptTemplates;
 import com.example.langchain4j.tool.confirmation.ConfirmationCancellationService;
 import com.example.langchain4j.tool.confirmation.ConfirmationService;
 import com.example.langchain4j.tool.confirmation.TaskConfirmService;
@@ -49,18 +49,18 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
 import java.time.OffsetDateTime;
-import java.util.concurrent.Future;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.function.Supplier;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Supplier;
 
 /**
  * Agent 编排服务：限流、会话、会话锁、图执行和响应组装。
- *
+ * <p>
  * 限流（429）与会话锁（409）在进入下游前拒绝；对话图有整体超时，超时后取消后台任务并
  * 返回降级应答；确认写链路超时则返回“执行中”，以 ai_tool_execution 台账作为执行事实源。
  * 图内异常由节点层消化，这里只兜住 graph 框架级异常。
@@ -129,11 +129,11 @@ public class AgentService {
 
     /**
      * 同步对话：在会话锁内完成用户消息落库、上下文装配、图执行和助手消息落库。
-     *
+     * <p>
      * conversationId 同时作为 LangGraph 的 threadId，checkpoint 按 threadId 隔离存储，
      * 因此一个会话对应一条 checkpoint 历史，续聊或断点恢复时可以直接找回对应状态。
      * 限流、输入清洗、模型解析和会话初始化在锁外完成；图执行异常和整体超时由后续调用统一处理。
-     *
+     * <p>
      * 返回本轮最终响应；输入非法、限流、会话锁冲突或执行失败时抛出对应的业务异常。
      */
     public ChatResponse chat(ChatRequest request) {
@@ -159,23 +159,24 @@ public class AgentService {
         //    用户与助手消息都在锁内落库，一轮对话闭环后才释放锁；
         //    否则上一轮释放锁后、下一轮先读到历史时，上一轮回答尚未落库，
         //    会造成乱序（userA → userB → assistantA）与上下文丢失。
-        WorkflowState state = sessionLock.executeWithLock(conversationId, () -> {
+        PreparedInvocation invocation = sessionLock.executeWithLock(conversationId, () -> {
             // 新用户消息视为放弃旧确认：数据库先取消并提交，最后才清理 Redis 令牌。
             confirmationCancellationService.cancelByNewMessage(conversationId, userId);
-            WorkflowState result =
+            PreparedInvocation result =
                     prepareAndInvoke(conversationId, userId, query, model, answerMode, visibility);
             // 助手消息持久化（结果已生成，落库失败降级不阻断响应）；
             // 超时路径在 invokeGraph 内返回降级应答，这里同样落库，保证一问一答闭环
             // context 快照：改写视图锚定检索资料原文而非生成答案，防追问指代带偏
             try {
                 conversationService.saveMessage(conversationId, Message.ROLE_ASSISTANT,
-                        result.result(), model, result.tokenUsage(),
-                        snapshotContext(result.context()));
+                        result.state().result(), model, result.state().tokenUsage(),
+                        snapshotContext(result.state().context()));
             } catch (Exception e) {
                 log.warn("[agent] save assistant message failed, degrade: {}", e.getMessage());
             }
             return result;
         });
+        WorkflowState state = invocation.state();
         if (state.fallback()) {
             metrics.recordFallback();
         }
@@ -185,7 +186,8 @@ public class AgentService {
         }
         // 长期记忆异步抽取：只提交任务，不阻塞本轮响应；失败不影响对话
         if (!state.fallback()) {
-            userMemoryService.extractAsync(userId, conversationId, query, state.result());
+            userMemoryService.extractAsync(userId, conversationId, invocation.userMessageId(),
+                    query, state.result());
         }
         log.info("[agent] chat done, conversation={}, intent={}, fallback={}, handoff={}, " +
                         "costMs={}, resultLength={}, tokenUsage={}, toolCalls={}, rootCause={}",
@@ -198,7 +200,7 @@ public class AgentService {
     /**
      * 流式对话：与同步 chat 共用输入校验、限流、会话锁、消息落库和响应组装，
      * 差别只在图执行阶段把节点进度实时推给 sink，最终结果通过 done 事件返回。
-     *
+     * <p>
      * 事件顺序：meta → node（0..N）→ done；失败时以 error 结束。
      * 客户端断开（sink 返回 false）立即停止图执行，不落助手消息，
      * 避免把半成品答案写进历史导致下一轮上下文错乱。
@@ -233,7 +235,7 @@ public class AgentService {
             return;
         }
 
-        WorkflowState state = sessionLock.executeWithLock(conversationId, () -> {
+        PreparedInvocation invocation = sessionLock.executeWithLock(conversationId, () -> {
             confirmationCancellationService.cancelByNewMessage(conversationId, userId);
             PreparedTurn turn = prepareTurn(conversationId, userId, query, model);
             RunnableConfig config = RunnableConfig.builder().threadId(conversationId).build();
@@ -254,14 +256,15 @@ public class AgentService {
                 log.warn("[agent] stream save assistant message failed, degrade: {}",
                         e.getMessage());
             }
-            return result;
+            return new PreparedInvocation(result, turn.userMessageId());
         });
 
-        if (state == null) {
+        if (invocation == null) {
             log.info("[agent] stream cancelled mid-graph, conversation={}, costMs={}",
                     conversationId, System.currentTimeMillis() - start);
             return;
         }
+        WorkflowState state = invocation.state();
         if (state.fallback()) {
             metrics.recordFallback();
         }
@@ -270,7 +273,8 @@ public class AgentService {
         }
         // 流式轮同样异步沉淀长期记忆；只在正常回答时抽取，避免把兜底文案当成事实
         if (!state.fallback()) {
-            userMemoryService.extractAsync(userId, conversationId, query, state.result());
+            userMemoryService.extractAsync(userId, conversationId, invocation.userMessageId(),
+                    query, state.result());
         }
         ChatResponse response = buildChatResponse(conversationId, state, start);
         log.info("[agent] stream done, conversation={}, intent={}, fallback={}, handoff={}, "
@@ -283,12 +287,12 @@ public class AgentService {
 
     /**
      * 确认写操作：令牌只做短期授权，执行状态由数据库台账兜底。
-     *
+     * <p>
      * 入口先做限流和会话归属校验，然后在严格会话锁内只读取一次令牌。读取时使用
      * Watchdog 自动续期的会话锁，Redis 故障按 fail-closed 处理，避免确认动作脱离锁执行。
      * 锁定后读取令牌；令牌不存在时按执行台账幂等重放。台账正在执行返回 409，
      * 已成功或已取消返回既有结果；只有台账允许时才进入确认执行或取消。
-     *
+     * <p>
      * 用户同意后，写工具会和执行台账在同一个数据库事务内完成；成功删除令牌，失败或
      * 没有台账时保留令牌，允许用户用同一个 confirmationId 重试。重复点击由令牌和
      * 台账幂等键共同拦截，不会重复写业务数据。
@@ -358,9 +362,12 @@ public class AgentService {
                 }
             }
             log.info("[agent] confirm start, conversation={}, confirmationTail={}, approved={}, " +
-                            "steps={}, firstTool={}", conversationId, idTail(action.confirmationId()),
-                    Boolean.TRUE.equals(request.getApproved()), action.steps().size(), action.tool());
-            return Boolean.TRUE.equals(request.getApproved()) ? executeConfirmed(action, userId, start) :
+                            "steps={}, firstTool={}", conversationId,
+                    idTail(action.confirmationId()),
+                    Boolean.TRUE.equals(request.getApproved()), action.steps().size(),
+                    action.tool());
+            return Boolean.TRUE.equals(request.getApproved()) ?
+                    executeConfirmed(action, userId, start) :
                     rejectConfirmed(action, start);
         });
     }
@@ -396,7 +403,7 @@ public class AgentService {
 
     /**
      * 执行路径：执行已确认的单个写工具，并以数据库台账判定成败。
-     *
+     * <p>
      * 成功（台账 SUCCEEDED）删除令牌；失败或没有台账时保留令牌，
      * 用户可以用同一个 confirmationId 重试。重复执行由台账唯一键拦截。
      */
@@ -457,7 +464,7 @@ public class AgentService {
             if (e instanceof BizException biz
                     && biz.getCode() == ErrorCode.CONFIRMATION_IN_PROGRESS.getCode()) {
                 log.warn("[agent] confirm still running, keep token and wait for task ledger, "
-                        + "conversation={}, confirmationTail={}", action.conversationId(),
+                                + "conversation={}, confirmationTail={}", action.conversationId(),
                         idTail(action.confirmationId()));
                 throw e;
             }
@@ -476,7 +483,7 @@ public class AgentService {
 
     /**
      * 把图内轨迹转成对外业务结果，供接口层区分业务成功、失败和执行中。
-     *
+     * <p>
      * ReAct 是只读诊断，不要求每一步工具都成功；固定读写则按“任一失败即失败”处理，
      * 因为固定写操作是原子业务动作，不能把部分失败当成整体成功。
      */
@@ -553,7 +560,7 @@ public class AgentService {
 
     /**
      * 多步运行转对外业务结果。
-     *
+     * <p>
      * PARTIAL_FAILED 必须如实告诉用户“前面步骤已生效、从第 N 步失败”，
      * 不能因为图正常返回就当成整体成功。
      */
@@ -585,7 +592,9 @@ public class AgentService {
                 blankToDefault(run.getErrorMessage(), "写操作执行失败"));
     }
 
-    /** 运行失败原因：带步骤序号，便于用户和运维定位。 */
+    /**
+     * 运行失败原因：带步骤序号，便于用户和运维定位。
+     */
     private String failureReason(TaskRun run) {
         if (run == null) {
             return "NO_EXECUTION_RECORD:未找到运行台账，写操作未落地";
@@ -664,7 +673,9 @@ public class AgentService {
                 "上次确认执行失败：" + failureReason(execution) + "，请重新发起操作");
     }
 
-    /** 台账错误字段可能来自历史数据或异常分支，对外必须给出稳定可读的兜底。 */
+    /**
+     * 台账错误字段可能来自历史数据或异常分支，对外必须给出稳定可读的兜底。
+     */
     private String blankToDefault(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
     }
@@ -684,7 +695,7 @@ public class AgentService {
 
     /**
      * 确认执行入口：直接执行已确认的单个写工具，不重新意图识别、读写分类或参数抽取。
-     *
+     * <p>
      * 执行事实以 ai_tool_execution 为准；TaskConfirmService 只顺序调用
      * 写节点、回答节点、收尾节点，保留整体超时边界。
      */
@@ -697,11 +708,11 @@ public class AgentService {
 
     /**
      * 断点恢复：从最近 checkpoint 继续执行（无可恢复任务时返回 empty）。
-     *
+     * <p>
      * 机制说明：LangGraph 的 checkpoint 是按“超级步骤”在节点执行边界落盘的
      * （每执行完一个节点保存一次完整状态）。invoke(GraphInput.resume()) 会加载
      * 该 threadId 最近一次 checkpoint，从上次中断的节点之后继续跑，而不是重头执行。
-     *
+     * <p>
      * 与 chat 一样在会话锁内执行，防止恢复与新请求并发写 checkpoint 和消息。
      * 仅当最后一轮未闭环（最新消息是 user，例如进程中断）时才恢复；超时降级轮已经
      * 落库 assistant，属于已闭环，不会二次恢复产生双份回答。恢复出的结果同样在锁内
@@ -745,7 +756,7 @@ public class AgentService {
 
     /**
      * 查询 checkpoint 快照（不存在或 saver 故障返回 empty）。
-     *
+     * <p>
      * StateSnapshot 是 LangGraph 对“某线程当前执行位置”的只读视图：
      * 包含最新状态数据（state()）、下一个待执行节点（next()）等元信息，
      * 可用于排查“图跑到哪一步了”。
@@ -782,7 +793,8 @@ public class AgentService {
         return state.taskEvidence().stream()
                 .map(item -> new ChatResponse.Citation(Texts.textOr(item.get("type"), "TOOL"),
                         Texts.textOr(item.get("sourceId"), ""), Texts.textOr(item.get("title"), ""),
-                        Texts.textOr(item.get("snippet"), ""), doubleOf(item.get("score")))).toList();
+                        Texts.textOr(item.get("snippet"), ""), doubleOf(item.get("score"))))
+                .toList();
     }
 
     /**
@@ -792,7 +804,8 @@ public class AgentService {
         return state.taskTrace().stream()
                 .map(item -> new ChatResponse.ToolCallTrace(Texts.textOr(item.get("tool"), ""),
                         mapOf(item.get("args")), Texts.textOr(item.get("purpose"), ""),
-                        Boolean.TRUE.equals(item.get("success")), Texts.textOr(item.get("summary"), ""),
+                        Boolean.TRUE.equals(item.get("success")),
+                        Texts.textOr(item.get("summary"), ""),
                         Texts.textOr(item.get("errorCode"), ""), longOf(item.get("costMs")),
                         (int) longOf(item.get("stepNo")))).toList();
     }
@@ -838,7 +851,7 @@ public class AgentService {
 
     /**
      * 同步与流式共用的响应组装：答案、引用、置信度、工具轨迹、待确认卡片和业务结果。
-     *
+     * <p>
      * 待确认动作存在时业务结果固定为 NOT_EXECUTED（等待人工确认），不能被“图正常返回”
      * 误判成业务成功；普通任务轮才按工具痕迹计算业务成败。
      *
@@ -902,7 +915,9 @@ public class AgentService {
         return "";
     }
 
-    /** 把对象安全转成字符串键 Map；类型不符返回空 Map。 */
+    /**
+     * 把对象安全转成字符串键 Map；类型不符返回空 Map。
+     */
     @SuppressWarnings("unchecked")
     private Map<String, Object> mapOf(Object value) {
         return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
@@ -910,7 +925,7 @@ public class AgentService {
 
     /**
      * 入口输入规整：剔除控制字符 + 去首尾空白，清洗后为空抛 400。
-     *
+     * <p>
      * 与 Controller @Valid 的分工：@Valid 拦空串与超长（4000），这里堵
      * “全是控制字符”的漏网输入，并保证存库/改写/入图全链路使用同一份清洗后的 query。
      * QueryRewriter 与 EntryNode 内的清洗保留为兜底（幂等，再洗一遍无害）。
@@ -928,11 +943,11 @@ public class AgentService {
 
     /**
      * 锁内准备并执行图（同步路径）：保存用户消息 → 双视图装配 → 改写/话题归属 → 图执行。
-     *
+     * <p>
      * 调用约束：必须已在 {@code sessionLock.executeWithLock(...)} 内调用。
      * 会话锁覆盖“用户消息落库 → 图执行 → 助手消息落库”整轮闭环，保证同一会话
      * 不会并发进入，也不会出现上一轮回答尚未落库、下一轮就读历史的乱序问题。
-     *
+     * <p>
      * 职责边界：不处理限流、输入清洗、模型解析和会话创建，这些已经在 chat() 入口完成；
      * 不负责助手消息落库、指标上报和转人工建单，由调用方拿到结果后处理。图执行异常
      * 转成业务错误码抛出。
@@ -943,20 +958,21 @@ public class AgentService {
      * @param model          本轮模型名（已由 ModelRegistry 解析）
      * @param answerMode     回答模式（已归一，白名单外回默认）
      * @param visibility     检索可见范围（已归一，白名单外回默认）
-     * @return 图执行最终状态；超时路径返回 {@code fallback=true} 的降级状态
+     * @return 图执行最终状态 + 本轮用户消息 ID；超时路径返回 {@code fallback=true} 的降级状态
      */
-    private WorkflowState prepareAndInvoke(String conversationId, String userId, String query,
-                                           String model, String answerMode, String visibility) {
+    private PreparedInvocation prepareAndInvoke(String conversationId, String userId, String query,
+                                                String model, String answerMode, String visibility) {
         // 步骤1：锁内准备本轮上下文：落用户消息、装配改写/生成双视图、改写与话题段归属
         PreparedTurn turn = prepareTurn(conversationId, userId, query, model);
         // 步骤2：把原始输入、改写句、生成视图交给完整图执行（意图 → 检索/工具 → 生成 → 校验 → 收尾）
-        return invokeGraph(conversationId, userId, query, turn.rewrite().rewritten(),
+        WorkflowState state = invokeGraph(conversationId, userId, query, turn.rewrite().rewritten(),
                 turn.history(), turn.summary(), turn.memory(), model, answerMode, visibility);
+        return new PreparedInvocation(state, turn.userMessageId());
     }
 
     /**
      * 每轮锁内准备（同步/流式共用），装配两条独立的历史视图：
-     *
+     * <p>
      * 改写视图取跨话题最近 N 条，只给改写器，用于指代消解和话题判断；生成视图取
      * 当前话题段内原文，只给生成 LLM，其他话题不带，避免把无关上下文混入回答。
      *
@@ -964,7 +980,7 @@ public class AgentService {
      * @param userId         当前用户 ID（用于召回长期记忆）
      * @param query          原始用户输入（落库与改写输入）
      * @param model          本轮模型名（改写调用与消息落库共用）
-     * @return 每轮准备产物（改写结果 + 生成视图 + 当前段摘要 + 长期记忆文本）
+     * @return 每轮准备产物（改写结果 + 生成视图 + 当前段摘要 + 长期记忆文本 + 用户消息 ID）
      */
     private PreparedTurn prepareTurn(String conversationId, String userId, String query,
                                      String model) {
@@ -1004,7 +1020,7 @@ public class AgentService {
                         "summaryLength={}, memoryLength={}", conversationId, segment.getSegmentId(),
                 rewrite.rewritten() != null && !rewrite.rewritten().isBlank(),
                 generationView.size(), summary.length(), memory.length());
-        return new PreparedTurn(rewrite, generationView, summary, memory);
+        return new PreparedTurn(rewrite, generationView, summary, memory, userMessage.getId());
     }
 
     /**
@@ -1034,7 +1050,7 @@ public class AgentService {
 
     /**
      * 图执行（同步路径）：提交专用线程池 + 整体超时中止 + 异常转换为业务错误码。
-     *
+     * <p>
      * 超时策略：Future 超时后调用 cancel(true) 尽力中断工作线程，并直接返回降级应答，
      * 不再等待或接收可能稍后完成的返回值；user 和 assistant 仍照常落库，保证一问一答闭环。
      * 取消是否成功只用于观测，不能说明工作线程一定已经停止。
@@ -1065,7 +1081,7 @@ public class AgentService {
 
     /**
      * 统一的图执行入口：提交专用线程池 + 整体超时 + 超时取消。
-     *
+     * <p>
      * 只执行一次，不做 catch 后重跑：写工具、模型调用都可能产生副作用，
      * 盲目重跑会重复执行工具或重复计费。超时后统一按 TIMEOUT 处理，不会在等待返回后
      * 再接收结果；写操作是否已提交以 ai_tool_execution 台账为准。
@@ -1085,7 +1101,7 @@ public class AgentService {
 
     /**
      * 流式图执行：在线程池内驱动 LangGraph4j 的 AsyncGenerator，每完成一个节点推送 node 事件。
-     *
+     * <p>
      * 复用同步链路的有界执行语义：整体超时、超时取消、队列满 429、失败归一。
      * 与同步链路的差别只有两点：
      * 1. 每轮节点输出都会转成精简视图推给前端；
@@ -1186,7 +1202,7 @@ public class AgentService {
 
     /**
      * 确认执行有界执行：写链路同样必须有整体超时。
-     *
+     * <p>
      * 超时不能伪装成业务失败：写步骤可能已经提交，台账会保留 RUNNING。
      * 调用方收到“执行中”后，应在台账超过 staleSeconds 后用同一 confirmationId 重试，由幂等闸门决定返回上次成功结果还是接管执行。
      */
@@ -1231,7 +1247,9 @@ public class AgentService {
         return submitTask(() -> graph.invoke(inputs, config).orElse(null), conversationId);
     }
 
-    /** 统一提交任务到专用线程池；图执行与确认执行共用同一拒绝策略。 */
+    /**
+     * 统一提交任务到专用线程池；图执行与确认执行共用同一拒绝策略。
+     */
     private Future<WorkflowState> submitTask(Supplier<WorkflowState> task,
                                              String conversationId) {
         try {
@@ -1244,7 +1262,7 @@ public class AgentService {
 
     /**
      * 等待结果；超时、取消、异常归一由 {@link BoundedCall} 统一处理。
-     *
+     * <p>
      * 翻译成图执行语义：成功完成、超时降级、中断、失败。
      */
     private WorkflowState awaitGraph(Future<WorkflowState> future, long timeoutSeconds,
@@ -1268,7 +1286,9 @@ public class AgentService {
         // TIMEOUT：已请求取消，但不保证工作线程立即停止；返回降级应答保证一问一答闭环。
         long costMs = System.currentTimeMillis() - start;
         metrics.recordGraphDuration(costMs);
-        log.warn("[agent] execution timeout after {}s, thread={}, task cancelled, return fallback answer",
+        log.warn(
+                "[agent] execution timeout after {}s, thread={}, task cancelled, return fallback " +
+                        "answer",
                 timeoutSeconds, conversationId);
         return timeoutFallback();
     }
@@ -1343,10 +1363,19 @@ public class AgentService {
     }
 
     /**
-     * 每轮准备产物：改写结果 + 生成视图 + 当前段摘要，供同步/流式共用
+     * 每轮准备产物：改写结果 + 生成视图 + 当前段摘要 + 长期记忆文本 + 用户消息 ID，
+     * 供同步/流式共用；消息 ID 用于记忆抽取幂等。
      */
     private record PreparedTurn(RewriteResult rewrite, List<Map<String, String>> history,
-                                String summary, String memory) {
+                                String summary, String memory, Long userMessageId) {
+    }
+
+    /**
+     * 一次图执行的产物：最终状态 + 本轮用户消息 ID。
+     *
+     * 消息 ID 用于记忆抽取幂等：同一轮对话只允许抽取一次，避免重投或重试重复沉淀。
+     */
+    private record PreparedInvocation(WorkflowState state, Long userMessageId) {
     }
 
     /**

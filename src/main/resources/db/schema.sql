@@ -293,3 +293,102 @@ CREATE TABLE IF NOT EXISTS quota_transaction (
 CREATE INDEX IF NOT EXISTS idx_transaction_user ON quota_transaction (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_transaction_quota ON quota_transaction (quota_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_transaction_enrollment ON quota_transaction (enrollment_id, created_at DESC);
+
+-- ============================================================
+-- 用户长期记忆（跨会话稳定偏好/事实；不是对话历史）
+-- 同一用户 + 类型 + key 唯一：同一含义反复出现时覆盖更新，不无限堆积
+-- ============================================================
+CREATE TABLE IF NOT EXISTS ai_user_memory (
+    id                     BIGSERIAL PRIMARY KEY,
+    user_id                VARCHAR(64) NOT NULL,
+    memory_type            VARCHAR(32) NOT NULL,           -- PREFERENCE / FACT / TASK_CONSTRAINT / TEMPORARY
+    memory_key             VARCHAR(64) NOT NULL,           -- 稳定短标签（如 answer_style）
+    content                TEXT        NOT NULL,           -- 一句话事实（可展示、可编辑）
+    importance             DOUBLE PRECISION NOT NULL DEFAULT 0.5, -- 0~1，召回排序用
+    confidence             DOUBLE PRECISION,               -- 模型对本条记忆的置信度（0~1）
+    status                 VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',  -- CANDIDATE（待晋升）/ ACTIVE（可召回）
+    seen_count             INT         NOT NULL DEFAULT 1, -- 同一 key 被抽取到的次数，用于候选晋升
+    valid_from             TIMESTAMPTZ NOT NULL DEFAULT now(), -- 当前内容开始生效的时间
+    source_conversation_id VARCHAR(64),                    -- 来源会话（审计/追溯用）
+    source_message_id      VARCHAR(128),                   -- 来源消息 ID，用于抽取幂等
+    source_quote           TEXT,                           -- 用户原话片段，便于纠错和审计
+    extractor_version      VARCHAR(32),                    -- 抽取规则/提示词版本，便于灰度和回滚
+    expires_at             TIMESTAMPTZ,                    -- 过期时间；NULL 表示永久
+    last_used_at           TIMESTAMPTZ,                    -- 最近一次被召回注入的时间
+    hit_count              INT         NOT NULL DEFAULT 0, -- 被召回注入次数
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uk_user_memory UNIQUE (user_id, memory_type, memory_key),
+    CONSTRAINT ck_user_memory_importance CHECK (importance >= 0 AND importance <= 1)
+);
+CREATE INDEX IF NOT EXISTS idx_user_memory_recall
+    ON ai_user_memory (user_id, importance DESC, updated_at DESC);
+-- 老库补列：CREATE TABLE IF NOT EXISTS 不会改已有表，这里显式补齐新字段
+ALTER TABLE ai_user_memory ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION;
+ALTER TABLE ai_user_memory ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE';
+ALTER TABLE ai_user_memory ADD COLUMN IF NOT EXISTS seen_count INT NOT NULL DEFAULT 1;
+ALTER TABLE ai_user_memory ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE ai_user_memory ADD COLUMN IF NOT EXISTS source_message_id VARCHAR(128);
+ALTER TABLE ai_user_memory ADD COLUMN IF NOT EXISTS source_quote TEXT;
+ALTER TABLE ai_user_memory ADD COLUMN IF NOT EXISTS extractor_version VARCHAR(32);
+CREATE INDEX IF NOT EXISTS idx_user_memory_active_recall
+    ON ai_user_memory (user_id, status, importance DESC, updated_at DESC);
+
+-- ============================================================
+-- 记忆变更历史：主表保持一 key 一行，旧内容写到这里，避免历史行破坏唯一约束
+-- ============================================================
+CREATE TABLE IF NOT EXISTS ai_user_memory_history (
+    id          BIGSERIAL PRIMARY KEY,
+    memory_id   BIGINT      NOT NULL,
+    user_id     VARCHAR(64) NOT NULL,
+    memory_type VARCHAR(32) NOT NULL,
+    memory_key  VARCHAR(64) NOT NULL,
+    old_content TEXT        NOT NULL,
+    new_content TEXT        NOT NULL,
+    change_source VARCHAR(16) NOT NULL, -- EXTRACT / MANUAL
+    changed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_user_memory_history_memory
+    ON ai_user_memory_history (memory_id, changed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_user_memory_history_user
+    ON ai_user_memory_history (user_id, changed_at DESC);
+
+-- ============================================================
+-- 记忆抽取任务：同一 message_id 只抽取一次，避免重投/重试重复沉淀
+-- ============================================================
+CREATE TABLE IF NOT EXISTS ai_memory_extract_task (
+    message_id     VARCHAR(128) PRIMARY KEY,
+    user_id        VARCHAR(64) NOT NULL,
+    conversation_id VARCHAR(64) NOT NULL,
+    status         VARCHAR(16) NOT NULL DEFAULT 'RUNNING', -- RUNNING / DONE / FAILED
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================
+-- 多步写运行台账（一次确认 = 一个 run）
+-- run_id 即 confirmationId：确认令牌只保存短期授权，执行事实以本表 + ai_tool_execution 为准
+-- ============================================================
+CREATE TABLE IF NOT EXISTS ai_task_run (
+    run_id          VARCHAR(64) PRIMARY KEY,
+    user_id         VARCHAR(64) NOT NULL,
+    conversation_id VARCHAR(64) NOT NULL,
+    status          VARCHAR(16) NOT NULL,              -- PENDING / RUNNING / SUCCEEDED
+                                                       -- PARTIAL_FAILED（部分步成功）/ FAILED / CANCELLED
+    current_step    INT         NOT NULL DEFAULT 0,    -- 已完成到最后一步的序号；失败时为失败步
+    total_steps     INT         NOT NULL DEFAULT 1,
+    plan_json       TEXT        NOT NULL,              -- 计划快照（工具 + 参数），用于重放与审计
+    result          TEXT,                              -- 成功汇总（重放时原样返回）
+    error_code      VARCHAR(64),
+    error_message   TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_run_conversation
+    ON ai_task_run (conversation_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_run_status ON ai_task_run (status, updated_at);
+
+-- 执行台账补多步归属：run_id 指向 ai_task_run，step_no 从 1 开始
+ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS run_id VARCHAR(64);
+ALTER TABLE ai_tool_execution ADD COLUMN IF NOT EXISTS step_no INT;
+CREATE INDEX IF NOT EXISTS idx_tool_execution_run ON ai_tool_execution (run_id, step_no);

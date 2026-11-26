@@ -12,6 +12,9 @@ public record MemoryDto(Long id,
                         String memoryKey,
                         String content,
                         Double importance,
+                        Double confidence,
+                        String status,
+                        Integer seenCount,
                         String sourceConversationId,
                         OffsetDateTime expiresAt,
                         OffsetDateTime createdAt,
@@ -20,7 +23,8 @@ public record MemoryDto(Long id,
     /** 实体转对外视图。 */
     public static MemoryDto of(UserMemory memory) {
         return new MemoryDto(memory.getId(), memory.getMemoryType(), memory.getMemoryKey(),
-                memory.getContent(), memory.getImportance(), memory.getSourceConversationId(),
+                memory.getContent(), memory.getImportance(), memory.getConfidence(),
+                memory.getStatus(), memory.getSeenCount(), memory.getSourceConversationId(),
                 memory.getExpiresAt(), memory.getCreatedAt(), memory.getUpdatedAt());
     }
 }

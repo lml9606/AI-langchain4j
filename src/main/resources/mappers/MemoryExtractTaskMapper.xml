@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.memory.MemoryExtractTaskMapper">
+
+    <insert id="insertIfAbsent">
+        INSERT INTO ai_memory_extract_task (message_id, user_id, conversation_id, status)
+        VALUES (#{messageId}, #{userId}, #{conversationId}, 'RUNNING')
+        ON CONFLICT (message_id) DO NOTHING
+    </insert>
+
+    <update id="markStatus">
+        UPDATE ai_memory_extract_task
+        SET status = #{status},
+            updated_at = now()
+        WHERE message_id = #{messageId}
+    </update>
+
+</mapper>

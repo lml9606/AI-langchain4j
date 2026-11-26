@@ -10,7 +10,14 @@
         <result property="memoryKey" column="memory_key"/>
         <result property="content" column="content"/>
         <result property="importance" column="importance"/>
+        <result property="confidence" column="confidence"/>
+        <result property="status" column="status"/>
+        <result property="seenCount" column="seen_count"/>
+        <result property="validFrom" column="valid_from"/>
         <result property="sourceConversationId" column="source_conversation_id"/>
+        <result property="sourceMessageId" column="source_message_id"/>
+        <result property="sourceQuote" column="source_quote"/>
+        <result property="extractorVersion" column="extractor_version"/>
         <result property="expiresAt" column="expires_at"/>
         <result property="lastUsedAt" column="last_used_at"/>
         <result property="hitCount" column="hit_count"/>
@@ -18,26 +25,51 @@
         <result property="updatedAt" column="updated_at"/>
     </resultMap>
 
-    <!-- 同一用户 + 类型 + key 唯一：重复抽取只更新内容，重要度取历史最大值 -->
+    <!--
+      同一用户 + 类型 + key 唯一：重复抽取只更新内容，重要度取历史最大值。
+      status 只升不降：已有 ACTIVE 不会被新的 CANDIDATE 覆盖；CANDIDATE → ACTIVE 时刷新 valid_from。
+      seen_count 每次命中 +1，作为“重复出现即晋升”的依据。
+    -->
     <insert id="upsert" parameterType="com.example.langchain4j.memory.UserMemory">
         INSERT INTO ai_user_memory
-            (user_id, memory_type, memory_key, content, importance, source_conversation_id, expires_at)
+            (user_id, memory_type, memory_key, content, importance, confidence, status,
+             seen_count, valid_from, source_conversation_id, source_message_id, source_quote,
+             extractor_version, expires_at)
         VALUES
             (#{userId}, #{memoryType}, #{memoryKey}, #{content}, #{importance},
-             #{sourceConversationId}, #{expiresAt})
+             #{confidence}, #{status}, 1, #{validFrom}, #{sourceConversationId},
+             #{sourceMessageId}, #{sourceQuote}, #{extractorVersion}, #{expiresAt})
         ON CONFLICT (user_id, memory_type, memory_key) DO UPDATE SET
             content = EXCLUDED.content,
             importance = GREATEST(ai_user_memory.importance, EXCLUDED.importance),
+            confidence = COALESCE(EXCLUDED.confidence, ai_user_memory.confidence),
+            status = CASE
+                         WHEN ai_user_memory.status = 'ACTIVE' THEN 'ACTIVE'
+                         ELSE EXCLUDED.status
+                     END,
+            valid_from = CASE
+                             WHEN ai_user_memory.content IS DISTINCT FROM EXCLUDED.content
+                                 THEN now()
+                             ELSE ai_user_memory.valid_from
+                         END,
+            seen_count = ai_user_memory.seen_count + 1,
             source_conversation_id = EXCLUDED.source_conversation_id,
+            source_message_id = EXCLUDED.source_message_id,
+            source_quote = EXCLUDED.source_quote,
+            extractor_version = EXCLUDED.extractor_version,
             expires_at = EXCLUDED.expires_at,
             updated_at = now()
     </insert>
 
+    <!-- 召回只取生效且非临时的记忆；临时事实保留在库里，但不参与常规注入。 -->
     <select id="selectTop" resultMap="UserMemoryMap">
-        SELECT id, user_id, memory_type, memory_key, content, importance,
-               source_conversation_id, expires_at, last_used_at, hit_count, created_at, updated_at
+        SELECT id, user_id, memory_type, memory_key, content, importance, confidence, status,
+               seen_count, valid_from, source_conversation_id, source_message_id, source_quote,
+               extractor_version, expires_at, last_used_at, hit_count, created_at, updated_at
         FROM ai_user_memory
         WHERE user_id = #{userId}
+          AND status = 'ACTIVE'
+          AND memory_type != 'TEMPORARY'
           AND importance &gt;= #{minImportance}
           AND (expires_at IS NULL OR expires_at &gt; now())
         ORDER BY importance DESC, updated_at DESC
@@ -45,8 +77,9 @@
     </select>
 
     <select id="selectByUser" resultMap="UserMemoryMap">
-        SELECT id, user_id, memory_type, memory_key, content, importance,
-               source_conversation_id, expires_at, last_used_at, hit_count, created_at, updated_at
+        SELECT id, user_id, memory_type, memory_key, content, importance, confidence, status,
+               seen_count, valid_from, source_conversation_id, source_message_id, source_quote,
+               extractor_version, expires_at, last_used_at, hit_count, created_at, updated_at
         FROM ai_user_memory
         WHERE user_id = #{userId}
         ORDER BY updated_at DESC
@@ -54,13 +87,69 @@
     </select>
 
     <select id="selectByKey" resultMap="UserMemoryMap">
-        SELECT id, user_id, memory_type, memory_key, content, importance,
-               source_conversation_id, expires_at, last_used_at, hit_count, created_at, updated_at
+        SELECT id, user_id, memory_type, memory_key, content, importance, confidence, status,
+               seen_count, valid_from, source_conversation_id, source_message_id, source_quote,
+               extractor_version, expires_at, last_used_at, hit_count, created_at, updated_at
         FROM ai_user_memory
         WHERE user_id = #{userId}
           AND memory_type = #{memoryType}
           AND memory_key = #{memoryKey}
     </select>
+
+    <select id="selectByKeyForUpdate" resultMap="UserMemoryMap">
+        SELECT id, user_id, memory_type, memory_key, content, importance, confidence, status,
+               seen_count, valid_from, source_conversation_id, source_message_id, source_quote,
+               extractor_version, expires_at, last_used_at, hit_count, created_at, updated_at
+        FROM ai_user_memory
+        WHERE user_id = #{userId}
+          AND memory_type = #{memoryType}
+          AND memory_key = #{memoryKey}
+        FOR UPDATE
+    </select>
+
+    <select id="selectById" resultMap="UserMemoryMap">
+        SELECT id, user_id, memory_type, memory_key, content, importance, confidence, status,
+               seen_count, valid_from, source_conversation_id, source_message_id, source_quote,
+               extractor_version, expires_at, last_used_at, hit_count, created_at, updated_at
+        FROM ai_user_memory
+        WHERE user_id = #{userId}
+          AND id = #{id}
+    </select>
+
+    <select id="selectByIdForUpdate" resultMap="UserMemoryMap">
+        SELECT id, user_id, memory_type, memory_key, content, importance, confidence, status,
+               seen_count, valid_from, source_conversation_id, source_message_id, source_quote,
+               extractor_version, expires_at, last_used_at, hit_count, created_at, updated_at
+        FROM ai_user_memory
+        WHERE user_id = #{userId}
+          AND id = #{id}
+        FOR UPDATE
+    </select>
+
+    <select id="selectRecentByType" resultMap="UserMemoryMap">
+        SELECT id, user_id, memory_type, memory_key, content, importance, confidence, status,
+               seen_count, valid_from, source_conversation_id, source_message_id, source_quote,
+               extractor_version, expires_at, last_used_at, hit_count, created_at, updated_at
+        FROM ai_user_memory
+        WHERE user_id = #{userId}
+          AND memory_type = #{memoryType}
+          AND status IN ('ACTIVE', 'CANDIDATE')
+          AND (expires_at IS NULL OR expires_at &gt; now())
+        ORDER BY updated_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 手动修改允许降低重要度，因此不复用 upsert 的 GREATEST 规则。 -->
+    <update id="updateContent">
+        UPDATE ai_user_memory
+        SET content = #{content},
+            importance = #{importance},
+            valid_from = CASE WHEN status = 'CANDIDATE' THEN now() ELSE valid_from END,
+            status = 'ACTIVE',
+            updated_at = now()
+        WHERE id = #{id}
+          AND user_id = #{userId}
+    </update>
 
     <delete id="deleteById">
         DELETE FROM ai_user_memory

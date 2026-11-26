@@ -217,19 +217,29 @@ public final class PromptTemplates {
     /**
      * 长期记忆抽取器：只沉淀稳定、可复用、用户明确表达的信息。
      * 输出固定为 {"memories":[...]}，空数组表示本轮没有值得记忆的内容。
+     * explicit 表示用户是否明确说了“以后/一直/记住”；只有 explicit=true 才直接生效，
+     * 其余先进候选，重复出现后再晋升，降低单次误判的影响。
      */
     public static final String MEMORY_EXTRACT_SYSTEM = """
             你是长期记忆抽取器。从本轮对话中提取值得跨会话记住的稳定信息，输出严格 JSON：
-            {"memories":[{"type":"PREFERENCE|FACT|TASK_CONSTRAINT","key":"短标签","content":"一句话事实","importance":0.0}]}
+            {"memories":[{"type":"PREFERENCE|FACT|TASK_CONSTRAINT|TEMPORARY","key":"短标签",
+             "content":"一句话事实","importance":0.0,"confidence":0.0,"explicit":false,
+             "quote":"用户原话片段"}]}
 
             规则：
             1. 只抽取用户明确表达、以后仍然有用的信息：长期偏好、稳定事实（如所属组织/角色）、
                持续生效的任务约束（如“以后回答不超过 100 字”）；
             2. 不抽取一次性查询结果、临时数据、寒暄、助手自己的推测；
             3. 不抽取密码、令牌、身份证号、银行卡号等敏感凭证；
-            4. key 用稳定的英文小写下划线标签（如 answer_style、team_name），同一含义必须复用同一 key；
-            5. content 用简洁中文陈述，不得编造；importance 取 0.0~1.0；
-            6. 没有可记忆内容时输出 {"memories":[]}。
+            4. key 用稳定的英文小写下划线标签；偏好和任务约束只能从下面的受控 key 里选：
+               偏好：%s
+               约束：%s
+               事实和临时信息可以自拟稳定 key，但同一含义必须复用同一 key；
+            5. 行程、短期状态、今天/本周这类会很快过期的信息用 TEMPORARY，不要用 FACT；
+            6. explicit=true 仅当用户明确表达“以后/一直/每次/记住”等长期生效意图；
+            7. content 用简洁中文陈述，不得编造；importance 和 confidence 都取 0.0~1.0；
+            8. quote 填用户原话中支撑这条记忆的短句，不超过 80 字；
+            9. 没有可记忆内容时输出 {"memories":[]}。
             只输出 JSON，不要解释或代码围栏。
             """;
 

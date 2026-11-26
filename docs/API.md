@@ -30,7 +30,37 @@
 | GET | `/api/agent/conversation/{id}/messages` | 会话历史（默认 50 条，上限 200） | `?limit=50` |
 
 安全：会话归属校验（403 防水平越权）；身份以 Token 为准（服务端从 Authorization 头解析，请求体不携带用户 ID）。
-`confirm` 的 `approved=true` 表示执行、`false` 表示取消；响应 `data.business.success/errorCode/errorMessage` 表示业务动作结果。确认卡片生成时 `ai_tool_execution=PENDING`，确认后为 `RUNNING`，最终为 `SUCCEEDED/FAILED/CANCELLED`；Redis 仅保存带 TTL 的确认令牌，`ai_tool_execution` 保存写操作执行事实。`confirmationId` 同时作为单写操作幂等键，重复确认不会重复修改业务数据。
+`confirm` 的 `approved=true` 表示执行、`false` 表示取消；响应 `data.business.success/errorCode/errorMessage` 表示业务动作结果。确认卡片生成时 `ai_task_run` 与每步 `ai_tool_execution` 均为 `PENDING`，确认后为 `RUNNING`，最终为 `SUCCEEDED/FAILED/PARTIAL_FAILED/CANCELLED`；Redis 仅保存带 TTL 的确认令牌，数据库台账保存写操作执行事实。`confirmationId` 同时作为运行 ID，步骤幂等键为 `confirmationId#stepNo`，重复确认不会重复修改业务数据。
+
+多步写：`data.pendingAction.steps` 展示完整计划；执行按步骤顺序进行，任一步失败即停止。响应 `business.errorCode=PARTIAL_FAILED` 表示前面步骤已提交、从失败步骤开始重试；用户再次确认同一 `confirmationId` 时，已完成步骤幂等重放，只重试失败步骤。
+
+### 2.1 流式对话事件（`POST /api/agent/chat/stream`）
+
+响应为 `text/event-stream`，事件 `data` 均为 JSON 字符串：
+
+| 事件名 | 说明 | 主要字段 |
+|---|---|---|
+| `meta` | 本轮元信息（最先发送） | `conversationId/model/answerMode/visibility` |
+| `node` | 图节点进度（每完成一个节点发送一次） | `node/intent/taskOperation/retryCount/reactStep/fallback/handoff/done/error` |
+| `done` | 最终结果（与同步 chat 的 `data` 结构一致） | `conversationId/result/fallback/citations/confidence/pendingAction/business` |
+| `error` | 执行失败（流开始后无法再返回统一响应体） | `code/message` |
+
+另有 SSE 注释帧（`: ping`）每 15 秒保活，不触发前端业务事件。客户端断开后服务端停止继续消费节点事件并跳过半成品助手消息落库；底层图任务由整体超时与线程池收敛。
+
+### 2.2 长期记忆 `/api/agent/memories`
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/agent/memories?limit=50` | 查看自己的长期记忆（按更新时间倒序，limit 上限 200） |
+| POST | `/api/agent/memories` | 手动新增/覆盖记忆 `{memoryType, memoryKey, content, importance?}` |
+| PATCH | `/api/agent/memories/{id}` | 修改内容和重要度 `{content, importance?}`；允许调低重要度，并把候选记忆提升为生效 |
+| DELETE | `/api/agent/memories/{id}` | 删除自己的记忆；不存在或无权返回 404 |
+
+`memoryType` 只能是 `PREFERENCE`（偏好）/ `FACT`（稳定事实）/ `TASK_CONSTRAINT`（持续约束）/ `TEMPORARY`（临时事实）。同一用户 + 类型 + key 唯一：重复抽取覆盖内容，不无限堆积。响应中的 `status` 为 `CANDIDATE`（候选，不召回）或 `ACTIVE`（生效，可召回），`seenCount` 表示同一 key 被抽取到的次数。
+
+写入规则：偏好和任务约束只能使用受控 key 字典；事实和临时信息可以自拟 key，但会先做同义合并。用户明确说“以后/一直/记住”时直接生效，其余先进入候选，第二次出现自动晋升。内容变化写入 `ai_user_memory_history`，主表始终保留最新版本。不同状态和类型使用不同 TTL：候选 30 天，偏好/约束 365 天，普通事实 90 天，临时事实 7 天。
+
+召回规则：每轮只取 `ACTIVE`、未过期、非 `TEMPORARY` 且重要度达标的记忆，按“重要度 + 关键词轻量重排”取 Top N 注入生成提示词；抽取为异步任务，同一 `messageId` 只抽取一次，失败不影响对话。记忆与当前问题或工具结果冲突时，一律以当前信息为准。
 
 只读任务响应中的 `data.businessData` 是业务明细行列表（手机号等敏感字段由读节点脱敏）；`data.citations` 是可供回答引用的证据摘要，`data.toolTrace` 是节点执行轨迹。两者用途不同：前端渲染明细使用 `businessData`，回答溯源使用 `citations`。
 

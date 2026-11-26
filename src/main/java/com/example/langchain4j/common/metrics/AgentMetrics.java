@@ -24,6 +24,10 @@ import java.util.Map;
  * - llm_circuit_open{model} —— 熔断器状态（1=打开，0=关闭）；
  * - tool_calls_total{tool,outcome} —— 工具调用次数；
  * - tool_call_duration_seconds{tool} —— 工具单次调用耗时。
+ * - memory_extract_total{outcome} —— 长期记忆抽取结果（saved/skipped/failed）；
+ * - memory_extract_saved_total —— 实际入库的记忆条数；
+ * - memory_merge_total —— 同义合并命中次数；
+ * - memory_recall_total —— 召回注入的记忆条数。
  *
  * 线程池指标（队列深度/活跃线程）在 AsyncConfig 注册，此处不重复。
  */
@@ -122,6 +126,44 @@ public class AgentMetrics {
             return value;
         });
         state.set(open ? 1 : 0);
+    }
+
+    /**
+     * 记录一次记忆抽取结果。
+     *
+     * @param outcome saved / skipped / failed；skipped 只在日志里需要细分原因，
+     *                指标标签保持低基数，避免 reason 组合爆炸
+     */
+    public void recordMemoryExtract(String outcome) {
+        registry.counter("memory.extract.total",
+                        "outcome", safeLabel(outcome),
+                        "description", "长期记忆抽取结果")
+                .increment();
+    }
+
+    /** 实际写入/更新的记忆条数；用于观察抽取产出是否异常。 */
+    public void recordMemoryExtractSaved(int count) {
+        if (count > 0) {
+            registry.counter("memory.extract.saved.total",
+                            "description", "长期记忆实际入库条数")
+                    .increment(count);
+        }
+    }
+
+    /** 同义合并命中 +1：说明模型给出的 key 不稳定，但被服务层合并回来了。 */
+    public void recordMemoryMerge() {
+        registry.counter("memory.merge.total",
+                        "description", "长期记忆同义合并命中次数")
+                .increment();
+    }
+
+    /** 本轮召回注入的记忆条数。 */
+    public void recordMemoryRecall(int count) {
+        if (count > 0) {
+            registry.counter("memory.recall.total",
+                            "description", "长期记忆召回注入条数")
+                    .increment(count);
+        }
     }
 
     /** 标签值兜底：空值/异常字符统一替换，防止指标注册异常 */

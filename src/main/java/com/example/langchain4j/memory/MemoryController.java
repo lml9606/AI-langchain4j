@@ -6,9 +6,11 @@ import com.example.langchain4j.common.exception.ErrorCode;
 import com.example.langchain4j.common.response.ApiResponse;
 import com.example.langchain4j.memory.dto.MemoryCreateRequest;
 import com.example.langchain4j.memory.dto.MemoryDto;
+import com.example.langchain4j.memory.dto.MemoryUpdateRequest;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -63,6 +65,27 @@ public class MemoryController {
         double importance = request.importance() == null ? 0.8 : request.importance();
         UserMemory memory = userMemoryService.remember(userId, request.memoryType(),
                 request.memoryKey(), request.content(), importance, null);
+        return ApiResponse.success(MemoryDto.of(memory));
+    }
+
+    /**
+     * 手动修改自己的一条记忆。
+     *
+     * 与 POST 的区别：这里可以调整重要度（允许调低），也可以把候选记忆直接提升为生效。
+     *
+     * @param id      记忆 ID
+     * @param request 新内容与重要度（importance 为空时按 0.8 处理）
+     * @return 修改后的记录；不存在或不属于当前用户返回 404
+     */
+    @PatchMapping("/{id}")
+    public ApiResponse<MemoryDto> update(@PathVariable Long id,
+                                         @Valid @RequestBody MemoryUpdateRequest request) {
+        String userId = UserContext.require();
+        UserMemory memory = userMemoryService.update(userId, id, request.content(),
+                request.importance());
+        if (memory == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "记忆不存在或无权操作");
+        }
         return ApiResponse.success(MemoryDto.of(memory));
     }
 

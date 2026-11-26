@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.langchain4j.memory.UserMemoryHistoryMapper">
+
+    <!-- 只追加不修改：历史记录是审计事实，不提供更新/删除入口。 -->
+    <insert id="insert">
+        INSERT INTO ai_user_memory_history
+            (memory_id, user_id, memory_type, memory_key, old_content, new_content, change_source)
+        VALUES
+            (#{memoryId}, #{userId}, #{memoryType}, #{memoryKey},
+             #{oldContent}, #{newContent}, #{changeSource})
+    </insert>
+
+</mapper>
